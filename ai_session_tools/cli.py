@@ -41,12 +41,22 @@ def get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] =
 
 @app.command()
 def search(
-    pattern: str = typer.Option(..., "--pattern", "-p", help="File pattern (glob or regex)"),
-    min_edits: int = typer.Option(0, "--min-edits"),
-    max_edits: Optional[int] = typer.Option(None, "--max-edits"),
-    format: str = typer.Option("table", "--format", "-f"),
+    pattern: str = typer.Option("*", "--pattern", "-p", help="File pattern (glob or regex). Default: all files"),
+    min_edits: int = typer.Option(0, "--min-edits", help="Minimum number of edits. Default: 0 (no minimum)"),
+    max_edits: Optional[int] = typer.Option(None, "--max-edits", help="Maximum number of edits. Default: unlimited"),
+    format: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ):
-    """Search for files by pattern with filtering."""
+    """
+    Search and list recovered session files (*.py, *.md, etc).
+
+    This searches FILES that were recovered from Claude Code sessions,
+    not the session message data (JSONL). Use 'session-messages' for message search.
+
+    Examples:
+        ai_session_tools search --pattern "*.py"
+        ai_session_tools search --pattern "*.py" --min-edits 5
+        ai_session_tools search  # Lists all files
+    """
     engine = get_engine()
     filters = FilterSpec(min_edits=min_edits, max_edits=max_edits)
 
@@ -56,17 +66,26 @@ def search(
         console.print("[yellow]No files found[/yellow]")
         return
 
-    formatter = get_formatter(format, f"Search: {pattern}")
+    formatter = get_formatter(format, f"Recovered Files: {pattern}")
     console.print(formatter.format_many(results))
     console.print(f"\n[bold]Found {len(results)} files[/bold]")
 
 
 @app.command()
 def extract(
-    file: str = typer.Option(..., "--file", "-f", help="Filename to extract"),
-    output_dir: str = typer.Option("./recovered", "--output-dir", "-o"),
+    file: str = typer.Option(..., "--file", "-f", help="Filename to extract (e.g., session_manager.py)"),
+    output_dir: str = typer.Option("./recovered", "--output-dir", "-o", help="Output directory for extracted file. Default: ./recovered"),
 ):
-    """Extract final version of a file."""
+    """
+    Extract the final (most recent) version of a recovered file.
+
+    This recovers a single file from Claude Code session backups.
+    Use 'history' to extract all versions of a file instead.
+
+    Examples:
+        ai_session_tools extract --file session_manager.py
+        ai_session_tools extract --file config.yaml --output-dir /tmp/recovery
+    """
     engine = get_engine()
     path = engine.extract_final(file, Path(output_dir))
 
@@ -79,10 +98,19 @@ def extract(
 
 @app.command()
 def history(
-    file: str = typer.Option(..., "--file", "-f", help="Filename"),
-    output_dir: str = typer.Option("./recovered", "--output-dir", "-o"),
+    file: str = typer.Option(..., "--file", "-f", help="Filename (e.g., session_manager.py)"),
+    output_dir: str = typer.Option("./recovered", "--output-dir", "-o", help="Output directory for all versions. Default: ./recovered"),
 ):
-    """Extract version history of a file."""
+    """
+    Extract ALL versions (edit history) of a recovered file.
+
+    Shows the evolution of a file across all Claude Code sessions.
+    Each version is saved as v[N]_line_[count].txt showing version number and line count.
+
+    Examples:
+        ai_session_tools history --file session_manager.py
+        ai_session_tools history --file config.yaml --output-dir /tmp/recovery
+    """
     engine = get_engine()
     versions = engine.get_versions(file)
 
@@ -100,30 +128,24 @@ def history(
 
 
 @app.command()
-def list_files(
-    limit: int = typer.Option(20, "--limit"),
-    format: str = typer.Option("table", "--format", "-f"),
+def session_messages(
+    session_id: str = typer.Option(..., "--session", "-s", help="Session ID to query"),
+    msg_type: Optional[str] = typer.Option(None, "--type", "-t", help="Filter by message type: 'user' or 'assistant'. Default: all types"),
+    limit: int = typer.Option(10, "--limit", help="Maximum number of messages to return. Default: 10"),
 ):
-    """List all recovered files sorted by edit count."""
-    engine = get_engine()
-    results = engine.search(".*", FilterSpec())[:limit]
+    """
+    Extract messages from a Claude Code SESSION (JSONL data).
 
-    if not results:
-        console.print("[yellow]No files found[/yellow]")
-        return
+    This retrieves conversation messages from a specific session stored in JSONL format.
+    Different from 'search' which finds recovered files (*.py, *.md, etc).
 
-    formatter = get_formatter(format, "Recovered Files")
-    console.print(formatter.format_many(results))
-    console.print(f"\n[bold]Showing {len(results)} files[/bold]")
+    Use 'search-session-messages' to search across multiple sessions for text content.
 
-
-@app.command()
-def messages(
-    session_id: str = typer.Option(..., "--session", "-s", help="Session ID"),
-    msg_type: Optional[str] = typer.Option(None, "--type", "-t", help="Message type (user/assistant)"),
-    limit: int = typer.Option(10, "--limit"),
-):
-    """Extract messages from a session."""
+    Examples:
+        ai_session_tools session-messages --session abc123
+        ai_session_tools session-messages --session abc123 --type user --limit 20
+        ai_session_tools session-messages --session abc123 --type assistant
+    """
     engine = get_engine()
     messages_list = engine.get_messages(session_id, msg_type)[:limit]
 
@@ -137,11 +159,23 @@ def messages(
 
 
 @app.command()
-def search_messages(
-    query: str = typer.Option(..., "--query", "-q", help="Search query"),
-    limit: int = typer.Option(10, "--limit"),
+def search_session_messages(
+    query: str = typer.Option(..., "--query", "-q", help="Text to search for in session messages"),
+    limit: int = typer.Option(10, "--limit", help="Maximum number of results to return. Default: 10"),
 ):
-    """Search for text in session messages."""
+    """
+    Search for text WITHIN session messages across ALL SESSIONS (JSONL data).
+
+    This searches the content of conversation messages across all Claude Code sessions,
+    not filenames. Different from 'search' which finds recovered files (*.py, *.md, etc).
+
+    Use 'session-messages' to retrieve messages from a specific known session.
+
+    Examples:
+        ai_session_tools search-session-messages --query "function definition"
+        ai_session_tools search-session-messages --query "error" --limit 20
+        ai_session_tools search-session-messages --query "TODO"
+    """
     engine = get_engine()
     messages_list = engine.search_messages(query)[:limit]
 
@@ -156,7 +190,18 @@ def search_messages(
 
 @app.command()
 def stats():
-    """Show recovery statistics."""
+    """
+    Show recovery statistics and summary.
+
+    Displays overall statistics about recovered files and sessions:
+    - Total sessions: unique Claude Code sessions found
+    - Total files: unique recovered files
+    - Total versions: total edits across all files
+    - Largest file: file with most edits
+
+    Examples:
+        ai_session_tools stats
+    """
     engine = get_engine()
     stats = engine.get_statistics()
 
