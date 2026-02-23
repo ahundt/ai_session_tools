@@ -13,13 +13,13 @@ Modern Python library for analyzing and extracting data from Claude Code session
 ## Installation
 
 ```bash
-pip install ai-session-tools
+pip install ai_session_tools
 ```
 
 Or with development dependencies:
 
 ```bash
-pip install ai-session-tools[dev]
+pip install "ai_session_tools[dev]"
 ```
 
 ## Quick Start
@@ -28,16 +28,16 @@ pip install ai-session-tools[dev]
 
 ```bash
 # Search for files by pattern
-ai-session-tools search --pattern "*.py"
+ai_session_tools search --pattern "*.py"
 
 # Extract file history
-ai-session-tools history --file myfile.py
+ai_session_tools history --file myfile.py
 
 # View session statistics
-ai-session-tools stats
+ai_session_tools stats
 
 # Extract messages from a session
-ai-session-tools messages --session <session-id>
+ai_session_tools messages --session <session-id>
 ```
 
 ### As Library
@@ -104,7 +104,7 @@ uv run ruff check ai_session_tools/
 uv run ruff format ai_session_tools/
 
 # Run CLI
-uv run ai-session-tools --help
+uv run ai_session_tools --help
 ```
 
 ## License

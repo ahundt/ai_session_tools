@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ai-session-tools"
+name = "ai_session_tools"
 version = "1.0.0"
 description = "Modern Python library for analyzing Claude Code session data"
 readme = "README.md"
@@ -44,13 +44,13 @@ dev = [
 ]
 
 [project.scripts]
-ai-session-tools = "ai_session_tools.cli:cli_main"
+ai_session_tools = "ai_session_tools.cli:cli_main"
 
 [project.urls]
-Homepage = "https://github.com/anthropics/ai-session-tools"
-Documentation = "https://github.com/anthropics/ai-session-tools/blob/main/README.md"
-Repository = "https://github.com/anthropics/ai-session-tools"
-Issues = "https://github.com/anthropics/ai-session-tools/issues"
+Homepage = "https://github.com/anthropics/ai_session_tools"
+Documentation = "https://github.com/anthropics/ai_session_tools/blob/main/README.md"
+Repository = "https://github.com/anthropics/ai_session_tools"
+Issues = "https://github.com/anthropics/ai_session_tools/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ai_session_tools"]
