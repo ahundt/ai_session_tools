@@ -18,12 +18,15 @@ class SearchFilter:
         self._predicates: List[Callable[[RecoveredFile], bool]] = []
 
     def by_edits(self, min_edits: int = 0, max_edits: Optional[int] = None) -> "SearchFilter":
-        """Filter by edit count range."""
+        """Filter by edit count range.
+
+        max_edits=0 means "only files with zero edits" (not unlimited).
+        """
 
         def predicate(f: RecoveredFile) -> bool:
             if f.edits < min_edits:
                 return False
-            if max_edits and f.edits > max_edits:
+            if max_edits is not None and f.edits > max_edits:
                 return False
             return True
 
@@ -58,12 +61,15 @@ class SearchFilter:
         return self
 
     def by_size(self, min_size: int = 0, max_size: Optional[int] = None) -> "SearchFilter":
-        """Filter by file size."""
+        """Filter by file size in bytes.
+
+        max_size=0 means "only empty files" (not unlimited).
+        """
 
         def predicate(f: RecoveredFile) -> bool:
             if f.size_bytes < min_size:
                 return False
-            if max_size and f.size_bytes > max_size:
+            if max_size is not None and f.size_bytes > max_size:
                 return False
             return True
 

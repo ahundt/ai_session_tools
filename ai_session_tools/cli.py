@@ -63,7 +63,8 @@ def get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] =
         projects_dir = os.getenv("AI_SESSION_TOOLS_PROJECTS", str(Path.home() / ".claude" / "projects"))
     if recovery_dir is None:
         recovery_dir = os.getenv("AI_SESSION_TOOLS_RECOVERY", str(Path.home() / ".claude" / "recovery"))
-    return SessionRecoveryEngine(Path(projects_dir), Path(recovery_dir))
+    # expanduser() so that env var values like "~/.claude/projects" work correctly
+    return SessionRecoveryEngine(Path(projects_dir).expanduser(), Path(recovery_dir).expanduser())
 
 
 # ── Shared helper functions (business logic lives here, not in CLI funcs) ─────
@@ -129,7 +130,7 @@ def _do_messages_search(
 
 def _do_extract(engine: SessionRecoveryEngine, name: str, output_dir: str) -> None:
     """Extract final version of a file."""
-    path = engine.extract_final(name, Path(output_dir))
+    path = engine.extract_final(name, Path(output_dir).expanduser())
     if path:
         console.print(f"[green]Extracted:[/green] {path}")
     else:
@@ -144,7 +145,7 @@ def _do_history(engine: SessionRecoveryEngine, name: str, output_dir: str) -> No
         console.print(f"[yellow]No versions found for: {name}[/yellow]")
         return
 
-    paths = engine.extract_all(name, Path(output_dir))
+    paths = engine.extract_all(name, Path(output_dir).expanduser())
     if paths:
         console.print(f"[green]Extracted {len(paths)} versions to:[/green] {output_dir}")
     else:

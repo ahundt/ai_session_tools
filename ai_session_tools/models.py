@@ -127,7 +127,24 @@ class SessionMessage:
 
 @dataclass
 class SessionMetadata:
-    """Rich metadata from session JSONL."""
+    """Rich metadata for one record from a Claude Code session JSONL file.
+
+    This is a user-side model: instantiate it yourself when parsing JSONL directly.
+    The SessionRecoveryEngine does not produce SessionMetadata — use it when you want
+    richer per-message metadata than SessionMessage provides.
+
+    Example::
+
+        with open(jsonl_file) as f:
+            for line in f:
+                data = json.loads(line)
+                meta = SessionMetadata(
+                    session_id=data["sessionId"],
+                    timestamp=data.get("timestamp", ""),
+                    message_type=data.get("type", ""),
+                    tool_name=data.get("message", {}).get("tool_name"),
+                )
+    """
 
     session_id: str
     timestamp: str
@@ -138,13 +155,17 @@ class SessionMetadata:
 
     @property
     def has_file_operation(self) -> bool:
-        """Check if this is a file operation."""
+        """Return True if this record is a Write, Edit, or Read tool call."""
         return self.tool_name in ("Write", "Edit", "Read")
 
 
 @dataclass
 class FilterSpec:
-    """Advanced filter specification (immutable builder pattern)."""
+    """Advanced filter specification (mutable builder pattern).
+
+    Construct with field kwargs, then optionally call with_*() builder methods to
+    further narrow filters.  Builder methods mutate self and return self for chaining.
+    """
 
     # File patterns
     file_patterns: List[str] = field(default_factory=lambda: ["*"])
@@ -219,18 +240,24 @@ class FilterSpec:
         return True
 
     def matches_edits(self, edit_count: int) -> bool:
-        """Check if edit count matches filter."""
+        """Check if edit count matches filter.
+
+        Uses 'is not None' so max_edits=0 correctly excludes all files with any edits.
+        """
         if edit_count < self.min_edits:
             return False
-        if self.max_edits and edit_count > self.max_edits:
+        if self.max_edits is not None and edit_count > self.max_edits:
             return False
         return True
 
     def matches_size(self, size_bytes: int) -> bool:
-        """Check if size matches filter."""
+        """Check if size matches filter.
+
+        Uses 'is not None' so max_size=0 correctly excludes all non-empty files.
+        """
         if size_bytes < self.min_size:
             return False
-        if self.max_size and size_bytes > self.max_size:
+        if self.max_size is not None and size_bytes > self.max_size:
             return False
         return True
 
@@ -267,10 +294,15 @@ class FilterSpec:
         return self
 
     def with_sessions(self, include: Optional[Set[str]] = None, exclude: Optional[Set[str]] = None) -> "FilterSpec":
-        """Builder: set session filtering."""
-        if include:
+        """Builder: set session filtering.
+
+        Args:
+            include: Session IDs to include. Pass an empty set to clear any existing include filter.
+            exclude: Session IDs to exclude. Pass an empty set to clear any existing exclude filter.
+        """
+        if include is not None:
             self.include_sessions = include
-        if exclude:
+        if exclude is not None:
             self.exclude_sessions = exclude
         return self
 
@@ -278,19 +310,21 @@ class FilterSpec:
         """Builder: filter by file extensions.
 
         Args:
-            include: Set of extensions to include (e.g., {"py", "md", "json"}). None means all extensions.
-            exclude: Set of extensions to exclude (e.g., {"pyc", "tmp"}). Applied after include filter.
+            include: Extensions to include (e.g. {"py", "md"}). Pass empty set to clear.
+                     None means "leave current setting unchanged".
+            exclude: Extensions to exclude (e.g. {"pyc", "tmp"}). Applied after include.
+                     Pass empty set to clear. None means "leave current setting unchanged".
 
         Returns:
             Self for builder chaining.
 
         Examples:
-            FilterSpec().with_extensions(include={"py", "ts", "js"})  # Only Python, TypeScript, JavaScript
-            FilterSpec().with_extensions(exclude={"tmp", "bak"})  # Everything except temp/backup files
+            FilterSpec().with_extensions(include={"py", "ts", "js"})  # Only Python/TS/JS
+            FilterSpec().with_extensions(exclude={"tmp", "bak"})      # Exclude temp/backup
         """
-        if include:
+        if include is not None:
             self.include_extensions = include
-        if exclude:
+        if exclude is not None:
             self.exclude_extensions = exclude
         return self
 
@@ -309,17 +343,10 @@ class RecoveryStatistics:
 
     @property
     def avg_versions_per_file(self) -> float:
-        """Calculate average versions per file."""
+        """Average number of recorded versions per unique file."""
         if self.total_files == 0:
-            return 0
+            return 0.0
         return self.total_versions / self.total_files
-
-    @property
-    def avg_edits_per_file(self) -> float:
-        """Calculate average edits per file."""
-        if self.total_files == 0:
-            return 0
-        return self.total_versions / self.total_files  # Simplified
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""

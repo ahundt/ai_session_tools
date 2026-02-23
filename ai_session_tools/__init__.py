@@ -24,7 +24,7 @@ except Exception:
 __author__ = "Andrew Hundt"
 
 from .engine import SessionRecoveryEngine
-from .filters import LocationMatcher, MessageFilter, SearchFilter
+from .filters import ChainedFilter, LocationMatcher, MessageFilter, SearchFilter
 from .formatters import CsvFormatter, JsonFormatter, PlainFormatter, ResultFormatter, TableFormatter
 from .models import (
     FileLocation,
@@ -49,6 +49,7 @@ from .types import (
 )
 
 __all__ = [
+    "ChainedFilter",
     "ComposableFilter",
     "ComposableSearch",
     "CsvFormatter",

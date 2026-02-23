@@ -5,6 +5,8 @@ Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 """
 
+import csv
+import io
 import json
 from abc import ABC, abstractmethod
 from typing import Any, List
@@ -98,23 +100,41 @@ class JsonFormatter(ResultFormatter):
         return json.dumps([self._file_dict(item) for item in items], indent=2)
 
 
+_CSV_HEADER = ["name", "location", "type", "edits", "sessions", "size_bytes", "last_modified", "created_date"]
+
+
+def _file_to_csv_row(data: RecoveredFile) -> list:
+    return [
+        data.name,
+        data.location.value,
+        data.file_type,
+        data.edits,
+        len(data.sessions),
+        data.size_bytes,
+        data.last_modified or "",
+        data.created_date or "",
+    ]
+
+
 class CsvFormatter(ResultFormatter):
-    """Format results as CSV."""
+    """Format results as RFC 4180-compliant CSV (fields properly quoted)."""
 
     def format(self, data: RecoveredFile) -> str:
-        """Format single file."""
-        header = "name,location,type,edits,sessions,size_bytes,last_modified,created_date\n"
-        row = f'{data.name},"{data.location.value}",{data.file_type},{data.edits},{len(data.sessions)},{data.size_bytes},{data.last_modified or ""},{data.created_date or ""}\n'
-        return header + row
+        """Format single file as CSV with header."""
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(_CSV_HEADER)
+        writer.writerow(_file_to_csv_row(data))
+        return buf.getvalue()
 
     def format_many(self, items: List[RecoveredFile]) -> str:
-        """Format multiple files as CSV."""
-        lines = ["name,location,type,edits,sessions,size_bytes,last_modified,created_date"]
-
+        """Format multiple files as CSV with header."""
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(_CSV_HEADER)
         for item in items:
-            lines.append(f'{item.name},"{item.location.value}",{item.file_type},{item.edits},{len(item.sessions)},{item.size_bytes},{item.last_modified or ""},{item.created_date or ""}')
-
-        return "\n".join(lines)
+            writer.writerow(_file_to_csv_row(item))
+        return buf.getvalue()
 
 
 class MessageFormatter(ResultFormatter):

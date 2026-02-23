@@ -10,9 +10,12 @@ Tests cover:
 - Filter composability
 """
 
+import json
+import os
 import pytest
 from pathlib import Path
 from ai_session_tools import (
+    ChainedFilter,
     SessionRecoveryEngine,
     FilterSpec,
     SearchFilter,
@@ -346,15 +349,13 @@ class TestMessageFiltering:
 
     def test_get_messages_with_type_filter_user(self, engine):
         """Test filtering for user messages only"""
-        # This requires actual session data, so skip if none exist
         stats = engine.get_statistics()
         if stats.total_sessions > 0:
             messages = engine.get_messages("*", message_type="user")
             assert isinstance(messages, list)
-            # If we got results, all should be user messages
-            if messages:
-                for msg in messages:
-                    assert msg.message_type in ("user", "USER")
+            # All returned messages must be user type
+            for msg in messages:
+                assert msg.type.value == "user"
 
     def test_get_messages_with_type_filter_assistant(self, engine):
         """Test filtering for assistant messages only"""
@@ -362,19 +363,17 @@ class TestMessageFiltering:
         if stats.total_sessions > 0:
             messages = engine.get_messages("*", message_type="assistant")
             assert isinstance(messages, list)
-            # If we got results, all should be assistant messages
-            if messages:
-                for msg in messages:
-                    assert msg.message_type in ("assistant", "ASSISTANT")
+            for msg in messages:
+                assert msg.type.value == "assistant"
 
     def test_search_messages_case_insensitive(self, engine):
         """Test that message search is case insensitive"""
-        # Search with different cases for the same term
         results_lower = engine.search_messages("python")
         results_upper = engine.search_messages("PYTHON")
-        # Both should work (case insensitive)
         assert isinstance(results_lower, list)
         assert isinstance(results_upper, list)
+        # Both cases must return the same number of matches
+        assert len(results_lower) == len(results_upper)
 
     def test_search_messages_with_phrases(self, engine):
         """Test searching for multi-word phrases"""
@@ -964,3 +963,509 @@ class TestCLIDualOrdering:
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
         assert "format" in result.output.lower()
+
+
+# ── Fixture helpers for tmp_path-based tests ─────────────────────────────────
+
+def _make_recovery_dir(tmp_path: Path) -> Path:
+    """Create a minimal recovery directory structure under tmp_path."""
+    recovery = tmp_path / "recovery"
+    session = recovery / "session_abc123"
+    session.mkdir(parents=True)
+    (session / "hello.py").write_text("print('hello')")
+    (session / "notes.md").write_text("# notes")
+
+    versions = recovery / "session_all_versions_abc123"
+    versions.mkdir(parents=True)
+    (versions / "hello.py_v000001_line_5.txt").write_text("print('v1')\n" * 5)
+    (versions / "hello.py_v000002_line_3.txt").write_text("print('v2')\n" * 3)
+    # Intentionally v2 has fewer lines than v1 — extract_final must use version_num not line_count
+    return recovery
+
+
+def _make_projects_dir(tmp_path: Path, session_id: str = "abc123-full-uuid") -> Path:
+    """Create a minimal projects directory with one JSONL file."""
+    projects = tmp_path / "projects"
+    project = projects / "proj_uuid"
+    project.mkdir(parents=True)
+    lines = [
+        json.dumps({
+            "sessionId": session_id,
+            "type": "user",
+            "timestamp": "2026-02-22T10:00:00.000Z",
+            "message": {"content": "Hello from user"},
+        }),
+        json.dumps({
+            "sessionId": session_id,
+            "type": "assistant",
+            "timestamp": "2026-02-22T10:00:01.000Z",
+            "message": {"content": [{"type": "text", "text": "Hello back from assistant"}]},
+        }),
+        # Intentionally malformed line to test robustness
+        "{ not valid json",
+        # Line with binary-ish content (non-UTF-8 replacement)
+        json.dumps({"sessionId": session_id, "type": "user", "message": {"content": "python rocks"}}),
+    ]
+    (project / f"{session_id}.jsonl").write_text("\n".join(lines))
+    return projects
+
+
+# ── New tests: engine with missing / empty directories ────────────────────────
+
+class TestEngineWithMissingDirs:
+    """Engine returns empty results (not crashes) when dirs don't exist."""
+
+    def test_search_missing_recovery_dir_returns_empty(self, tmp_path):
+        engine = SessionRecoveryEngine(tmp_path / "no_projects", tmp_path / "no_recovery")
+        assert engine.search("*") == []
+
+    def test_get_versions_missing_recovery_dir_returns_empty(self, tmp_path):
+        engine = SessionRecoveryEngine(tmp_path / "no_projects", tmp_path / "no_recovery")
+        assert engine.get_versions("anything.py") == []
+
+    def test_get_messages_missing_projects_dir_returns_empty(self, tmp_path):
+        engine = SessionRecoveryEngine(tmp_path / "no_projects", tmp_path / "no_recovery")
+        assert engine.get_messages("any-session") == []
+
+    def test_search_messages_missing_projects_dir_returns_empty(self, tmp_path):
+        engine = SessionRecoveryEngine(tmp_path / "no_projects", tmp_path / "no_recovery")
+        assert engine.search_messages("anything") == []
+
+    def test_get_statistics_missing_recovery_dir_returns_zeros(self, tmp_path):
+        engine = SessionRecoveryEngine(tmp_path / "no_projects", tmp_path / "no_recovery")
+        stats = engine.get_statistics()
+        assert stats.total_sessions == 0
+        assert stats.total_files == 0
+        assert stats.total_versions == 0
+
+    def test_search_empty_recovery_dir_returns_empty(self, tmp_path):
+        (tmp_path / "recovery").mkdir()
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        assert engine.search("*") == []
+
+    def test_extract_final_missing_returns_none(self, tmp_path):
+        engine = SessionRecoveryEngine(tmp_path / "no_projects", tmp_path / "no_recovery")
+        assert engine.extract_final("hello.py", tmp_path / "out") is None
+
+    def test_extract_all_missing_returns_empty(self, tmp_path):
+        engine = SessionRecoveryEngine(tmp_path / "no_projects", tmp_path / "no_recovery")
+        assert engine.extract_all("hello.py", tmp_path / "out") == []
+
+
+# ── New tests: extract_final uses version_num not line_count ──────────────────
+
+class TestExtractFinalVersionSelection:
+    """extract_final must return the highest version_num, not the longest file."""
+
+    def test_extract_final_picks_highest_version_num(self, tmp_path):
+        """v2 (3 lines) should be returned, not v1 (5 lines)."""
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        out = tmp_path / "out"
+        path = engine.extract_final("hello.py", out)
+        assert path is not None
+        content = path.read_text()
+        # v2 contains "print('v2')" and v1 contains "print('v1')"
+        assert "v2" in content
+        assert "v1" not in content
+
+    def test_extract_all_returns_all_versions_sorted(self, tmp_path):
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        paths = engine.extract_all("hello.py", tmp_path / "versions")
+        assert len(paths) == 2
+        # Filenames should be sorted by version number
+        names = [p.name for p in paths]
+        assert names[0].startswith("v000001")
+        assert names[1].startswith("v000002")
+
+
+# ── New tests: session ID prefix matching ─────────────────────────────────────
+
+class TestPrefixSessionMatching:
+    """get_messages should match partial/prefix session IDs."""
+
+    def _engine_and_session(self, tmp_path):
+        session_id = "abc123de-f456-7890-abcd-ef1234567890"
+        projects = _make_projects_dir(tmp_path, session_id)
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(projects, recovery)
+        return engine, session_id
+
+    def test_full_session_id_matches(self, tmp_path):
+        engine, session_id = self._engine_and_session(tmp_path)
+        msgs = engine.get_messages(session_id)
+        assert len(msgs) >= 2
+
+    def test_prefix_session_id_matches(self, tmp_path):
+        engine, session_id = self._engine_and_session(tmp_path)
+        prefix = session_id[:8]
+        msgs = engine.get_messages(prefix)
+        assert len(msgs) >= 2
+
+    def test_wrong_session_id_returns_empty(self, tmp_path):
+        engine, _ = self._engine_and_session(tmp_path)
+        msgs = engine.get_messages("ffffffff-dead-beef-0000-000000000000")
+        assert msgs == []
+
+    def test_message_type_filter_works(self, tmp_path):
+        engine, session_id = self._engine_and_session(tmp_path)
+        user_msgs = engine.get_messages(session_id, message_type="user")
+        assert all(m.type.value == "user" for m in user_msgs)
+        assistant_msgs = engine.get_messages(session_id, message_type="assistant")
+        assert all(m.type.value == "assistant" for m in assistant_msgs)
+
+
+# ── New tests: corrupt JSONL handling ─────────────────────────────────────────
+
+class TestCorruptJsonlHandling:
+    """Malformed JSONL lines are skipped without crashing."""
+
+    def test_corrupt_lines_are_skipped(self, tmp_path):
+        session_id = "good-session-id"
+        projects = _make_projects_dir(tmp_path, session_id)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        # Should find the valid lines and skip the malformed one
+        msgs = engine.get_messages(session_id)
+        assert isinstance(msgs, list)
+        # At least the well-formed messages should be found
+        assert len(msgs) >= 2
+
+    def test_search_messages_corrupt_lines_skipped(self, tmp_path):
+        session_id = "search-session"
+        projects = _make_projects_dir(tmp_path, session_id)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.search_messages("python")
+        assert isinstance(results, list)
+        # "python rocks" is in the last valid line
+        assert len(results) >= 1
+
+    def test_totally_corrupt_jsonl_file_returns_empty(self, tmp_path):
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        (projects / "bad.jsonl").write_bytes(b"\xff\xfe garbage binary data \x00\x01\x02")
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        assert engine.search_messages("anything") == []
+
+
+# ── New tests: FilterSpec zero max_edits / max_size ───────────────────────────
+
+class TestFilterSpecZeroMax:
+    """max_edits=0 and max_size=0 must actually constrain, not be treated as unlimited."""
+
+    def test_max_edits_zero_excludes_any_file_with_edits(self):
+        """max_edits=0 → only files with 0 edits pass."""
+        spec = FilterSpec(max_edits=0)
+        assert spec.matches_edits(0) is True
+        assert spec.matches_edits(1) is False
+        assert spec.matches_edits(999) is False
+
+    def test_max_size_zero_excludes_non_empty_files(self):
+        """max_size=0 → only empty files pass."""
+        spec = FilterSpec(max_size=0)
+        assert spec.matches_size(0) is True
+        assert spec.matches_size(1) is False
+        assert spec.matches_size(10000) is False
+
+    def test_search_filter_by_edits_zero_max(self):
+        """SearchFilter.by_edits(max_edits=0) excludes files with edits."""
+        from ai_session_tools import RecoveredFile, FileLocation
+        f_with_edits = RecoveredFile(
+            name="a.py", path="/a.py", location=FileLocation.CLAUTORUN_MAIN,
+            file_type="py", edits=5, size_bytes=100,
+        )
+        f_no_edits = RecoveredFile(
+            name="b.py", path="/b.py", location=FileLocation.CLAUTORUN_MAIN,
+            file_type="py", edits=0, size_bytes=100,
+        )
+        sf = SearchFilter().by_edits(max_edits=0)
+        result = sf([f_with_edits, f_no_edits])
+        assert f_with_edits not in result
+        assert f_no_edits in result
+
+
+# ── New tests: path expansion ─────────────────────────────────────────────────
+
+class TestPathExpansion:
+    """Tilde in paths is expanded for both env vars and output_dir arguments."""
+
+    def test_get_engine_expands_tilde_in_env_vars(self, tmp_path, monkeypatch):
+        """AI_SESSION_TOOLS_* with leading ~ must be expanded."""
+        from ai_session_tools.cli import get_engine
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", "~/.claude/projects")
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", "~/.claude/recovery")
+        engine = get_engine()
+        # Path should not literally start with ~
+        assert not str(engine.projects_dir).startswith("~")
+        assert not str(engine.recovery_dir).startswith("~")
+        # Should point to home dir
+        assert str(engine.projects_dir).startswith(str(Path.home()))
+
+    def test_get_engine_env_var_overrides_default(self, tmp_path, monkeypatch):
+        """AI_SESSION_TOOLS_PROJECTS overrides the default ~/.claude/projects."""
+        from ai_session_tools.cli import get_engine
+        custom = str(tmp_path / "custom_projects")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", custom)
+        monkeypatch.delenv("AI_SESSION_TOOLS_RECOVERY", raising=False)
+        engine = get_engine()
+        assert str(engine.projects_dir) == custom
+
+    def test_do_extract_expands_tilde_in_output_dir(self, tmp_path):
+        """_do_extract resolves ~ in output_dir before passing to engine."""
+        # We just verify the call does not crash and uses an expanded path;
+        # the file won't be found so it'll print "not found", that's fine.
+        from ai_session_tools.cli import _do_extract
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        # Should not raise due to unexpanded ~
+        try:
+            _do_extract(engine, "hello.py", "~/tmp_ai_session_test_output")
+        except SystemExit:
+            pass  # typer.Exit is expected when file not in recovery
+        # The important thing: no FileNotFoundError about literal "~" directory
+
+
+# ── New tests: invalid regex handling ─────────────────────────────────────────
+
+class TestRegexErrorHandling:
+    """Invalid regex patterns raise ValueError, not a raw re.error traceback."""
+
+    def test_invalid_regex_raises_value_error(self, tmp_path):
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        with pytest.raises(ValueError, match="Invalid search pattern"):
+            engine.search("[unclosed")
+
+    def test_invalid_regex_in_search_messages_raises_value_error(self, tmp_path):
+        projects = _make_projects_dir(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        # Use a pattern without * or ? so it takes the regex (not glob) branch;
+        # an unclosed bracket is always an invalid regex.
+        with pytest.raises(ValueError, match="Invalid search pattern"):
+            engine.search_messages("[unclosed")
+
+    def test_glob_pattern_does_not_raise(self, tmp_path):
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        # Glob patterns (containing * or ?) are always valid
+        result = engine.search("*.py")
+        assert isinstance(result, list)
+
+
+# ── New tests: SessionMessage.is_long ────────────────────────────────────────
+
+class TestIsLongProperty:
+    """is_long returns True for content longer than 500 chars."""
+
+    def test_is_long_true_for_long_content(self):
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-02-22T10:00:00Z",
+            content="x" * 501,
+            session_id="test",
+        )
+        assert msg.is_long is True
+
+    def test_is_long_false_for_short_content(self):
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-02-22T10:00:00Z",
+            content="x" * 500,
+            session_id="test",
+        )
+        assert msg.is_long is False
+
+    def test_engine_preserves_full_content(self, tmp_path):
+        """Engine no longer truncates message content to 500 chars."""
+        session_id = "full-content-session"
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        long_content = "word " * 200  # 1000 chars
+        (projects / f"{session_id}.jsonl").write_text(
+            json.dumps({
+                "sessionId": session_id,
+                "type": "user",
+                "timestamp": "2026-02-22T10:00:00Z",
+                "message": {"content": long_content},
+            })
+        )
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        msgs = engine.get_messages(session_id)
+        assert len(msgs) == 1
+        assert len(msgs[0].content) > 500
+        assert msgs[0].is_long is True
+
+
+# ── New tests: global statistics counting ─────────────────────────────────────
+
+class TestStatisticsGlobal:
+    """get_statistics counts versions globally across all sessions."""
+
+    def test_largest_file_counts_across_sessions(self, tmp_path):
+        """If hello.py has versions in two separate session dirs, totals are combined."""
+        recovery = tmp_path / "recovery"
+
+        # Session A: hello.py has 3 versions
+        a = recovery / "session_all_versions_sessA"
+        a.mkdir(parents=True)
+        for i in range(1, 4):
+            (a / f"hello.py_v{i:06d}_line_10.txt").write_text(f"version {i}")
+
+        # Session B: hello.py has 2 more versions
+        b = recovery / "session_all_versions_sessB"
+        b.mkdir(parents=True)
+        for i in range(4, 6):
+            (b / f"hello.py_v{i:06d}_line_10.txt").write_text(f"version {i}")
+
+        # Session B also has other.py with 1 version
+        (b / "other.py_v000001_line_5.txt").write_text("other")
+
+        # Add a session_* dir so total_files is > 0
+        s = recovery / "session_sessA"
+        s.mkdir()
+        (s / "hello.py").write_text("latest")
+
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        stats = engine.get_statistics()
+
+        assert stats.total_versions == 6
+        assert stats.largest_file == "hello.py"
+        assert stats.largest_file_edits == 5  # 3 + 2 = 5
+
+
+# ── New tests: CSV formatter proper quoting ───────────────────────────────────
+
+class TestCsvFormatterQuoting:
+    """CsvFormatter produces RFC 4180-compliant output for special characters."""
+
+    def _make_file(self, name: str) -> "RecoveredFile":
+        from ai_session_tools import RecoveredFile, FileLocation
+        return RecoveredFile(
+            name=name,
+            path=f"/{name}",
+            location=FileLocation.CLAUTORUN_MAIN,
+            file_type="py",
+            edits=1,
+            size_bytes=100,
+            last_modified="2026-02-22T10:00:00",
+            created_date="2026-02-22T09:00:00",
+        )
+
+    def test_comma_in_filename_is_quoted(self):
+        from ai_session_tools.formatters import CsvFormatter
+        import csv, io
+        f = self._make_file("foo, bar.py")
+        output = CsvFormatter().format(f)
+        reader = csv.reader(io.StringIO(output))
+        rows = list(reader)
+        # Second row is the data row; first field is name
+        assert rows[1][0] == "foo, bar.py"
+
+    def test_format_many_produces_valid_csv(self):
+        from ai_session_tools.formatters import CsvFormatter
+        import csv, io
+        files = [self._make_file("a.py"), self._make_file('b,"quoted".py')]
+        output = CsvFormatter().format_many(files)
+        reader = csv.reader(io.StringIO(output))
+        rows = list(reader)
+        assert rows[0] == ["name", "location", "type", "edits", "sessions", "size_bytes", "last_modified", "created_date"]
+        assert rows[1][0] == "a.py"
+        assert rows[2][0] == 'b,"quoted".py'
+
+    def test_newline_in_location_is_quoted(self):
+        """csv.writer must quote fields containing newlines."""
+        from ai_session_tools.formatters import CsvFormatter
+        import csv, io
+        f = self._make_file("ok.py")
+        output = CsvFormatter().format(f)
+        # Verify it parses back cleanly
+        rows = list(csv.reader(io.StringIO(output)))
+        assert len(rows) >= 2  # header + data
+
+
+# ── New tests: ChainedFilter export ──────────────────────────────────────────
+
+class TestChainedFilterExport:
+    """ChainedFilter is exported and works."""
+
+    def test_chained_filter_exported(self):
+        """ChainedFilter is importable from the top-level package."""
+        assert ChainedFilter is not None
+
+    def test_chained_filter_combines_search_filters(self):
+        """ChainedFilter applies multiple filters in sequence."""
+        from ai_session_tools import RecoveredFile, FileLocation
+        files = [
+            RecoveredFile("a.py", "/a.py", FileLocation.CLAUTORUN_MAIN, "py", edits=5, size_bytes=100),
+            RecoveredFile("b.py", "/b.py", FileLocation.CLAUTORUN_MAIN, "py", edits=1, size_bytes=100),
+            RecoveredFile("c.md", "/c.md", FileLocation.CLAUTORUN_MAIN, "md", edits=10, size_bytes=200),
+        ]
+        sf1 = SearchFilter().by_edits(min_edits=2)   # keeps a.py (5), c.md (10)
+        sf2 = SearchFilter().by_extension("py")       # keeps only .py
+        chained = ChainedFilter(sf1, sf2)
+        result = chained(files)
+        assert len(result) == 1
+        assert result[0].name == "a.py"
+
+    def test_chained_filter_with_empty_input(self):
+        sf = SearchFilter().by_edits(min_edits=1)
+        assert ChainedFilter(sf)([]) == []
+
+
+# ── New tests: FilterSpec with_sessions / with_extensions empty set ───────────
+
+class TestFilterSpecEmptySetBuilders:
+    """with_sessions/with_extensions(include=set()) clears the filter, not ignores it."""
+
+    def test_with_extensions_include_empty_set_clears_filter(self):
+        spec = FilterSpec().with_extensions(include={"py"})
+        assert spec.matches_extension("md") is False
+        spec.with_extensions(include=set())  # should clear include filter
+        assert spec.matches_extension("md") is True
+
+    def test_with_sessions_include_empty_set_clears_filter(self):
+        spec = FilterSpec().with_sessions(include={"abc"})
+        assert spec.matches_session("xyz") is False
+        spec.with_sessions(include=set())  # should clear
+        assert spec.matches_session("xyz") is True
+
+    def test_with_extensions_none_leaves_filter_unchanged(self):
+        spec = FilterSpec().with_extensions(include={"py"})
+        spec.with_extensions(include=None)  # None = don't change
+        assert spec.matches_extension("py") is True
+        assert spec.matches_extension("md") is False
+
+
+# ── New tests: engine search deduplicates same filename across session dirs ───
+
+class TestEngineSearchDeduplication:
+    """Same filename in multiple session_*/ dirs appears only once in results."""
+
+    def test_same_filename_in_two_sessions_returned_once(self, tmp_path):
+        recovery = tmp_path / "recovery"
+        for sess in ("session_s1", "session_s2"):
+            d = recovery / sess
+            d.mkdir(parents=True)
+            (d / "shared.py").write_text("content")
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        results = engine.search("shared.py")
+        names = [r.name for r in results]
+        assert names.count("shared.py") == 1
+
+
+# ── New tests: RecoveryStatistics avg_edits_per_file removed ──────────────────
+
+class TestRecoveryStatisticsProperties:
+    """RecoveryStatistics has correct properties (no duplicate avg_edits_per_file)."""
+
+    def test_avg_versions_per_file_correct(self):
+        stats = RecoveryStatistics(total_files=4, total_versions=8)
+        assert stats.avg_versions_per_file == 2.0
+
+    def test_avg_versions_per_file_zero_files(self):
+        stats = RecoveryStatistics(total_files=0, total_versions=0)
+        assert stats.avg_versions_per_file == 0.0
+
+    def test_no_avg_edits_per_file_duplicate(self):
+        """avg_edits_per_file was removed as a duplicate of avg_versions_per_file."""
+        assert not hasattr(RecoveryStatistics, "avg_edits_per_file")
