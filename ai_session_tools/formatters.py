@@ -69,7 +69,7 @@ class TableFormatter(ResultFormatter):
         table.add_column("Sessions", style="dim")
 
         for item in items:
-            session_str = ", ".join(s[:8] + "\u2026" for s in item.sessions[:3])
+            session_str = ", ".join(s[:8] + ("\u2026" if len(s) > 8 else "") for s in item.sessions[:3])
             if len(item.sessions) > 3:
                 session_str += f" (+{len(item.sessions) - 3})"
             table.add_row(item.name, str(item.edits), item.file_type, item.last_modified or "", item.location, session_str)

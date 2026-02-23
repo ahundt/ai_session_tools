@@ -1037,7 +1037,14 @@ def _do_messages_timeline(
     """Show chronological event timeline for a session."""
     events = engine.timeline_session(session_id, preview_chars=preview_chars)
     if not events:
-        err_console.print(f"[red]No session found matching:[/red] {session_id!r}")
+        # Distinguish "session file not found" from "session has no user/assistant events"
+        session_files = engine._find_session_files(session_id)
+        if not session_files:
+            err_console.print(f"[red]No session found matching:[/red] {session_id!r}")
+        else:
+            err_console.print(
+                f"[yellow]Session {session_id!r} exists but has no user/assistant events.[/yellow]"
+            )
         raise typer.Exit(code=1)
     _render_output(events, fmt, _TIMELINE_SPEC, "No events found")
 

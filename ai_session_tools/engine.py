@@ -8,6 +8,7 @@ Licensed under the Apache License, Version 2.0
 import datetime
 import fnmatch
 import functools
+import glob as _glob_module
 import json
 import os
 import re
@@ -390,9 +391,10 @@ class SessionRecoveryEngine:
         version_pattern = r"_v(\d+)_line_(\d+)\.txt$"
 
         for session_dir in self._version_dirs:
-            # Use raw filename in glob: glob treats '.' as a literal character,
-            # not as a special meta-character, so re.escape() must NOT be used here.
-            for version_file in session_dir.glob(f"{filename}_v*_line_*.txt"):
+            # Escape glob metacharacters ([, ], ?, *) in the filename so that
+            # filenames like "data[0].py" or "file?.py" produce valid glob patterns.
+            escaped = _glob_module.escape(filename)
+            for version_file in session_dir.glob(f"{escaped}_v*_line_*.txt"):
                 match = re.search(version_pattern, version_file.name)
                 if match:
                     version_num = int(match.group(1))
@@ -707,6 +709,11 @@ class SessionRecoveryEngine:
                     has_compact = True
                 if data.get("type") in ("user", "assistant"):
                     message_count += 1
+            # Exclude sessions with no timestamp when a date filter is active,
+            # consistent with FilterSpec.matches_datetime() which returns False for
+            # None/empty values when after or before is set.
+            if (after or before) and not ts_first:
+                continue
             if after and ts_first and ts_first < after:
                 continue
             if before and ts_first and ts_first > before:
@@ -941,7 +948,7 @@ class SessionRecoveryEngine:
                                     continue
                                 inp = item.get("input", {})
                                 fp = inp.get("file_path", "")
-                                if not fp.endswith(filename):
+                                if Path(fp).name != filename:
                                     continue
                                 # Edit uses new_string; Write uses content
                                 snippet_src = inp.get("new_string") or inp.get("content", "")
@@ -1215,7 +1222,11 @@ class SessionRecoveryEngine:
         results: List[ContextMatch] = []
 
         for _project_dir_name, jsonl_file in self._iter_all_jsonl():
-            # Buffer all messages from this file (needed for context window)
+            # Buffer ALL messages from this file (needed for context window).
+            # NOTE: message_type filter is intentionally NOT applied here — the buffer
+            # must include all adjacent messages so context windows can span different
+            # message types (e.g., context_before for a user match includes assistant msgs).
+            # The message_type filter is applied below when checking match candidates.
             all_msgs: List[SessionMessage] = []
             try:
                 with open(jsonl_file, encoding="utf-8", errors="replace") as f:
@@ -1224,8 +1235,6 @@ class SessionRecoveryEngine:
                             data = _json_loads(line)
                             msg_type_raw = data.get("type", "").lower()
                             if msg_type_raw not in ("user", "assistant", "system"):
-                                continue
-                            if message_type and msg_type_raw != message_type.lower():
                                 continue
                             if tool is not None:
                                 msg_content = data.get("message", {}).get("content", [])
@@ -1257,8 +1266,13 @@ class SessionRecoveryEngine:
             except OSError:
                 continue
 
-            # Find matches and collect context windows
+            # Find matches and collect context windows.
+            # message_type filter applied here (not in buffer loop) so context windows
+            # include chronologically adjacent messages of any type.
             for i, msg in enumerate(all_msgs):
+                msg_type_str = msg.type.value if hasattr(msg.type, "value") else str(msg.type)
+                if message_type and msg_type_str != message_type.lower():
+                    continue
                 if not pattern or pattern.search(msg.content):
                     before = all_msgs[max(0, i - context): i]
                     after = all_msgs[i + 1: i + 1 + context]
