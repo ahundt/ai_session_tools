@@ -21,12 +21,45 @@ except ImportError:
     from json import loads as _json_loads  # type: ignore[assignment]
 
 from .models import (
+    CorrectionMatch,
     FileVersion,
     FilterSpec,
     MessageType,
+    PlanningCommandCount,
     RecoveredFile,
     RecoveryStatistics,
+    SessionInfo,
     SessionMessage,
+)
+
+#: Default correction patterns: (category, [regex_keywords...])
+#: Uses \b word boundaries (matching claude_session_tools.py:103-127).
+DEFAULT_CORRECTION_PATTERNS: List[tuple] = [
+    ("regression",       [r"\byou deleted\b", r"\byou removed\b", r"\blost\b",
+                          r"\bregressed\b", r"\brollback\b", r"\brevert\b"]),
+    ("skip_step",        [r"\byou forgot\b", r"\byou missed\b", r"\byou skipped\b",
+                          r"\bdon't forget\b", r"\bmissing step\b"]),
+    ("misunderstanding", [r"\bwrong\b", r"\bincorrect\b", r"\bmistake\b",
+                          r"\bnono\b", r"\bno,\s", r"\bthat's not correct\b"]),
+    ("incomplete",       [r"\balso need\b", r"\bmust also\b", r"\bnot done\b",
+                          r"\bnot finished\b", r"\bstill need\b"]),
+]
+
+#: Default planning command regex patterns.
+#: Using \b word boundaries (matching claude_session_tools.py:130-136).
+DEFAULT_PLANNING_COMMANDS: List[str] = [
+    r"/ar:plannew\b", r"/ar:pn\b",
+    r"/ar:planrefine\b", r"/ar:pr\b",
+    r"/ar:planupdate\b", r"/ar:pu\b",
+    r"/ar:planprocess\b", r"/ar:pp\b",
+    r"/plannew\b", r"/planrefine\b", r"/planupdate\b", r"/planprocess\b",
+]
+
+#: System message patterns to filter from export
+_EXPORT_FILTER_PATTERNS = (
+    "[Request interrupted",
+    "<task-notification>",
+    "<system-reminder>",
 )
 
 
@@ -426,28 +459,43 @@ class SessionRecoveryEngine:
 
         return messages
 
-    def search_messages(self, query: str, message_type: Optional[str] = None) -> List[SessionMessage]:  # noqa: C901
+    def search_messages(  # noqa: C901
+        self,
+        query: str,
+        message_type: Optional[str] = None,
+        tool: Optional[str] = None,
+    ) -> List[SessionMessage]:
         """Search for messages across all sessions.
 
         Args:
-            query: Text or glob/regex pattern to search for in message content
-            message_type: Optional filter: 'user', 'assistant', or 'system'
+            query: Text or glob/regex pattern to search for in message content.
+                   When tool is set, matches against serialized tool input JSON.
+            message_type: Optional filter: 'user', 'assistant', or 'system'.
+                          Defaults to 'assistant' when tool is set.
+            tool: Optional tool name to filter by (e.g. 'Bash', 'Write', 'Edit').
+                  When set, searches assistant messages for tool_use blocks with
+                  this name. query is matched against the serialized tool input.
 
         Returns:
             List of matching SessionMessage objects. Empty list if projects_dir does not exist.
+            When tool is set, SessionMessage.content holds json.dumps(tool_input).
 
         Raises:
             ValueError: If query is not a valid glob or regex.
         """
-        # Compile first: raise ValueError on bad patterns before any I/O.
-        pattern = self._compile_pattern(query)
+        # tool_use only appears in assistant messages
+        if tool is not None and message_type is None:
+            message_type = "assistant"
+
+        # Allow empty query when filtering by tool (list all invocations)
+        pattern = self._compile_pattern(query) if query else None
 
         # Pre-compute literal pre-filter: only safe when query has no regex metacharacters.
-        # re.escape(query) == query iff every char is literal (no . + * ? [ ] ^ $ | etc.)
-        is_literal = re.escape(query) == query
-        query_lower = query.lower() if is_literal else None
+        is_literal = not query or re.escape(query) == query
+        query_lower = query.lower() if (is_literal and query) else None
         # Heuristic: message_type value must appear in the raw JSON line (no false negatives).
         msg_type_hint = f'"{message_type}"' if message_type else None
+        tool_lower = tool.lower() if tool else None
 
         messages: List[SessionMessage] = []
 
@@ -468,28 +516,406 @@ class SessionRecoveryEngine:
                                     continue
                                 if msg_type_hint and msg_type_hint not in line:
                                     continue
+                                # Tool pre-filter: tool name value must appear in raw line.
+                                # Use f'"{tool}"' (value-only check) — robust against both
+                                # json (space-separated) and orjson (no-space) serialization.
+                                if tool and f'"{tool}"' not in line:
+                                    continue
                                 data = _json_loads(line)
                                 msg_type = data.get("type", "").lower()
 
                                 if message_type and msg_type != message_type.lower():
                                     continue
 
-                                content = self._extract_content(data)
-                                if content and pattern.search(content):
-                                    messages.append(
-                                        SessionMessage(
-                                            type=self._parse_message_type(msg_type),
-                                            timestamp=data.get("timestamp", ""),
-                                            content=content,
-                                            session_id=data.get("sessionId", ""),
+                                if tool is not None:
+                                    # Tool filtering: scan content array DIRECTLY for tool_use blocks.
+                                    # IMPORTANT: _extract_content() only returns type=="text" blocks
+                                    # and would miss tool_use entries entirely — must NOT use it here.
+                                    msg_content = data.get("message", {}).get("content", [])
+                                    if not isinstance(msg_content, list):
+                                        continue
+                                    for item in msg_content:
+                                        if (isinstance(item, dict)
+                                                and item.get("type") == "tool_use"
+                                                and item.get("name", "").lower() == tool_lower):
+                                            # Serialize input for query matching + display
+                                            input_str = json.dumps(item.get("input", {}))
+                                            if not pattern or pattern.search(input_str):
+                                                messages.append(SessionMessage(
+                                                    type=self._parse_message_type(msg_type),
+                                                    timestamp=data.get("timestamp", ""),
+                                                    content=input_str,
+                                                    session_id=data.get("sessionId", ""),
+                                                ))
+                                                break  # one match per message line
+                                else:
+                                    # Original behavior: extract text content only
+                                    content = self._extract_content(data)
+                                    if content and (not pattern or pattern.search(content)):
+                                        messages.append(
+                                            SessionMessage(
+                                                type=self._parse_message_type(msg_type),
+                                                timestamp=data.get("timestamp", ""),
+                                                content=content,
+                                                session_id=data.get("sessionId", ""),
+                                            )
                                         )
-                                    )
                             except (json.JSONDecodeError, KeyError, ValueError):
                                 continue
                 except OSError:
                     continue
 
         return messages
+
+    def get_sessions(
+        self,
+        project_filter: Optional[str] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+    ) -> List[SessionInfo]:
+        """List all sessions with metadata, sorted newest-first.
+
+        Args:
+            project_filter: Substring to match against project_dir name. None = all projects.
+            after:  Only sessions with timestamp_first >= this (ISO prefix, e.g. "2026-01-15").
+            before: Only sessions with timestamp_first <= this (ISO prefix, e.g. "2026-12-31").
+
+        Returns:
+            List of SessionInfo, sorted by timestamp_first descending (newest first).
+        """
+        sessions: List[SessionInfo] = []
+        if not self.projects_dir.exists():
+            return sessions
+        for project_dir in self.projects_dir.glob("*"):
+            if not project_dir.is_dir():
+                continue
+            if project_filter and project_filter.lower() not in project_dir.name.lower():
+                continue
+            for jsonl_file in project_dir.glob("*.jsonl"):
+                session_id = jsonl_file.stem
+                cwd, git_branch = "", "unknown"
+                ts_first, ts_last = "", ""
+                message_count = 0
+                has_compact = False
+                try:
+                    with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            try:
+                                data = _json_loads(line)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                            ts = data.get("timestamp", "")
+                            if ts and not ts_first:
+                                ts_first = ts
+                            if ts:
+                                ts_last = ts
+                            if not cwd and data.get("cwd"):
+                                cwd = data["cwd"]
+                            if git_branch == "unknown" and data.get("gitBranch"):
+                                git_branch = data["gitBranch"]
+                            if data.get("isCompactSummary"):
+                                has_compact = True
+                            if data.get("type") in ("user", "assistant"):
+                                message_count += 1
+                except OSError:
+                    continue
+                if after and ts_first and ts_first < after:
+                    continue
+                if before and ts_first and ts_first > before:
+                    continue
+                sessions.append(SessionInfo(
+                    session_id=session_id,
+                    project_dir=project_dir.name,
+                    cwd=cwd,
+                    git_branch=git_branch,
+                    timestamp_first=ts_first,
+                    timestamp_last=ts_last,
+                    message_count=message_count,
+                    has_compact_summary=has_compact,
+                ))
+        sessions.sort(key=lambda s: s.timestamp_first, reverse=True)
+        return sessions
+
+    def find_corrections(
+        self,
+        project_filter: Optional[str] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        patterns: Optional[List[tuple]] = None,
+        limit: int = 50,
+    ) -> List[CorrectionMatch]:
+        """Find user messages where corrections were given to Claude.
+
+        Args:
+            project_filter: Substring to match project_dir. None = all projects.
+            after:    Only messages >= this timestamp (ISO prefix).
+            before:   Only messages <= this timestamp (ISO prefix).
+            patterns: Override DEFAULT_CORRECTION_PATTERNS. Each tuple is
+                      (category, [regex_keyword_strings]).
+            limit:    Max results. Default: 50.
+
+        Returns:
+            List of CorrectionMatch, sorted by timestamp descending.
+        """
+        _patterns = patterns or DEFAULT_CORRECTION_PATTERNS
+        # Pre-compile: one regex per category
+        compiled = [
+            (cat, re.compile("|".join(kws), re.IGNORECASE), kws)
+            for cat, kws in _patterns
+        ]
+        results: List[CorrectionMatch] = []
+        if not self.projects_dir.exists():
+            return results
+        for project_dir in self.projects_dir.glob("*"):
+            if not project_dir.is_dir():
+                continue
+            if project_filter and project_filter.lower() not in project_dir.name.lower():
+                continue
+            for jsonl_file in project_dir.glob("*.jsonl"):
+                try:
+                    with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            try:
+                                if '"type":"user"' not in line and '"type": "user"' not in line:
+                                    continue
+                                data = _json_loads(line)
+                                if data.get("type") != "user":
+                                    continue
+                                ts = data.get("timestamp", "")
+                                if after and ts and ts < after:
+                                    continue
+                                if before and ts and ts > before:
+                                    continue
+                                content = self._extract_content(data)
+                                if not content:
+                                    continue
+                                for cat, regex, _kws in compiled:
+                                    m = regex.search(content)
+                                    if m:
+                                        results.append(CorrectionMatch(
+                                            session_id=data.get("sessionId", ""),
+                                            project_dir=project_dir.name,
+                                            timestamp=ts,
+                                            content=content,
+                                            category=cat,
+                                            matched_pattern=m.group(0),
+                                        ))
+                                        break
+                            except (json.JSONDecodeError, KeyError, ValueError):
+                                continue
+                except OSError:
+                    continue
+        results.sort(key=lambda x: x.timestamp, reverse=True)
+        return results[:limit]
+
+    def analyze_planning_usage(
+        self,
+        commands: Optional[List[str]] = None,
+        project_filter: Optional[str] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+    ) -> List[PlanningCommandCount]:
+        """Count planning command usage across all sessions, sorted by frequency.
+
+        Args:
+            commands:       Override DEFAULT_PLANNING_COMMANDS list (regex strings).
+            project_filter: Substring to match project_dir. None = all projects.
+            after:          Only messages >= this timestamp (ISO prefix).
+            before:         Only messages <= this timestamp (ISO prefix).
+
+        Returns:
+            List of PlanningCommandCount, sorted by count descending.
+        """
+        _commands = commands or DEFAULT_PLANNING_COMMANDS
+        compiled = [(cmd, re.compile(cmd, re.IGNORECASE)) for cmd in _commands]
+        counts: Dict[str, int] = defaultdict(int)
+        session_ids_by_cmd: Dict[str, set] = defaultdict(set)
+        project_dirs_by_cmd: Dict[str, set] = defaultdict(set)
+        if not self.projects_dir.exists():
+            return []
+        for project_dir in self.projects_dir.glob("*"):
+            if not project_dir.is_dir():
+                continue
+            if project_filter and project_filter.lower() not in project_dir.name.lower():
+                continue
+            for jsonl_file in project_dir.glob("*.jsonl"):
+                try:
+                    with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            try:
+                                data = _json_loads(line)
+                                ts = data.get("timestamp", "")
+                                if after and ts and ts < after:
+                                    continue
+                                if before and ts and ts > before:
+                                    continue
+                                content = self._extract_content(data)
+                                if not content:
+                                    continue
+                                session_id = data.get("sessionId", "")
+                                for cmd, regex in compiled:
+                                    if regex.search(content):
+                                        counts[cmd] += 1
+                                        session_ids_by_cmd[cmd].add(session_id)
+                                        project_dirs_by_cmd[cmd].add(project_dir.name)
+                            except (json.JSONDecodeError, KeyError, ValueError):
+                                continue
+                except OSError:
+                    continue
+        result = [
+            PlanningCommandCount(
+                # Normalize display name: strip regex \b suffix
+                command=cmd.replace(r"\b", ""),
+                count=counts[cmd],
+                session_ids=sorted(session_ids_by_cmd[cmd]),
+                project_dirs=sorted(project_dirs_by_cmd[cmd]),
+            )
+            for cmd in _commands if counts[cmd] > 0
+        ]
+        result.sort(key=lambda x: x.count, reverse=True)
+        return result
+
+    def cross_reference_session(
+        self,
+        filename: str,
+        current_content: str,
+        session_id: Optional[str] = None,
+    ) -> List[dict]:
+        """Find Edit/Write calls for a file and check if their content appears in current_content.
+
+        Args:
+            filename:        Basename to match (e.g. "cli.py"). Matched against file_path ending.
+            current_content: Current file content to compare against.
+            session_id:      Session ID prefix to restrict search. None = all sessions.
+
+        Returns:
+            List of dicts sorted by timestamp ascending, each with keys:
+                session_id (str), project_dir (str), timestamp (str),
+                tool ("Edit"|"Write"), file_path (str),
+                content_snippet (str, first 200 chars), found_in_current (bool)
+        """
+        results: List[dict] = []
+        if not self.projects_dir.exists():
+            return results
+        for project_dir in self.projects_dir.glob("*"):
+            if not project_dir.is_dir():
+                continue
+            for jsonl_file in project_dir.glob("*.jsonl"):
+                try:
+                    with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
+                                continue
+                            try:
+                                data = _json_loads(line)
+                                if data.get("type") != "assistant":
+                                    continue
+                                sid = data.get("sessionId", "")
+                                if session_id and not sid.startswith(session_id):
+                                    continue
+                                # Direct content array scan — cannot use _extract_content()
+                                msg_content = data.get("message", {}).get("content", [])
+                                if not isinstance(msg_content, list):
+                                    continue
+                                for item in msg_content:
+                                    if not isinstance(item, dict):
+                                        continue
+                                    tool = item.get("name", "")
+                                    if item.get("type") != "tool_use" or tool not in ("Edit", "Write"):
+                                        continue
+                                    inp = item.get("input", {})
+                                    fp = inp.get("file_path", "")
+                                    if not fp.endswith(filename):
+                                        continue
+                                    # Edit uses new_string; Write uses content
+                                    snippet_src = inp.get("new_string") or inp.get("content", "")
+                                    snippet = snippet_src[:200]
+                                    results.append({
+                                        "session_id": sid,
+                                        "project_dir": project_dir.name,
+                                        "timestamp": data.get("timestamp", ""),
+                                        "tool": tool,
+                                        "file_path": fp,
+                                        "content_snippet": snippet,
+                                        "found_in_current": bool(snippet and snippet in current_content),
+                                    })
+                            except (json.JSONDecodeError, KeyError, ValueError):
+                                continue
+                except OSError:
+                    continue
+        results.sort(key=lambda x: x["timestamp"])
+        return results
+
+    def export_session_markdown(self, session_id: str) -> str:
+        """Export one session's messages as a markdown string.
+
+        Args:
+            session_id: Session ID prefix to match. Must match exactly one session.
+
+        Returns:
+            Markdown string with metadata header + all non-system messages.
+
+        Raises:
+            ValueError: If no session matches, or multiple sessions match.
+        """
+        # Find matching session file(s)
+        matches: List[Path] = []
+        if self.projects_dir.exists():
+            for project_dir in self.projects_dir.glob("*"):
+                if project_dir.is_dir():
+                    for jsonl_file in project_dir.glob(f"{session_id}*.jsonl"):
+                        matches.append(jsonl_file)
+        if not matches:
+            raise ValueError(f"No session found matching: {session_id!r}")
+        if len(matches) > 1:
+            raise ValueError(f"Ambiguous session ID {session_id!r} matches {len(matches)} files")
+        session_file = matches[0]
+
+        # Scan file for metadata + messages
+        cwd, git_branch, ts_first = "", "unknown", ""
+        message_count = 0
+        lines_md: List[str] = []
+
+        with open(session_file, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    data = _json_loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                ts = data.get("timestamp", "")
+                if ts and not ts_first:
+                    ts_first = ts
+                if not cwd and data.get("cwd"):
+                    cwd = data["cwd"]
+                if git_branch == "unknown" and data.get("gitBranch"):
+                    git_branch = data["gitBranch"]
+                msg_type = data.get("type", "")
+                if msg_type not in ("user", "assistant"):
+                    continue
+                message_count += 1
+                is_summary = data.get("isCompactSummary", False)
+                content = self._extract_content(data)
+                # Filter system noise
+                if any(pat in content for pat in _EXPORT_FILTER_PATTERNS):
+                    continue
+                if not content.strip():
+                    continue
+                ts_short = ts[:16].replace("T", " ") if ts else "\u2014"
+                if is_summary:
+                    lines_md.append(f"## Session Summary\n\n{content}\n\n---\n")
+                else:
+                    lines_md.append(f"## [{msg_type}] {ts_short}\n\n{content}\n\n---\n")
+
+        short_id = session_id[:8]
+        header = (
+            f"# Session {short_id}\n\n"
+            f"**Date**: {ts_first}\n"
+            f"**Branch**: {git_branch}\n"
+            f"**Directory**: {cwd}\n"
+            f"**Messages**: {message_count}\n\n"
+            f"---\n\n"
+        )
+        return header + "\n".join(lines_md)
 
     def get_statistics(self) -> RecoveryStatistics:
         """Get recovery statistics across all sessions."""

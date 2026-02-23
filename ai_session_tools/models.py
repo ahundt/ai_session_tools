@@ -101,6 +101,15 @@ class SessionMessage:
         """Check if message is long."""
         return len(self.content) > 500
 
+    def to_dict(self) -> dict:
+        """Serialize for JSON output and _render_output row_fn access."""
+        return {
+            "type": self.type.value if hasattr(self.type, "value") else str(self.type),
+            "timestamp": self.timestamp,
+            "content": self.content,
+            "session_id": self.session_id,
+        }
+
 
 @dataclass
 class SessionMetadata:
@@ -335,4 +344,75 @@ class RecoveryStatistics:
             "largest_file_edits": self.largest_file_edits,
             "total_size_bytes": self.total_size_bytes,
             "avg_versions_per_file": self.avg_versions_per_file,
+        }
+
+
+@dataclass
+class SessionInfo:
+    """Summary metadata for one Claude Code session.
+
+    Collected by scanning the first few lines of a session JSONL file.
+    """
+
+    session_id: str
+    project_dir: str       # encoded dir name, e.g. "-Users-alice-myproject"
+    cwd: str               # from first JSONL line that has a "cwd" field
+    git_branch: str        # from first JSONL line that has a "gitBranch" field
+    timestamp_first: str   # ISO 8601, earliest message timestamp
+    timestamp_last: str    # ISO 8601, latest message timestamp
+    message_count: int     # count of lines where type == "user" or "assistant"
+    has_compact_summary: bool  # True if any line has isCompactSummary == true
+
+    def to_dict(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "project_dir": self.project_dir,
+            "cwd": self.cwd,
+            "git_branch": self.git_branch,
+            "timestamp_first": self.timestamp_first,
+            "timestamp_last": self.timestamp_last,
+            "message_count": self.message_count,
+            "has_compact_summary": self.has_compact_summary,
+        }
+
+
+@dataclass
+class CorrectionMatch:
+    """A user message where the user corrected Claude's previous behavior."""
+
+    session_id: str
+    project_dir: str
+    timestamp: str
+    content: str           # full message text
+    category: str          # "regression" | "skip_step" | "misunderstanding" | "incomplete"
+    matched_pattern: str   # the substring that triggered the match (e.g. "you forgot")
+
+    def to_dict(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "project_dir": self.project_dir,
+            "timestamp": self.timestamp,
+            "content": self.content,
+            "category": self.category,
+            "matched_pattern": self.matched_pattern,
+        }
+
+
+@dataclass
+class PlanningCommandCount:
+    """Usage count for one planning command across all sessions."""
+
+    command: str           # e.g. "/ar:plannew"
+    count: int
+    session_ids: List[str]   # unique sessions where this command appeared
+    project_dirs: List[str]  # unique project dirs where this command appeared
+
+    def to_dict(self) -> dict:
+        return {
+            "command": self.command,
+            "count": self.count,
+            "unique_sessions": len(self.session_ids),
+            "unique_projects": len(self.project_dirs),
+            "session_ids": self.session_ids,
+            "project_dirs": self.project_dirs,
         }

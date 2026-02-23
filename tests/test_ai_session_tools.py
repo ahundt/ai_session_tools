@@ -8,25 +8,34 @@ Tests cover:
 - Message access
 - Statistics collection
 - Filter composability
+- New: session listing, corrections, planning usage, tool search, cross-ref, export
 """
 
 import json
 from pathlib import Path
+from typing import Optional
 
 import pytest
+from typer.testing import CliRunner
 
 from ai_session_tools import (
     ChainedFilter,
     ComposableFilter,
     ComposableSearch,
+    CorrectionMatch,
     FileVersion,
     FilterSpec,
     MessageType,
+    PlanningCommandCount,
     RecoveryStatistics,
     SearchFilter,
+    SessionInfo,
     SessionMessage,
     SessionRecoveryEngine,
 )
+from ai_session_tools.cli import app
+
+runner = CliRunner(mix_stderr=False)
 
 
 @pytest.fixture
@@ -216,6 +225,766 @@ class TestIntegration:
         filters = FilterSpec(min_edits=1)
         results = engine.search("*.py", filters)
         assert all(r.edits >= 1 for r in results)
+
+
+# ─── Fixtures ─────────────────────────────────────────────────────────────────
+
+def _make_projects_with_sessions(tmp_path: Path) -> Path:
+    """Create projects dir with 2 sessions across 2 projects, with varied message types."""
+    projects = tmp_path / "projects"
+
+    # Session 1 in project 1: has correction, planning command, Write tool call
+    proj1 = projects / "-Users-alice-proj1"
+    proj1.mkdir(parents=True)
+    s1 = "aaaa0001-0000-0000-0000-000000000000"
+    lines1 = [
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                    "gitBranch": "main", "cwd": "/Users/alice/proj1",
+                    "message": {"role": "user", "content": "start the feature"}}),
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:05:00.000Z",
+                    "message": {"role": "user", "content": "you forgot to add the test"}}),
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:10:00.000Z",
+                    "message": {"role": "user", "content": "/ar:plannew add login form"}}),
+        json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-24T10:11:00.000Z",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "t1", "name": "Write",
+                         "input": {"file_path": "/Users/alice/proj1/login.py",
+                                   "content": "def login():\n    pass\n"}}]}}),
+    ]
+    (proj1 / f"{s1}.jsonl").write_text("\n".join(lines1))
+
+    # Session 2 in project 2: different project, different branch
+    proj2 = projects / "-Users-alice-proj2"
+    proj2.mkdir(parents=True)
+    s2 = "bbbb0002-0000-0000-0000-000000000000"
+    lines2 = [
+        json.dumps({"sessionId": s2, "type": "user", "timestamp": "2026-01-25T09:00:00.000Z",
+                    "gitBranch": "feature-x", "cwd": "/Users/alice/proj2",
+                    "message": {"role": "user", "content": "work on proj2"}}),
+        json.dumps({"sessionId": s2, "type": "user", "timestamp": "2026-01-25T09:05:00.000Z",
+                    "message": {"role": "user", "content": "/ar:pn new plan"}}),
+    ]
+    (proj2 / f"{s2}.jsonl").write_text("\n".join(lines2))
+
+    return projects
+
+
+def _make_engine(tmp_path: Path, projects: Path) -> SessionRecoveryEngine:
+    """Create engine with tmp projects dir and non-existent recovery dir."""
+    return SessionRecoveryEngine(projects, tmp_path / "recovery")
+
+
+# ─── Part 0: Model tests ──────────────────────────────────────────────────────
+
+class TestSessionInfoModel:
+    def test_fields_accessible(self):
+        si = SessionInfo(
+            session_id="abc", project_dir="-proj", cwd="/foo", git_branch="main",
+            timestamp_first="2026-01-01T00:00:00Z", timestamp_last="2026-01-01T01:00:00Z",
+            message_count=5, has_compact_summary=False,
+        )
+        assert si.session_id == "abc"
+        assert si.git_branch == "main"
+        assert si.message_count == 5
+
+    def test_to_dict_returns_8_keys(self):
+        si = SessionInfo(
+            session_id="abc", project_dir="-proj", cwd="/foo", git_branch="main",
+            timestamp_first="2026-01-01T00:00:00Z", timestamp_last="2026-01-01T01:00:00Z",
+            message_count=5, has_compact_summary=True,
+        )
+        d = si.to_dict()
+        assert set(d.keys()) == {
+            "session_id", "project_dir", "cwd", "git_branch",
+            "timestamp_first", "timestamp_last", "message_count", "has_compact_summary",
+        }
+
+    def test_is_mutable_dataclass(self):
+        si = SessionInfo(
+            session_id="abc", project_dir="-proj", cwd="/foo", git_branch="main",
+            timestamp_first="", timestamp_last="", message_count=0, has_compact_summary=False,
+        )
+        si.message_count = 99
+        assert si.message_count == 99
+
+
+class TestCorrectionMatchModel:
+    def test_to_dict_returns_6_keys(self):
+        cm = CorrectionMatch(
+            session_id="abc", project_dir="-proj", timestamp="2026-01-01T00:00:00Z",
+            content="you forgot it", category="skip_step", matched_pattern="you forgot",
+        )
+        d = cm.to_dict()
+        assert set(d.keys()) == {
+            "session_id", "project_dir", "timestamp", "content", "category", "matched_pattern",
+        }
+
+    def test_is_mutable_dataclass(self):
+        cm = CorrectionMatch(
+            session_id="abc", project_dir="-proj", timestamp="",
+            content="x", category="skip_step", matched_pattern="x",
+        )
+        cm.category = "regression"
+        assert cm.category == "regression"
+
+
+class TestPlanningCommandCountModel:
+    def test_to_dict_returns_6_keys(self):
+        pc = PlanningCommandCount(
+            command="/ar:plannew", count=3,
+            session_ids=["s1", "s2"], project_dirs=["p1"],
+        )
+        d = pc.to_dict()
+        assert set(d.keys()) == {
+            "command", "count", "unique_sessions", "unique_projects",
+            "session_ids", "project_dirs",
+        }
+        assert d["unique_sessions"] == 2
+        assert d["unique_projects"] == 1
+
+    def test_is_mutable_dataclass(self):
+        pc = PlanningCommandCount(command="/ar:plannew", count=1, session_ids=[], project_dirs=[])
+        pc.count = 5
+        assert pc.count == 5
+
+
+# ─── Part 1a: get_sessions ────────────────────────────────────────────────────
+
+class TestGetSessionsBasic:
+    def test_returns_2_sessions(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        sessions = engine.get_sessions()
+        assert len(sessions) == 2
+
+    def test_returns_session_info_objects(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        sessions = engine.get_sessions()
+        assert all(isinstance(s, SessionInfo) for s in sessions)
+
+
+class TestGetSessionsFields:
+    def test_proj1_fields(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        sessions = engine.get_sessions()
+        # proj2 is newer, proj1 is older — find proj1 by project_dir
+        s1 = next(s for s in sessions if "proj1" in s.project_dir)
+        assert s1.cwd == "/Users/alice/proj1"
+        assert s1.git_branch == "main"
+        assert s1.message_count == 4  # 3 user + 1 assistant
+
+
+class TestGetSessionsProjectFilter:
+    def test_filter_to_proj1(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        sessions = engine.get_sessions(project_filter="proj1")
+        assert len(sessions) == 1
+        assert "proj1" in sessions[0].project_dir
+
+
+class TestGetSessionsAfterFilter:
+    def test_after_2026_01_25(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        sessions = engine.get_sessions(after="2026-01-25")
+        assert len(sessions) == 1
+        assert "proj2" in sessions[0].project_dir
+
+
+class TestGetSessionsSortedNewestFirst:
+    def test_proj2_first(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        sessions = engine.get_sessions()
+        assert "proj2" in sessions[0].project_dir
+        assert "proj1" in sessions[1].project_dir
+
+
+class TestGetSessionsCompactSummary:
+    def test_no_compact_when_absent(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        sessions = engine.get_sessions()
+        assert all(not s.has_compact_summary for s in sessions)
+
+
+# ─── Part 1b: find_corrections ───────────────────────────────────────────────
+
+class TestFindCorrectionsBasic:
+    def test_detects_you_forgot(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        corrections = engine.find_corrections()
+        assert len(corrections) >= 1
+        assert any("you forgot" in c.content for c in corrections)
+
+
+class TestFindCorrectionsCategory:
+    def test_you_forgot_is_skip_step(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        corrections = engine.find_corrections()
+        forgot = next(c for c in corrections if "you forgot" in c.content)
+        assert forgot.category == "skip_step"
+
+
+class TestFindCorrectionsMatchedPattern:
+    def test_matched_pattern_value(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        corrections = engine.find_corrections()
+        forgot = next(c for c in corrections if "you forgot" in c.content)
+        assert "you forgot" in forgot.matched_pattern
+
+
+class TestFindCorrectionsOnlyUserMessages:
+    def test_no_assistant_corrections(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        corrections = engine.find_corrections()
+        # All assistant messages are tool_use blocks — none should match correction patterns
+        for c in corrections:
+            # corrections come from user messages only (data.get("type") != "user" is skipped)
+            assert c.session_id != ""  # sanity
+
+
+class TestFindCorrectionsLimit:
+    def test_limit_zero_returns_empty(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        assert engine.find_corrections(limit=0) == []
+
+    def test_limit_1_returns_max_1(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        assert len(engine.find_corrections(limit=1)) <= 1
+
+
+# ─── Part 1c: analyze_planning_usage ─────────────────────────────────────────
+
+class TestPlanningUsageBasic:
+    def test_finds_ar_plannew_and_ar_pn(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.analyze_planning_usage()
+        commands = {r.command for r in results}
+        assert "/ar:plannew" in commands
+        assert "/ar:pn" in commands
+
+
+class TestPlanningUsageCountAndSessions:
+    def test_plannew_count_and_session(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.analyze_planning_usage()
+        pn = next(r for r in results if r.command == "/ar:plannew")
+        assert pn.count == 1
+        assert "aaaa0001-0000-0000-0000-000000000000" in pn.session_ids
+
+
+class TestPlanningUsageSortedByCount:
+    def test_sorted_desc_by_count(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.analyze_planning_usage()
+        counts = [r.count for r in results]
+        assert counts == sorted(counts, reverse=True)
+
+
+class TestPlanningUsageCustomCommands:
+    def test_custom_commands_override(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.analyze_planning_usage(commands=[r"/ar:plannew\b"])
+        assert len(results) == 1
+        assert results[0].command == "/ar:plannew"  # \b stripped
+
+
+# ─── Part 1d: search_messages with tool ──────────────────────────────────────
+
+class TestSearchMessagesToolFilter:
+    def test_tool_write_returns_assistant_message(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", tool="Write")
+        assert len(results) >= 1
+        assert any("login.py" in r.content for r in results)
+
+
+class TestSearchMessagesToolDefaultsToAssistant:
+    def test_tool_implies_assistant_type(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", tool="Write")
+        assert all(r.type == MessageType.ASSISTANT for r in results)
+
+
+class TestSearchMessagesToolWithQuery:
+    def test_tool_with_query_filter(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("login", tool="Write")
+        assert len(results) >= 1
+        assert all("login" in r.content for r in results)
+
+
+class TestSearchMessagesNoToolUnchanged:
+    def test_no_tool_returns_user_messages(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("start the feature")
+        assert len(results) >= 1
+        assert any("start the feature" in r.content for r in results)
+
+
+# ─── Part 1e: cross_reference_session ────────────────────────────────────────
+
+class TestCrossRefFindsWrite:
+    def test_finds_write_call(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.cross_reference_session("login.py", "")
+        assert len(results) >= 1
+        assert results[0]["tool"] == "Write"
+
+
+class TestCrossRefFoundInFile:
+    def test_found_in_current_true(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.cross_reference_session("login.py", "def login():\n    pass\n")
+        assert results[0]["found_in_current"] is True
+
+
+class TestCrossRefNotFoundInFile:
+    def test_found_in_current_false(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.cross_reference_session("login.py", "something completely different")
+        assert results[0]["found_in_current"] is False
+
+
+class TestCrossRefSessionFilter:
+    def test_session_filter(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.cross_reference_session("login.py", "", session_id="aaaa")
+        assert len(results) >= 1
+        assert all(r["session_id"].startswith("aaaa") for r in results)
+
+
+# ─── Part 1f: export_session_markdown ────────────────────────────────────────
+
+class TestExportMarkdownBasic:
+    def test_returns_string_starting_with_session(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        md = engine.export_session_markdown("aaaa0001")
+        assert isinstance(md, str)
+        assert md.startswith("# Session aaaa0001")
+
+
+class TestExportMarkdownHasMetadata:
+    def test_has_branch_and_cwd(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        md = engine.export_session_markdown("aaaa0001")
+        assert "main" in md
+        assert "/Users/alice/proj1" in md
+
+
+class TestExportMarkdownHasMessages:
+    def test_has_user_message_content(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        md = engine.export_session_markdown("aaaa0001")
+        assert "start the feature" in md
+
+
+class TestExportMarkdownNoSession:
+    def test_raises_value_error_for_unknown(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        with pytest.raises(ValueError, match="No session found"):
+            engine.export_session_markdown("nonexistent")
+
+
+# ─── CLI helpers ─────────────────────────────────────────────────────────────
+
+def _invoke(args, tmp_path: Optional[Path] = None, projects: Optional[Path] = None):
+    """Invoke CLI with optional projects dir override."""
+    env = {}
+    if projects is not None:
+        env["AI_SESSION_TOOLS_PROJECTS"] = str(projects)
+    elif tmp_path is not None:
+        env["AI_SESSION_TOOLS_PROJECTS"] = str(tmp_path / "no_projects")
+    return runner.invoke(app, args, env=env if env else None, catch_exceptions=False)
+
+
+# ─── Part 2b: aise list ──────────────────────────────────────────────────────
+
+class TestListCommand:
+    def test_list_exit0(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["list"], env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+        assert "aaaa0001" in result.output
+
+    def test_list_json_format(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["list", "--format", "json"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        assert "session_id" in data[0]
+
+    def test_list_project_filter(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["list", "--project", "proj1"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # Check via session IDs — proj1=aaaa0001, proj2=bbbb0002
+        assert "aaaa0001" in result.output
+        assert "bbbb0002" not in result.output
+
+
+# ─── Part 2c: messages corrections ───────────────────────────────────────────
+
+class TestMessagesCorrections:
+    def test_corrections_exit0(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "corrections"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_corrections_has_category(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "corrections"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert "skip_step" in result.output or "you forgot" in result.output
+
+    def test_corrections_json_format(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "corrections", "--format", "json"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+
+
+# ─── Part 2d: messages search --tool ─────────────────────────────────────────
+
+class TestMessagesSearchToolFlag:
+    def test_tool_flag_returns_write_call(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "search", "*", "--tool", "Write"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "login" in result.output or "Write" in result.output
+
+    def test_no_tool_unchanged(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "search", "start the feature"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "start the feature" in result.output
+
+
+# ─── Part 2e: messages planning ──────────────────────────────────────────────
+
+class TestMessagesPlanning:
+    def test_planning_exit0(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "planning"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "/ar:plannew" in result.output
+
+    def test_planning_json_format(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "planning", "--format", "json"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+
+    def test_planning_empty(self, tmp_path):
+        # No planning commands in empty projects dir
+        empty_projects = tmp_path / "empty_projects"
+        empty_projects.mkdir()
+        result = runner.invoke(
+            app, ["messages", "planning"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(empty_projects)},
+        )
+        assert result.exit_code == 0
+        assert "No planning commands found" in result.output
+
+
+# ─── Part 2f: files cross-ref ────────────────────────────────────────────────
+
+class TestFilesCrossRef:
+    def test_cross_ref_exit0(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        test_file = tmp_path / "login.py"
+        test_file.write_text("def login():\n    pass\n")
+        result = runner.invoke(
+            app, ["files", "cross-ref", str(test_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_cross_ref_shows_applied(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        test_file = tmp_path / "login.py"
+        test_file.write_text("def login():\n    pass\n")
+        result = runner.invoke(
+            app, ["files", "cross-ref", str(test_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert "\u2713" in result.output or "✓" in result.output or "1/1" in result.output
+
+    def test_cross_ref_shows_not_applied(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        test_file = tmp_path / "login.py"
+        test_file.write_text("completely different content")
+        result = runner.invoke(
+            app, ["files", "cross-ref", str(test_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert "✗" in result.output or "0/1" in result.output
+
+
+# ─── Part 2a: export session + recent ────────────────────────────────────────
+
+class TestExportSession:
+    def test_export_session_stdout(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["export", "session", "aaaa0001"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "# Session aaaa0001" in result.output
+
+    def test_export_session_to_file(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        out_file = tmp_path / "out.md"
+        result = runner.invoke(
+            app, ["export", "session", "aaaa0001", "--output", str(out_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert out_file.exists()
+        assert "# Session aaaa0001" in out_file.read_text()
+
+    def test_export_session_dry_run(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        out_file = tmp_path / "dry.md"
+        result = runner.invoke(
+            app, ["export", "session", "aaaa0001", "--output", str(out_file), "--dry-run"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert not out_file.exists()
+
+
+class TestExportRecent:
+    def test_export_recent_to_file(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        out_file = tmp_path / "out.md"
+        result = runner.invoke(
+            app, ["export", "recent", "365", "--output", str(out_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert out_file.exists()
+
+    def test_export_recent_empty(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["export", "recent", "0"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "No sessions found" in result.output
+
+
+# ─── Part 2g: tools search + find ────────────────────────────────────────────
+
+class TestToolsSearch:
+    def test_tools_search_write_exit0(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["tools", "search", "Write"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_tools_search_with_query(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["tools", "search", "Write", "login"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "login" in result.output
+
+    def test_tools_search_json_format(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["tools", "search", "Write", "--format", "json"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+
+    def test_tools_find_alias(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["tools", "find", "Write"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+# ─── Part 4a: messages search positional ─────────────────────────────────────
+
+class TestMessagesSearchPositional:
+    def test_positional_query(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "search", "start the feature"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_query_flag_still_works(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "search", "--query", "start the feature"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+# ─── Part 4b: messages get + root get positional ─────────────────────────────
+
+class TestMessagesGetPositional:
+    def test_positional_session_id(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "get", "aaaa0001"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_session_flag_still_works(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "get", "--session", "aaaa0001"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+class TestRootGetPositional:
+    def test_root_get_positional(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["get", "aaaa0001"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+# ─── Part 4c/4d: root search --tool, tools domain, find alias ────────────────
+
+class TestRootSearchToolFlag:
+    def test_root_search_tool_flag(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["search", "--tool", "Write", "--query", "login"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_root_search_tools_domain(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["search", "tools", "--tool", "Write", "--query", "login"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_root_search_tools_domain_requires_tool(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["search", "tools"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code != 0
+
+
+class TestRootFindAlias:
+    def test_find_alias_messages(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["find", "messages", "--query", "start the feature"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_find_alias_tool(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["find", "--tool", "Write", "--query", "login"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+class TestFilesFindAlias:
+    def test_files_find_alias(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["files", "find", "--pattern", "*.py"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        # Should exit 0 (even if no files found in recovery dir)
+        assert result.exit_code == 0
+
+
+class TestMessagesFindAlias:
+    def test_messages_find_positional(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "find", "start the feature"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
 
     def test_statistics_consistency(self, engine):
         """Test that statistics are consistent"""

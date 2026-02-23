@@ -8,12 +8,14 @@ Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 """
 
+import json
 import os
 import re as _re
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Callable as _Callable, List, Optional, Set
 
 import typer
 from rich.console import Console
@@ -46,12 +48,160 @@ messages_app = typer.Typer(
         "Each session contains timestamped messages with a type (user or assistant) and text content."
     ),
 )
+export_app = typer.Typer(
+    help=(
+        "Export Claude Code session messages to markdown.\n\n"
+        "Use 'export session' for a single session, 'export recent' for bulk export."
+    ),
+)
+tools_app = typer.Typer(
+    help=(
+        "Search tool invocations (Bash, Edit, Write, Read, etc.) from Claude Code sessions.\n\n"
+        "Tool calls are stored inside assistant messages in session JSONL files."
+    ),
+)
 
 app.add_typer(files_app, name="files", rich_help_panel="Domain Groups")
 app.add_typer(messages_app, name="messages", rich_help_panel="Domain Groups")
+app.add_typer(export_app, name="export", rich_help_panel="Domain Groups")
+app.add_typer(tools_app, name="tools", rich_help_panel="Domain Groups")
 
 console = Console()
 err_console = Console(stderr=True)
+
+
+# ── CLI rendering infrastructure ──────────────────────────────────────────────
+
+@dataclass
+class ColumnSpec:
+    """One column in a Rich table: header text + optional display hints."""
+
+    header: str
+    style: str = ""
+    no_wrap: bool = False
+    justify: str = "left"
+
+
+@dataclass
+class TableSpec:
+    """Render spec for a list of model objects: table, JSON, CSV, or plain text."""
+
+    title_template: str
+    columns: List[ColumnSpec]
+    row_fn: _Callable
+    summary_template: Optional[str] = None
+    plain_fn: Optional[_Callable] = None
+
+
+def _render_output(
+    items: list,
+    fmt: str,
+    spec: "TableSpec",
+    empty_msg: str = "No results found",
+) -> None:
+    """Render items in the requested format — eliminates repeated json/csv/table branching."""
+    if not items:
+        console.print(f"[yellow]{empty_msg}[/yellow]")
+        return
+
+    def _to_dict(x):
+        if hasattr(x, "to_dict"):
+            return x.to_dict()
+        if isinstance(x, dict):
+            return x
+        return vars(x)
+
+    dicts = [_to_dict(x) for x in items]
+    if fmt == "json":
+        # Write directly to stdout — bypasses Rich markup rendering + ANSI codes
+        sys.stdout.write(json.dumps(dicts, indent=2) + "\n")
+        return
+    if fmt in ("csv", "plain"):
+        for d in dicts:
+            line = spec.plain_fn(d) if spec.plain_fn else "  ".join(str(v) for v in spec.row_fn(d))
+            console.print(line)
+        return
+    # Default: Rich table
+    from rich.table import Table
+    table = Table(title=spec.title_template.format(n=len(items)))
+    for col in spec.columns:
+        table.add_column(
+            col.header,
+            style=col.style or None,
+            no_wrap=col.no_wrap,
+            justify=col.justify,
+        )
+    for d in dicts:
+        table.add_row(*[str(v) for v in spec.row_fn(d)])
+    console.print(table)
+    if spec.summary_template:
+        console.print(f"\n[bold]{spec.summary_template.format(n=len(items))}[/bold]")
+
+
+def _register_alias(sub_app: "typer.Typer", func: _Callable, *names: str) -> None:
+    """Register func as a command under each name in names on sub_app."""
+    for name in names:
+        sub_app.command(name)(func)
+
+
+# ── Module-level TableSpec constants ─────────────────────────────────────────
+
+_LIST_SPEC = TableSpec(
+    title_template="Sessions ({n} found)",
+    columns=[
+        ColumnSpec("Session", style="cyan", no_wrap=True),
+        ColumnSpec("Project", style="blue"),
+        ColumnSpec("Branch", style="green"),
+        ColumnSpec("Date", style="dim"),
+        ColumnSpec("Messages", justify="right"),
+        ColumnSpec("Summary", style="dim"),
+    ],
+    row_fn=lambda d: [
+        (d["session_id"][:16] + "\u2026") if len(d["session_id"]) > 16 else d["session_id"],
+        d["project_dir"][-20:] if len(d["project_dir"]) > 20 else d["project_dir"],
+        d["git_branch"],
+        d["timestamp_first"][:10],
+        str(d["message_count"]),
+        "\u2713" if d["has_compact_summary"] else "",
+    ],
+    summary_template="Found {n} sessions",
+)
+
+_CORRECTIONS_SPEC = TableSpec(
+    title_template="User Corrections ({n} found)",
+    columns=[
+        ColumnSpec("Timestamp", style="dim", no_wrap=True),
+        ColumnSpec("Session", style="cyan", no_wrap=True),
+        ColumnSpec("Category", style="yellow"),
+        ColumnSpec("Pattern", style="red"),
+        ColumnSpec("Message"),
+    ],
+    row_fn=lambda d: [
+        d["timestamp"][:19],
+        (d["session_id"][:16] + "\u2026") if len(d["session_id"]) > 16 else d["session_id"],
+        d["category"],
+        d["matched_pattern"],
+        d["content"][:80],
+    ],
+    summary_template="Found {n} corrections",
+)
+
+_PLANNING_SPEC = TableSpec(
+    title_template="Planning Command Usage ({n} commands)",
+    columns=[
+        ColumnSpec("Command", style="cyan"),
+        ColumnSpec("Count", justify="right"),
+        ColumnSpec("Sessions", justify="right"),
+        ColumnSpec("Projects", justify="right"),
+    ],
+    row_fn=lambda d: [
+        d["command"],
+        str(d["count"]),
+        str(d["unique_sessions"]),
+        str(d["unique_projects"]),
+    ],
+)
+
 
 # Module-level override set by --claude-dir global option
 _g_claude_dir: Optional[str] = None
@@ -418,17 +568,265 @@ def _do_messages_search(
     limit: int = 10,
     max_chars: int = 0,
     fmt: str = "table",
+    tool: Optional[str] = None,
 ) -> None:
     """Search messages across all sessions."""
-    messages_list = engine.search_messages(query, message_type)[:limit]
+    results = engine.search_messages(query, message_type, tool=tool)[:limit]
 
-    if not messages_list:
-        console.print("[yellow]No messages match query[/yellow]")
+    if not results:
+        tag = f" [tool: {tool}]" if tool else ""
+        console.print(f"[yellow]No messages match query{tag}[/yellow]")
+        return
+
+    if fmt in ("json", "csv", "plain"):
+        truncate = max_chars if max_chars > 0 else 500
+        tag = f" [tool: {tool}]" if tool else ""
+        spec = TableSpec(
+            title_template=f"Messages ({{n}} found){tag}",
+            columns=[
+                ColumnSpec("Timestamp", style="dim", no_wrap=True),
+                ColumnSpec("Type", style="cyan"),
+                ColumnSpec("Session", style="blue"),
+                ColumnSpec("Content"),
+            ],
+            row_fn=lambda d: [
+                d.get("timestamp", "")[:19],
+                d.get("type", ""),
+                (d.get("session_id", "")[:12] + "\u2026"),
+                d.get("content", "")[:truncate],
+            ],
+            summary_template="Found {n} messages",
+        )
+        _render_output(results, fmt, spec)
         return
 
     formatter = MessageFormatter(max_chars=max_chars)
-    console.print(formatter.format_many(messages_list))
-    console.print(f"\n[bold]Found {len(messages_list)} messages[/bold]")
+    console.print(formatter.format_many(results))
+    console.print(f"\n[bold]Found {len(results)} messages[/bold]")
+
+
+def _do_list_sessions(
+    engine: SessionRecoveryEngine,
+    project: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    limit: Optional[int] = None,
+    fmt: str = "table",
+) -> None:
+    """List sessions with metadata."""
+    sessions = engine.get_sessions(project_filter=project, after=after, before=before)
+    if limit:
+        sessions = sessions[:limit]
+    _render_output(sessions, fmt, _LIST_SPEC, "No sessions found")
+
+
+def _do_messages_corrections(
+    engine: SessionRecoveryEngine,
+    project: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    limit: int = 20,
+    fmt: str = "table",
+) -> None:
+    """Find user corrections across sessions."""
+    corrections = engine.find_corrections(
+        project_filter=project, after=after, before=before, limit=limit
+    )
+    _render_output(corrections, fmt, _CORRECTIONS_SPEC, "No corrections found")
+
+
+def _do_messages_planning(
+    engine: SessionRecoveryEngine,
+    project: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    fmt: str = "table",
+) -> None:
+    """Show planning command usage."""
+    results = engine.analyze_planning_usage(
+        project_filter=project, after=after, before=before
+    )
+    _render_output(results, fmt, _PLANNING_SPEC, "No planning commands found")
+
+
+def _do_files_cross_ref(
+    engine: SessionRecoveryEngine,
+    file: str,
+    session: Optional[str] = None,
+    fmt: str = "table",
+) -> None:
+    """Cross-reference session edits against current file content."""
+    file_path = Path(file)
+    if not file_path.exists():
+        err_console.print(f"[red]File not found:[/red] {file}")
+        raise typer.Exit(code=1)
+    current_content = file_path.read_text(errors="replace")
+    results = engine.cross_reference_session(
+        file_path.name, current_content, session_id=session
+    )
+    spec = TableSpec(
+        title_template=f"Cross-reference: {file_path.name} ({{n}} edits)",
+        columns=[
+            ColumnSpec("Timestamp", style="dim", no_wrap=True),
+            ColumnSpec("Session", style="cyan", no_wrap=True),
+            ColumnSpec("Tool", style="blue"),
+            ColumnSpec("Applied", justify="center"),
+            ColumnSpec("Snippet"),
+        ],
+        row_fn=lambda d: [
+            d["timestamp"][:19],
+            (d["session_id"][:16] + "\u2026") if len(d["session_id"]) > 16 else d["session_id"],
+            d["tool"],
+            "[green]\u2713[/green]" if d["found_in_current"] else "[red]\u2717[/red]",
+            d["content_snippet"][:60],
+        ],
+        plain_fn=lambda d: (
+            "{ts}  {sid}  {tool}  {mark}  {snip}".format(
+                ts=d["timestamp"][:19],
+                sid=d["session_id"][:16],
+                tool=d["tool"],
+                mark="\u2713" if d["found_in_current"] else "\u2717",
+                snip=d["content_snippet"][:60],
+            )
+        ),
+    )
+    _render_output(results, fmt, spec, "No session edits found for this file")
+    if results and fmt not in ("json",):
+        applied = sum(1 for r in results if r["found_in_current"])
+        console.print(f"\n[bold]{applied}/{len(results)} edits found in current file[/bold]")
+
+
+def _do_export_session(
+    engine: SessionRecoveryEngine,
+    session_id: str,
+    output: Optional[str] = None,
+    dry_run: bool = False,
+) -> None:
+    """Export one session to markdown."""
+    try:
+        md = engine.export_session_markdown(session_id)
+    except ValueError as e:
+        err_console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    if output:
+        err_console.print(f"Writing to: {output}")
+        if dry_run:
+            err_console.print("[yellow][dry run] no files written[/yellow]")
+            return
+        Path(output).write_text(md, encoding="utf-8")
+    else:
+        if dry_run:
+            err_console.print(f"[yellow][dry run] would write {len(md)} chars to stdout[/yellow]")
+            return
+        err_console.print(f"Exporting session: {session_id[:8]}")
+        sys.stdout.write(md)
+
+
+def _do_export_recent(
+    engine: SessionRecoveryEngine,
+    days: int = 7,
+    output: Optional[str] = None,
+    project: Optional[str] = None,
+    dry_run: bool = False,
+) -> None:
+    """Export all sessions from last N days to markdown."""
+    import datetime as _dt
+    after = (_dt.datetime.now() - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
+    sessions = engine.get_sessions(project_filter=project, after=after)
+    if not sessions:
+        console.print("[yellow]No sessions found[/yellow]")
+        return
+    if dry_run:
+        err_console.print(f"[yellow][dry run] would export {len(sessions)} sessions[/yellow]")
+        for s in sessions:
+            err_console.print(f"  {s.session_id[:16]}  {s.project_dir[-20:]}  {s.timestamp_first[:10]}")
+        return
+    parts = []
+    for s in sessions:
+        try:
+            parts.append(engine.export_session_markdown(s.session_id))
+        except ValueError:
+            continue
+    combined = "\n\n".join(parts)
+    if output:
+        err_console.print(f"Writing {len(sessions)} sessions to: {output}")
+        Path(output).write_text(combined, encoding="utf-8")
+    else:
+        sys.stdout.write(combined)
+
+
+def _do_search(  # noqa: C901
+    engine: SessionRecoveryEngine,
+    domain: Optional[str],
+    pattern: Optional[str],
+    query: Optional[str],
+    min_edits: int,
+    max_edits: Optional[int],
+    include_extensions: Optional[str],
+    exclude_extensions: Optional[str],
+    include_sessions: Optional[str],
+    exclude_sessions: Optional[str],
+    after: Optional[str],
+    before: Optional[str],
+    message_type: Optional[str],
+    limit: Optional[int],
+    max_chars: int,
+    fmt: str,
+    tool: Optional[str] = None,
+) -> None:
+    """Shared logic for search() and find() commands."""
+    # When user explicitly says 'tools' domain, --tool is required.
+    if domain == "tools" and tool is None:
+        typer.echo(
+            "Error: 'tools' domain requires --tool <name> (e.g. --tool Bash, --tool Write, --tool Edit).",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Normalize "tools" domain → "messages" after validation
+    if domain == "tools":
+        domain = "messages"
+
+    # Validate domain (after "tools"→"messages" normalization)
+    if domain is not None and domain not in ("files", "messages"):
+        typer.echo(f"Error: domain must be 'files', 'messages', or 'tools', got '{domain}'", err=True)
+        raise typer.Exit(1)
+
+    # Validate flag/domain conflicts
+    if domain == "messages" and pattern is not None:
+        typer.echo("Error: --pattern applies to files, not messages. Use --query.", err=True)
+        raise typer.Exit(1)
+    if domain == "files" and query is not None:
+        typer.echo("Error: --query applies to messages, not files. Use --pattern.", err=True)
+        raise typer.Exit(1)
+    if domain == "files" and tool is not None:
+        typer.echo("Error: --tool applies to messages, not files.", err=True)
+        raise typer.Exit(1)
+
+    # Auto-detect domain from flags when not explicitly specified
+    if domain is None:
+        if tool is not None:
+            domain = "messages"
+        elif query is not None and pattern is None:
+            domain = "messages"
+        elif pattern is not None and query is None:
+            domain = "files"
+        elif pattern is not None and query is not None:
+            domain = "both"
+        else:
+            domain = "files"
+
+    if domain in ("files", "both"):
+        _do_files_search(
+            engine, pattern or "*", min_edits, max_edits,
+            include_extensions, exclude_extensions,
+            include_sessions, exclude_sessions,
+            after, before, limit, fmt,
+        )
+
+    if domain in ("messages", "both"):
+        msg_limit = limit if limit is not None else 10
+        _do_messages_search(engine, query or "", message_type, msg_limit, max_chars, fmt, tool=tool)
 
 
 def _do_get(
@@ -465,6 +863,51 @@ def _do_stats(engine: SessionRecoveryEngine) -> None:
     )
 
 
+# ── export_app commands ───────────────────────────────────────────────────────
+
+@export_app.command("session")
+def export_session(
+    session_id: str = typer.Argument(..., help="Session ID (prefix match, e.g. ab841016)."),
+    output: Optional[str] = typer.Option(
+        None, "--output", "-o",
+        help="Write to this file instead of stdout. Example: --output session.md",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Show what would be written without producing any output or writing files.",
+    ),
+) -> None:
+    """Export a single session's messages to markdown. Outputs to stdout by default.
+
+    Examples:
+        aise export session ab841016                    # stdout
+        aise export session ab841016 > session.md       # redirect to file
+        aise export session ab841016 --output out.md    # write explicitly
+        aise export session ab841016 --dry-run          # preview only
+    """
+    _do_export_session(get_engine(), session_id, output=output, dry_run=dry_run)
+
+
+@export_app.command("recent")
+def export_recent(
+    days: int = typer.Argument(7, help="Number of days back to include (default: 7)."),
+    output: Optional[str] = typer.Option(
+        None, "--output", "-o",
+        help="Output file path.",
+    ),
+    project: Optional[str] = typer.Option(None, "--project", help="Limit to this project directory substring."),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Export all sessions from the last N days to a single markdown file.
+
+    Examples:
+        aise export recent                            # last 7 days → stdout
+        aise export recent 14 --output week2.md       # last 14 days → file
+        aise export recent --project myproject        # filter by project
+    """
+    _do_export_recent(get_engine(), days=days, output=output, project=project, dry_run=dry_run)
+
+
 # ── files_app commands ────────────────────────────────────────────────────────
 
 @files_app.command("search")
@@ -494,6 +937,10 @@ def files_search(
         aise files search --after 2026-01-15T14:30:00      # files modified after specific time
     """
     _do_files_search(get_engine(), pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, after, before, limit, fmt)
+
+
+# Register 'find' as alias for 'files search'
+files_app.command("find")(files_search)
 
 
 @files_app.command("extract")
@@ -603,127 +1050,204 @@ def files_history(
             console.print("[yellow]--dry-run has no effect without --export[/yellow]")
 
 
-# ── messages_app commands ─────────────────────────────────────────────────────
-
-@messages_app.command("search")
-def messages_search(
-    query: str = typer.Option(..., "--query", "-q", help="Text to search for in user/assistant message content"),
-    message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
-    limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
-    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = show full message. Default: 0"),
+@files_app.command("cross-ref")
+def files_cross_ref(
+    file: str = typer.Argument(..., help="Path to a file to compare against session edits (e.g. ./cli.py)."),
+    session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to one session (prefix match)."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ) -> None:
-    """Search user/assistant conversation messages across all sessions.
-
-    Searches the text content of messages stored in Claude Code session JSONL files.
+    """Show which edits Claude made to a file are present in its current version.
 
     Examples:
-        aise messages search --query "authentication"
-        aise messages search --query "error" --type user --limit 20
-        aise messages search --query "TODO" --max-chars 200
+        aise files cross-ref ./cli.py
+        aise files cross-ref ./engine.py --session ab841016
+        aise files cross-ref ./cli.py --format json
     """
-    _do_messages_search(get_engine(), query, message_type, limit, max_chars, fmt)
+    _do_files_cross_ref(get_engine(), file, session, fmt)
+
+
+# Add 'find' as alias for 'files search' (registered after files_search is defined below)
+
+# ── messages_app commands ─────────────────────────────────────────────────────
+
+def _messages_search_cmd(
+    query: Optional[str] = typer.Argument(None, help="Text to search for in messages. Use quotes for multi-word queries."),
+    query_opt: Optional[str] = typer.Option(None, "--query", "-q", hidden=True),
+    message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
+    limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
+    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = full."),
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
+    tool: Optional[str] = typer.Option(
+        None, "--tool",
+        help="Filter for tool call invocations (e.g. Bash, Edit, Write). Implies --type assistant.",
+    ),
+) -> None:
+    """Search or find conversation messages from Claude Code sessions.
+
+    Accessible as both 'messages search' and 'messages find' (aliases).
+
+    Examples:
+        aise messages search "authentication"
+        aise messages search --query "authentication"  # backward compat
+        aise messages find "error"                     # find is an alias
+        aise messages search "*" --tool Write          # all Write tool calls
+    """
+    q = query or query_opt
+    _do_messages_search(get_engine(), q or "", message_type, limit, max_chars, fmt, tool=tool)
+
+
+_register_alias(messages_app, _messages_search_cmd, "search", "find")
 
 
 @messages_app.command("get")
 def messages_get(
-    session_id: str = typer.Option(..., "--session", "-s", help="Session UUID (e.g. ab841016-f07b-444c-bb18-22f6b373be52). Find IDs via 'aise search' or in ~/.claude/projects/"),
+    session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016). Find IDs via 'aise list'."),
+    session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
-    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = show full message. Default: 0"),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = full."),
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
 ) -> None:
     """Read messages from one specific Claude Code session.
 
-    Each session has a UUID like ab841016-f07b-444c-bb18-22f6b373be52.
-    Find session IDs by running 'aise search' or listing ~/.claude/projects/*/.
+    Examples:
+        aise messages get ab841016              # positional
+        aise messages get --session ab841016    # flag (backward compat)
+        aise messages get ab841016 --type user
+    """
+    sid = session_id or session_opt
+    _do_get(get_engine(), sid, message_type, limit, max_chars, fmt)
+
+
+@messages_app.command("corrections")
+def messages_corrections(
+    project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
+    after: Optional[str] = typer.Option(None, "--after", help="Only corrections after this date."),
+    before: Optional[str] = typer.Option(None, "--before"),
+    limit: int = typer.Option(20, "--limit", help="Max corrections to return. Default: 20"),
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+) -> None:
+    """Find user messages where corrections were given to Claude.
+
+    Detects patterns like 'you forgot', 'nono', 'that's wrong', etc.
 
     Examples:
-        aise messages get --session ab841016-f07b-444c-bb18-22f6b373be52
-        aise messages get -s ab841016 --type user --limit 50
+        aise messages corrections
+        aise messages corrections --limit 50 --project myproject
+        aise messages corrections --format json
     """
-    _do_get(get_engine(), session_id, message_type, limit, max_chars, fmt)
+    _do_messages_corrections(get_engine(), project, after, before, limit, fmt)
+
+
+@messages_app.command("planning")
+def messages_planning(
+    project: Optional[str] = typer.Option(None, "--project"),
+    after: Optional[str] = typer.Option(None, "--after"),
+    before: Optional[str] = typer.Option(None, "--before"),
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+) -> None:
+    """Show planning command usage frequency across all sessions.
+
+    Counts occurrences of /ar:plannew, /ar:planrefine, /ar:planupdate, /ar:planprocess
+    and their short aliases.
+
+    Examples:
+        aise messages planning
+        aise messages planning --project myproject
+        aise messages planning --format json
+    """
+    _do_messages_planning(get_engine(), project, after, before, fmt)
+
+
+# ── tools_app commands ────────────────────────────────────────────────────────
+
+def _tools_search_cmd(
+    tool: str = typer.Argument(..., help="Tool name (e.g. Bash, Edit, Write, Read, Glob, Grep)."),
+    query: Optional[str] = typer.Argument(None, help="Optional text to match in tool input. Omit to list all uses."),
+    limit: int = typer.Option(10, "--limit", help="Max results. Default: 10"),
+    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each result to N chars. 0=full."),
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
+) -> None:
+    """Search or find tool invocations from Claude Code sessions.
+
+    Accessible as both 'tools search' and 'tools find' (aliases).
+
+    Examples:
+        aise tools search Write                      # all Write calls
+        aise tools search Bash "git commit"          # Bash calls with "git commit"
+        aise tools find Edit "cli.py"                # find alias
+        aise tools search Write --format json        # JSON output
+    """
+    _do_messages_search(
+        get_engine(), query or "", message_type="assistant",
+        limit=limit, max_chars=max_chars, fmt=fmt, tool=tool,
+    )
+
+
+_register_alias(tools_app, _tools_search_cmd, "search", "find")
 
 
 # ── Root commands ─────────────────────────────────────────────────────────────
 
-@app.command()
-def search(
-    domain: Optional[str] = typer.Argument(None, help="Optional: 'files' (source files) or 'messages' (conversation text). Omit to auto-detect from flags.", metavar="[files|messages]"),
+@app.command("list")
+def list_sessions(
+    project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
+    after: Optional[str] = typer.Option(None, "--after", help="Only sessions after this date (e.g. 2026-01-15)."),
+    before: Optional[str] = typer.Option(None, "--before", help="Only sessions before this date."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Max sessions to return. Default: unlimited."),
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+) -> None:
+    """List Claude Code sessions with metadata (project, date, branch, message count).
+
+    Examples:
+        aise list                              # all sessions
+        aise list --project myproject          # filter by project
+        aise list --after 2026-01-01           # sessions since Jan 1
+        aise list --format json                # JSON output
+    """
+    _do_list_sessions(get_engine(), project, after, before, limit, fmt)
+
+
+def _root_search_cmd(
+    domain: Optional[str] = typer.Argument(None, metavar="[files|messages|tools]",
+        help="Domain: 'files', 'messages', or 'tools' (tool calls). Auto-detected from flags."),
     pattern: Optional[str] = typer.Option(None, "--pattern", "-p", help="[files] Filename glob/regex to match (e.g. '*.py', 'cli*'). Default: * (all files)"),
     query: Optional[str] = typer.Option(None, "--query", "-q", help="[messages] Text to search for in user/assistant message content"),
-    min_edits: int = typer.Option(0, "--min-edits", help="[files] Only show files edited at least this many times across all sessions. Default: 0"),
+    min_edits: int = typer.Option(0, "--min-edits", help="[files] Only show files edited at least this many times. Default: 0"),
     max_edits: Optional[int] = typer.Option(None, "--max-edits", help="[files] Only show files edited at most this many times. Default: unlimited"),
     include_extensions: Optional[str] = typer.Option(None, "--include-extensions", "-i", help="[files] Only these file extensions, comma-separated (e.g. py,md,json)"),
     exclude_extensions: Optional[str] = typer.Option(None, "--exclude-extensions", "-x", help="[files] Skip these file extensions, comma-separated (e.g. pyc,tmp)"),
     include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="[files] Only search these session UUIDs, comma-separated"),
     exclude_sessions: Optional[str] = typer.Option(None, "--exclude-sessions", help="[files] Skip these session UUIDs, comma-separated"),
-    after: Optional[str] = typer.Option(None, "--after", help="[files] Only files modified after this datetime (e.g. 2026-01-15 or 2026-01-15T14:30:00)"),
-    before: Optional[str] = typer.Option(None, "--before", help="[files] Only files modified before this datetime (e.g. 2026-12-31 or 2026-12-31T23:59:59)"),
+    after: Optional[str] = typer.Option(None, "--after", help="[files/messages] Only results after this date."),
+    before: Optional[str] = typer.Option(None, "--before", help="[files/messages] Only results before this date."),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="[messages] Show only 'user' or 'assistant' messages. Default: both"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited for files, 10 for messages"),
     max_chars: int = typer.Option(0, "--max-chars", help="[messages] Truncate each message to this many characters. 0 = full message. Default: 0"),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    tool: Optional[str] = typer.Option(None, "--tool",
+        help="[messages/tools] Filter for tool call invocations (e.g. Bash, Edit, Write). Auto-routes to messages domain."),
 ) -> None:
-    """
-    Search source files and/or conversation messages from Claude Code sessions.
+    """Search or find source files and/or conversation messages.
 
-    Searches two kinds of data:
-      files    — source code files (*.py, *.md, etc.) that Claude wrote or edited
-      messages — user/assistant conversation text from session JSONL files
-
-    Auto-detects what to search based on flags:
-      --pattern only → searches files
-      --query only   → searches messages
-      both flags     → searches both, shows two sections
-      neither flag   → lists all source files (sorted by edit count)
-
-    Flags marked [files] only apply to file search; [messages] only apply to message search.
+    Accessible as both 'search' and 'find' at the root level (aliases).
 
     Examples:
-        aise search                                    # list all source files
-        aise search files --pattern "*.py"             # Python files only
-        aise search messages --query "error"           # messages containing "error"
-        aise search --pattern "*.py" --query "error"   # both: Python files + messages with "error"
-        aise search files --min-edits 5 -i py,md       # heavily-edited Python/Markdown files
+        aise search                                          # list all source files
+        aise search files --pattern "*.py"                   # Python files only
+        aise search messages --query "error"                 # messages with "error"
+        aise search tools --tool Write --query "login"       # Write calls with "login"
+        aise search --tool Bash --query "git commit"         # auto-routes to messages
+        aise find files --pattern "*.py"                     # find is an alias
     """
-    # Validate domain
-    if domain is not None and domain not in ("files", "messages"):
-        typer.echo(f"Error: domain must be 'files' or 'messages', got '{domain}'", err=True)
-        raise typer.Exit(1)
+    _do_search(
+        get_engine(), domain, pattern, query, min_edits, max_edits,
+        include_extensions, exclude_extensions, include_sessions, exclude_sessions,
+        after, before, message_type, limit, max_chars, fmt, tool=tool,
+    )
 
-    # Validate flag/domain conflicts
-    if domain == "messages" and pattern is not None:
-        typer.echo("Error: --pattern applies to files, not messages. Use --query.", err=True)
-        raise typer.Exit(1)
-    if domain == "files" and query is not None:
-        typer.echo("Error: --query applies to messages, not files. Use --pattern.", err=True)
-        raise typer.Exit(1)
 
-    # Auto-detect domain from flags when not explicitly specified
-    if domain is None:
-        if query is not None and pattern is None:
-            domain = "messages"
-        elif pattern is not None and query is None:
-            domain = "files"
-        elif pattern is not None and query is not None:
-            domain = "both"
-        else:
-            domain = "files"  # default: show all files
-
-    engine = get_engine()
-
-    if domain in ("files", "both"):
-        _do_files_search(
-            engine, pattern or "*", min_edits, max_edits,
-            include_extensions, exclude_extensions,
-            include_sessions, exclude_sessions,
-            after, before, limit, fmt,
-        )
-
-    if domain in ("messages", "both"):
-        msg_limit = limit if limit is not None else 10
-        _do_messages_search(engine, query or "", message_type, msg_limit, max_chars, fmt)
+_register_alias(app, _root_search_cmd, "search", "find")
 
 
 @app.command()
@@ -794,7 +1318,8 @@ def history(
 
 @app.command()
 def get(
-    session_id: str = typer.Option(..., "--session", "-s", help="Session UUID (e.g. ab841016-f07b-444c-bb18-22f6b373be52)"),
+    session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016)."),
+    session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
     max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = show full message. Default: 0"),
@@ -803,9 +1328,14 @@ def get(
     """Read messages from one specific Claude Code session.
 
     Equivalent to 'aise messages get'. Session IDs are UUIDs found in ~/.claude/projects/
-    or in output from 'aise search'.
+    or in output from 'aise list'.
+
+    Examples:
+        aise get ab841016
+        aise get ab841016 --type user --limit 50
     """
-    _do_get(get_engine(), session_id, message_type, limit, max_chars, fmt)
+    sid = session_id or session_opt
+    _do_get(get_engine(), sid, message_type, limit, max_chars, fmt)
 
 
 @app.command()
