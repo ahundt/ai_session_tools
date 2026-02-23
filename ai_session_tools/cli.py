@@ -740,8 +740,9 @@ def _do_messages_search(
         if fmt == "json":
             sys.stdout.write(json.dumps([r.to_dict() for r in ctx_results], indent=2) + "\n")
             return
-        # Flat display: separator + before context + match + after context
-        truncate = max_chars if max_chars > 0 else 500
+        # Flat display: separator + before context + match + after context.
+        # truncate=None means no truncation (Python slice [:None] returns full string).
+        truncate = max_chars if max_chars > 0 else None
         for cm in ctx_results:
             console.print(f"[dim]{'─' * 60}[/dim]")
             for m in cm.context_before:
@@ -762,7 +763,10 @@ def _do_messages_search(
         return
 
     if fmt in ("json", "csv", "plain"):
-        truncate = max_chars if max_chars > 0 else 500
+        # truncate=None means no limit (Python [:None] returns full string).
+        # JSON format ignores row_fn entirely (uses to_dict() directly) so content
+        # is always complete. csv/plain respects max_chars if set, else no truncation.
+        truncate = max_chars if max_chars > 0 else None
         spec = TableSpec(
             title_template=f"Messages ({{n}} found){tag}",
             columns=[
@@ -944,6 +948,87 @@ def _do_messages_planning(
         commands=commands,
     )
     _render_output(results, fmt, _PLANNING_SPEC, "No planning commands found")
+
+
+_ANALYZE_TOOLS_SPEC = TableSpec(
+    title_template="Tool Usage ({n} tools)",
+    columns=[
+        ColumnSpec("Tool", style="cyan"),
+        ColumnSpec("Count", justify="right"),
+    ],
+    row_fn=lambda d: [d["tool"], str(d["count"])],
+    summary_template="Found {n} distinct tools",
+)
+
+_TIMELINE_SPEC = TableSpec(
+    title_template="Session Timeline ({n} events)",
+    columns=[
+        ColumnSpec("Timestamp", style="dim", no_wrap=True),
+        ColumnSpec("Type", style="cyan"),
+        ColumnSpec("Tools", justify="right"),
+        ColumnSpec("Preview"),
+    ],
+    row_fn=lambda d: [
+        d.get("timestamp", "")[:19],
+        d.get("type", ""),
+        str(d.get("tool_count", 0)),
+        d.get("content_preview", ""),
+    ],
+)
+
+
+def _do_messages_analyze(
+    engine: SessionRecoveryEngine,
+    session_id: str,
+    fmt: str = "table",
+) -> None:
+    """Show per-session statistics."""
+    result = engine.analyze_session(session_id)
+    if result is None:
+        err_console.print(f"[red]No session found matching:[/red] {session_id!r}")
+        raise typer.Exit(code=1)
+
+    if fmt == "json":
+        console.print(json.dumps(result.to_dict(), indent=2))
+        return
+
+    # Summary header
+    console.print(f"\n[bold]Session:[/bold] {result.session_id[:16]}…")
+    console.print(f"[bold]Project:[/bold] {result.project_dir}")
+    console.print(f"[bold]Lines:[/bold] {result.total_lines}  "
+                  f"[bold]User:[/bold] {result.user_count}  "
+                  f"[bold]Assistant:[/bold] {result.assistant_count}")
+    console.print(f"[bold]From:[/bold] {result.timestamp_first[:19]}  "
+                  f"[bold]To:[/bold] {result.timestamp_last[:19]}\n")
+
+    # Tool usage table
+    tool_rows = [{"tool": t, "count": c}
+                 for t, c in sorted(result.tool_uses_by_name.items(),
+                                    key=lambda x: x[1], reverse=True)]
+    if tool_rows:
+        _render_output(tool_rows, fmt, _ANALYZE_TOOLS_SPEC, "No tool calls found")
+
+    # Files touched list
+    if result.files_touched:
+        console.print(f"\n[bold]Files touched ({len(result.files_touched)}):[/bold]")
+        for fp in result.files_touched:
+            console.print(f"  {fp}")
+    else:
+        console.print("\n[dim]No files touched.[/dim]")
+
+
+def _do_messages_timeline(
+    engine: SessionRecoveryEngine,
+    session_id: str,
+    fmt: str = "table",
+    preview_chars: int = 150,
+) -> None:
+    """Show chronological event timeline for a session."""
+    events = engine.timeline_session(session_id, preview_chars=preview_chars)
+    if not events:
+        err_console.print(f"[red]No session found matching:[/red] {session_id!r}")
+        raise typer.Exit(code=1)
+    _render_output(events, fmt, _TIMELINE_SPEC, "No events found")
 
 
 def _do_files_cross_ref(
@@ -1502,6 +1587,45 @@ def messages_planning(
         aise messages planning --commands '/mycommand,/mc,/plan,/p'
     """
     _do_messages_planning(get_engine(), project, after, before, fmt, commands_raw=commands)
+
+
+@messages_app.command("analyze")
+def messages_analyze(
+    session_id: str = typer.Argument(..., help="Session ID prefix (e.g. ab841016). Find IDs via 'aise list'."),
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+) -> None:
+    """Show per-session statistics: message counts, tool usage, and files touched.
+
+    Files touched are detected from any tool_use block that includes a file_path
+    input — not hardcoded to specific tool names.
+
+    Examples:
+        aise messages analyze ab841016
+        aise messages analyze ab841016 --format json
+    """
+    _do_messages_analyze(get_engine(), session_id, fmt)
+
+
+@messages_app.command("timeline")
+def messages_timeline(
+    session_id: str = typer.Argument(..., help="Session ID prefix (e.g. ab841016). Find IDs via 'aise list'."),
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    preview_chars: int = typer.Option(
+        150, "--preview-chars",
+        help="Max characters to show in content preview column. Default: 150",
+    ),
+) -> None:
+    """Show a chronological timeline of user/assistant events for a session.
+
+    Each row shows the message type, timestamp, number of tool calls invoked,
+    and a preview of the message content.
+
+    Examples:
+        aise messages timeline ab841016
+        aise messages timeline ab841016 --format json
+        aise messages timeline ab841016 --preview-chars 80
+    """
+    _do_messages_timeline(get_engine(), session_id, fmt, preview_chars=preview_chars)
 
 
 # ── tools_app commands ────────────────────────────────────────────────────────

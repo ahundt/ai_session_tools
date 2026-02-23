@@ -4050,3 +4050,92 @@ class TestMessagesSearchContext:
             assert "match" in data[0]
             assert "context_before" in data[0]
             assert "context_after" in data[0]
+
+
+# ─── Part: CLI messages analyze ───────────────────────────────────────────────
+
+class TestMessagesAnalyze:
+    def test_analyze_exit0(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "analyze", "aaaa0001"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+
+    def test_analyze_shows_tool_name(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "analyze", "aaaa0001"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+        assert "Write" in result.output
+
+    def test_analyze_shows_file_path(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "analyze", "aaaa0001"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+        assert "login.py" in result.output
+
+    def test_analyze_json_format(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "analyze", "aaaa0001", "--format", "json"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "session_id" in data
+        assert "tool_uses_by_name" in data
+        assert "files_touched" in data
+        assert "Write" in data["tool_uses_by_name"]
+
+    def test_analyze_missing_session_exits_nonzero(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "analyze", "nonexistent-session"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code != 0
+
+
+# ─── Part: CLI messages timeline ──────────────────────────────────────────────
+
+class TestMessagesTimeline:
+    def test_timeline_exit0(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "timeline", "aaaa0001"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+
+    def test_timeline_shows_event_types(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "timeline", "aaaa0001"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+        assert "user" in result.output
+        assert "assistant" in result.output
+
+    def test_timeline_json_format(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "timeline", "aaaa0001", "--format", "json"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        assert len(data) == 4  # fixture has 3 user + 1 assistant
+        for ev in data:
+            assert "type" in ev
+            assert "timestamp" in ev
+            assert "tool_count" in ev
+            assert "content_preview" in ev
+
+    def test_timeline_missing_session_exits_nonzero(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "timeline", "nonexistent"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code != 0
+
+    def test_timeline_preview_chars_option(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "timeline", "aaaa0001",
+                                     "--preview-chars", "10", "--format", "json"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        for ev in data:
+            assert len(ev["content_preview"]) <= 10
