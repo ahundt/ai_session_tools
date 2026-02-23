@@ -363,10 +363,28 @@ class SessionInfo:
     message_count: int     # count of lines where type == "user" or "assistant"
     has_compact_summary: bool  # True if any line has isCompactSummary == true
 
+    @property
+    def project_display(self) -> str:
+        """Human-readable project name (strips leading path components like -Users-alice-).
+
+        Uses the same algorithm as SessionRecoveryEngine.extract_project_name() but
+        implemented inline to avoid circular imports between models.py and engine.py.
+        Strips the home directory prefix (-Users-<name>- or -home-<name>-) and returns
+        the last path component. Encoded dots (represented as leading '-') are preserved.
+        """
+        import re as _re
+        stripped = _re.sub(r'^-(Users|home)-[^-]+-', '', self.project_dir)
+        if not stripped:
+            return self.project_dir
+        if stripped.startswith('-'):
+            return stripped
+        return stripped.rsplit('-', 1)[-1] or stripped
+
     def to_dict(self) -> dict:
         return {
             "session_id": self.session_id,
             "project_dir": self.project_dir,
+            "project_display": self.project_display,
             "cwd": self.cwd,
             "git_branch": self.git_branch,
             "timestamp_first": self.timestamp_first,

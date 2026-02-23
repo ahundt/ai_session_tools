@@ -38,13 +38,20 @@ from .models import (
 #: Uses \b word boundaries (matching claude_session_tools.py:103-127).
 DEFAULT_CORRECTION_PATTERNS: List[tuple] = [
     ("regression",       [r"\byou deleted\b", r"\byou removed\b", r"\blost\b",
-                          r"\bregressed\b", r"\brollback\b", r"\brevert\b"]),
+                          r"\bregressed\b", r"\brollback\b", r"\brevert\b",
+                          r"\bbroke\b"]),
     ("skip_step",        [r"\byou forgot\b", r"\byou missed\b", r"\byou skipped\b",
-                          r"\bdon't forget\b", r"\bmissing step\b"]),
+                          r"\bdon't forget\b", r"\bmissing step\b",
+                          r"\byou didn't\b"]),
     ("misunderstanding", [r"\bwrong\b", r"\bincorrect\b", r"\bmistake\b",
-                          r"\bnono\b", r"\bno,\s", r"\bthat's not correct\b"]),
+                          r"\bnono\b", r"\bno,\s", r"\bthat's not correct\b",
+                          r"\bactually\b", r"\bwait,?\s", r"\bwhat,"]),
     ("incomplete",       [r"\balso need\b", r"\bmust also\b", r"\bnot done\b",
-                          r"\bnot finished\b", r"\bstill need\b"]),
+                          r"\bnot finished\b", r"\bstill need\b",
+                          r"\bshould have\b", r"\bbut you\b"]),
+    # Catch-all for correction signals that don't fit the above 4 categories.
+    # Checked last so it only fires when no specific category matches first.
+    ("other",            [r"\bstop\b"]),
 ]
 
 #: Default planning command regex patterns.
@@ -87,6 +94,43 @@ class SessionRecoveryEngine:
         self.recovery_dir = Path(recovery_dir)
         self._file_cache: Dict[str, RecoveredFile] = {}
         self._version_cache: Dict[str, List[FileVersion]] = {}
+
+    # ── Project name helpers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def extract_project_name(encoded_dir: str) -> str:
+        """Return a human-readable project name from Claude's encoded directory name.
+
+        Claude encodes project paths by replacing every non-alphanumeric, non-hyphen
+        character with '-'.  Examples:
+            /Users/alice/project   →  -Users-alice-project
+            /Users/alice/source/p  →  -Users-alice-source-p
+            /home/bob/project      →  -home-bob-project
+
+        This method strips the common leading path prefix (home directory components)
+        to return just the meaningful project part.  It works for macOS, Linux, and
+        any username by stripping all leading ``-<word>`` segments until only one
+        remains (or until no more ``-<word>-`` prefixes are present).
+
+        Args:
+            encoded_dir: Encoded project directory name (e.g. "-Users-alice-project").
+
+        Returns:
+            Human-readable project name (e.g. "project").
+        """
+        import re as _re
+        # Strip the home directory prefix: -Users-<username>- (macOS) or -home-<username>- (Linux).
+        # The pattern matches exactly: leading dash + root word ('Users'/'home') + dash + username + dash.
+        stripped = _re.sub(r'^-(Users|home)-[^-]+-', '', encoded_dir)
+        if not stripped:
+            return encoded_dir
+        # If the remainder starts with '-', it represents an encoded dot (.) from the original path.
+        # Return as-is to preserve the leading dash (e.g. for .claude → --claude → -claude display).
+        if stripped.startswith('-'):
+            return stripped
+        # Return the last '-'-separated component (rightmost path segment).
+        # This handles intermediate directories like 'source-myproject' → 'myproject'.
+        return stripped.rsplit('-', 1)[-1] or stripped
 
     # ── Private JSONL iteration helpers ──────────────────────────────────────
 
@@ -980,6 +1024,54 @@ class SessionRecoveryEngine:
             f"---\n\n"
         )
         return header + "\n".join(lines_md)
+
+    # Regex for cat-to-pbcopy heredoc pattern (compiled once, module-level is not possible
+    # because this is a class method — kept here as a class-level constant for efficiency).
+    _PBCOPY_RE = re.compile(
+        r"cat\s+<<['\"]?EOF['\"]?\s*\|\s*pbcopy\s*\n(.*?)\nEOF",
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    def get_clipboard_content(self, session_id: str) -> List[dict]:
+        """Extract text content that was piped to clipboard (pbcopy) in a session.
+
+        Scans Bash tool_use blocks for cat-to-pbcopy heredoc patterns::
+
+            cat <<'EOF' | pbcopy
+            ... content ...
+            EOF
+
+        Args:
+            session_id: Session ID prefix to match. Uses newest match when ambiguous.
+
+        Returns:
+            List of dicts with keys: ``timestamp`` (str), ``content`` (str).
+            Empty list if session not found or no pbcopy calls.
+        """
+        matches = self._find_session_files(session_id)
+        if not matches:
+            return []
+        session_file, _project_dir_name = matches[0]
+        results: List[dict] = []
+        for data in self._scan_jsonl(session_file):
+            if data.get("type") != "assistant":
+                continue
+            msg_content = data.get("message", {}).get("content", [])
+            if not isinstance(msg_content, list):
+                continue
+            for item in msg_content:
+                if not isinstance(item, dict) or item.get("type") != "tool_use":
+                    continue
+                if item.get("name") != "Bash":
+                    continue
+                cmd = item.get("input", {}).get("command", "")
+                m = self._PBCOPY_RE.search(cmd)
+                if m:
+                    results.append({
+                        "timestamp": data.get("timestamp", ""),
+                        "content": m.group(1),
+                    })
+        return results
 
     def analyze_session(self, session_id: str) -> Optional[SessionAnalysis]:
         """Return per-session statistics: message counts, tool usage, and files touched.

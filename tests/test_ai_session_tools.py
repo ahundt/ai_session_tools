@@ -297,7 +297,7 @@ class TestSessionInfoModel:
         )
         d = si.to_dict()
         assert set(d.keys()) == {
-            "session_id", "project_dir", "cwd", "git_branch",
+            "session_id", "project_dir", "project_display", "cwd", "git_branch",
             "timestamp_first", "timestamp_last", "message_count", "has_compact_summary",
         }
 
@@ -4246,3 +4246,281 @@ class TestFindSessionFilesMultipleMatches:
         engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
         with pytest.raises(ValueError, match="No session found"):
             engine.export_session_markdown("zzzz")
+
+
+# ============================================================================
+# Task #12: Missing correction patterns + "other" category
+# ============================================================================
+
+def _make_projects_with_correction_messages(tmp_path: Path) -> Path:
+    """Create a projects dir with sessions containing messages for each new pattern category."""
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-alice-proj1"
+    proj.mkdir(parents=True)
+    s1 = "cccc0001-0000-0000-0000-000000000000"
+    messages = [
+        # regression: "broke"
+        {"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+         "message": {"role": "user", "content": "you broke the tests again"}},
+        # skip_step: "you didn't"
+        {"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:01:00.000Z",
+         "message": {"role": "user", "content": "you didn't add the imports"}},
+        # misunderstanding: "actually"
+        {"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:02:00.000Z",
+         "message": {"role": "user", "content": "actually that's not what I meant"}},
+        # misunderstanding: "wait,"
+        {"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:03:00.000Z",
+         "message": {"role": "user", "content": "wait, that's wrong"}},
+        # incomplete: "should have"
+        {"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:04:00.000Z",
+         "message": {"role": "user", "content": "you should have added the test"}},
+        # incomplete: "but you"
+        {"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:05:00.000Z",
+         "message": {"role": "user", "content": "but you left out the validation"}},
+        # other: "stop"
+        {"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:06:00.000Z",
+         "message": {"role": "user", "content": "stop, you're overwriting my changes"}},
+        # misunderstanding: "what,"
+        {"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:07:00.000Z",
+         "message": {"role": "user", "content": "what, that's completely wrong"}},
+    ]
+    (proj / f"{s1}.jsonl").write_text("\n".join(json.dumps(m) for m in messages))
+    return projects
+
+
+class TestCorrectionPatternsExtended:
+    """New patterns from claude_session_tools.py parity check."""
+
+    def test_broke_detected_as_regression(self, tmp_path):
+        projects = _make_projects_with_correction_messages(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.find_corrections()
+        broke = [r for r in results if "broke" in r.matched_pattern or "broke" in r.content]
+        assert any(r.category == "regression" for r in broke), "broke → regression"
+
+    def test_you_didnt_detected_as_skip_step(self, tmp_path):
+        projects = _make_projects_with_correction_messages(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.find_corrections()
+        didnt = [r for r in results if "didn't" in r.content.lower() or "didn" in r.content.lower()]
+        assert any(r.category == "skip_step" for r in didnt), "you didn't → skip_step"
+
+    def test_actually_detected_as_misunderstanding(self, tmp_path):
+        projects = _make_projects_with_correction_messages(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.find_corrections()
+        actually = [r for r in results if "actually" in r.content.lower()]
+        assert any(r.category == "misunderstanding" for r in actually), "actually → misunderstanding"
+
+    def test_wait_detected_as_misunderstanding(self, tmp_path):
+        projects = _make_projects_with_correction_messages(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.find_corrections()
+        wait = [r for r in results if r.content.lower().startswith("wait,")]
+        assert any(r.category == "misunderstanding" for r in wait), "wait, → misunderstanding"
+
+    def test_should_have_detected_as_incomplete(self, tmp_path):
+        projects = _make_projects_with_correction_messages(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.find_corrections()
+        should = [r for r in results if "should have" in r.content.lower()]
+        assert any(r.category == "incomplete" for r in should), "should have → incomplete"
+
+    def test_but_you_detected_as_incomplete(self, tmp_path):
+        projects = _make_projects_with_correction_messages(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.find_corrections()
+        but_you = [r for r in results if "but you" in r.content.lower()]
+        assert any(r.category == "incomplete" for r in but_you), "but you → incomplete"
+
+    def test_stop_detected_as_other(self, tmp_path):
+        projects = _make_projects_with_correction_messages(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.find_corrections()
+        stop = [r for r in results if r.content.lower().startswith("stop,")]
+        assert any(r.category == "other" for r in stop), "stop → other"
+
+    def test_what_detected_as_misunderstanding(self, tmp_path):
+        projects = _make_projects_with_correction_messages(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.find_corrections()
+        what = [r for r in results if r.content.lower().startswith("what,")]
+        assert any(r.category == "misunderstanding" for r in what), "what, → misunderstanding"
+
+
+# ============================================================================
+# Task #13: extract_project_name() utility
+# ============================================================================
+
+class TestExtractProjectName:
+    """extract_project_name() decodes Claude's encoded project dir names."""
+
+    def test_strips_users_prefix(self):
+        # -Users-alice-myproject → myproject
+        result = SessionRecoveryEngine.extract_project_name("-Users-alice-myproject")
+        assert result == "myproject"
+
+    def test_strips_users_source_prefix(self):
+        # -Users-alice-source-myproject → myproject
+        result = SessionRecoveryEngine.extract_project_name("-Users-alice-source-myproject")
+        assert result == "myproject"
+
+    def test_strips_home_prefix(self):
+        # -home-alice-myproject → myproject (Linux)
+        result = SessionRecoveryEngine.extract_project_name("-home-alice-myproject")
+        assert result == "myproject"
+
+    def test_no_strip_needed(self):
+        # Already short name: pass through
+        result = SessionRecoveryEngine.extract_project_name("myproject")
+        assert result == "myproject"
+
+    def test_encoded_claude_dir(self):
+        # -Users-alice--claude → -claude (the .claude directory)
+        result = SessionRecoveryEngine.extract_project_name("-Users-alice--claude")
+        # Should strip -Users-alice- prefix, leaving --claude → -claude
+        assert "-claude" in result
+
+    def test_list_command_shows_decoded_name(self, tmp_path):
+        # aise list output should contain human-readable name, not raw encoded dir
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["list", "--format", "json"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        # project_display should not start with "-Users-" in JSON output
+        assert len(data) > 0
+        for row in data:
+            # The project_dir field still has the raw name; project_display should be decoded
+            assert "project_display" in row or "project_dir" in row
+
+
+# ============================================================================
+# Task #14: pbcopy extraction (get_clipboard_content)
+# ============================================================================
+
+def _make_projects_with_pbcopy(tmp_path: Path) -> Path:
+    """Create session with a Bash tool_use that pipes content to pbcopy via heredoc."""
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-alice-proj1"
+    proj.mkdir(parents=True)
+    s1 = "dddd0001-0000-0000-0000-000000000000"
+    lines = [
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                    "gitBranch": "main", "cwd": "/Users/alice/proj1",
+                    "message": {"role": "user", "content": "copy that to clipboard"}}),
+        json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-24T10:01:00.000Z",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "t1", "name": "Bash",
+                         "input": {"command": "cat <<'EOF' | pbcopy\nhello clipboard content\nEOF"}}]}}),
+        json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-24T10:02:00.000Z",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "t2", "name": "Bash",
+                         "input": {"command": "cat <<'EOF' | pbcopy\nsecond clipboard entry\nEOF"}}]}}),
+        # A Bash call WITHOUT pbcopy — should NOT appear in clipboard results
+        json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-24T10:03:00.000Z",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "t3", "name": "Bash",
+                         "input": {"command": "git status"}}]}}),
+    ]
+    (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+    return projects
+
+
+class TestGetClipboardContent:
+    """Engine.get_clipboard_content() extracts pbcopy heredoc content."""
+
+    def test_returns_list_of_dicts(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.get_clipboard_content("dddd0001")
+        assert isinstance(results, list)
+
+    def test_finds_two_pbcopy_entries(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.get_clipboard_content("dddd0001")
+        assert len(results) == 2
+
+    def test_content_extracted_correctly(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.get_clipboard_content("dddd0001")
+        contents = [r["content"] for r in results]
+        assert any("hello clipboard content" in c for c in contents)
+        assert any("second clipboard entry" in c for c in contents)
+
+    def test_non_pbcopy_bash_excluded(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.get_clipboard_content("dddd0001")
+        contents = [r["content"] for r in results]
+        assert not any("git status" in c for c in contents)
+
+    def test_result_has_timestamp(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.get_clipboard_content("dddd0001")
+        assert all("timestamp" in r for r in results)
+
+    def test_empty_on_no_pbcopy(self, tmp_path):
+        # Session with no pbcopy Bash calls
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.get_clipboard_content("aaaa0001")
+        assert results == []
+
+    def test_empty_on_missing_session(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.get_clipboard_content("zzzz")
+        assert results == []
+
+
+class TestMessagesExtractCLI:
+    """CLI: aise messages extract <session-id> <type>"""
+
+    def test_extract_pbcopy_exit0(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "extract", "dddd0001", "pbcopy"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_extract_pbcopy_shows_content(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "extract", "dddd0001", "pbcopy"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert "clipboard" in result.output
+
+    def test_extract_pbcopy_json_format(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "extract", "dddd0001", "pbcopy", "--format", "json"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        assert len(data) == 2
+
+    def test_extract_missing_session_exits_nonzero(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "extract", "zzzz", "pbcopy"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code != 0
+
+    def test_extract_invalid_type_exits_nonzero(self, tmp_path):
+        projects = _make_projects_with_pbcopy(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "extract", "dddd0001", "invalid-type"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code != 0

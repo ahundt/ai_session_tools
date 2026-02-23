@@ -158,6 +158,17 @@ def _register_alias(sub_app: "typer.Typer", func: _Callable, *names: str) -> Non
 
 # ── Module-level TableSpec constants ─────────────────────────────────────────
 
+def _project_display(encoded_dir: str) -> str:
+    """Return a short human-readable project name from Claude's encoded dir name.
+
+    Delegates to SessionRecoveryEngine.extract_project_name(), then truncates
+    to 20 characters for table display.  The raw ``project_dir`` value is still
+    stored in the to_dict() output so JSON consumers can access it.
+    """
+    decoded = SessionRecoveryEngine.extract_project_name(encoded_dir)
+    return (decoded[-20:] if len(decoded) > 20 else decoded)
+
+
 _LIST_SPEC = TableSpec(
     title_template="Sessions ({n} found)",
     columns=[
@@ -170,7 +181,7 @@ _LIST_SPEC = TableSpec(
     ],
     row_fn=lambda d: [
         (d["session_id"][:16] + "\u2026") if len(d["session_id"]) > 16 else d["session_id"],
-        d["project_dir"][-20:] if len(d["project_dir"]) > 20 else d["project_dir"],
+        _project_display(d.get("project_display") or d["project_dir"]),
         d["git_branch"],
         d["timestamp_first"][:10],
         str(d["message_count"]),
@@ -1626,6 +1637,79 @@ def messages_timeline(
         aise messages timeline ab841016 --preview-chars 80
     """
     _do_messages_timeline(get_engine(), session_id, fmt, preview_chars=preview_chars)
+
+
+#: Supported content extraction types for ``messages extract``.
+_EXTRACT_TYPES = ("pbcopy",)
+
+_EXTRACT_PBCOPY_SPEC = TableSpec(
+    title_template="Clipboard entries ({n} found)",
+    columns=[
+        ColumnSpec("Timestamp", style="dim", no_wrap=True),
+        ColumnSpec("Content"),
+    ],
+    row_fn=lambda d: [d["timestamp"][:19], d["content"][:120]],
+    summary_template="Found {n} clipboard entries",
+    plain_fn=lambda d: d["content"],
+)
+
+
+def _do_messages_extract(
+    engine: "SessionRecoveryEngine",
+    session_id: str,
+    content_type: str,
+    fmt: str = "table",
+) -> None:
+    """Extract specific content type from a session."""
+    if content_type not in _EXTRACT_TYPES:
+        err_console.print(
+            f"[red]Unknown type: {content_type!r}. "
+            f"Supported types: {', '.join(_EXTRACT_TYPES)}[/red]"
+        )
+        raise typer.Exit(code=1)
+    if content_type == "pbcopy":
+        results = engine.get_clipboard_content(session_id)
+        if not results:
+            err_console.print(
+                f"[red]No session found or no clipboard content for: {session_id!r}[/red]"
+            )
+            raise typer.Exit(code=1)
+        _render_output(results, fmt, _EXTRACT_PBCOPY_SPEC, "No clipboard content found")
+
+
+@messages_app.command("extract")
+def messages_extract(
+    session_id: str = typer.Argument(..., help="Session ID prefix (e.g. dddd0001). Find IDs via 'aise list'."),
+    content_type: str = typer.Argument(
+        ...,
+        help=f"Content type to extract. Supported: {', '.join(_EXTRACT_TYPES)}.",
+        metavar="TYPE",
+    ),
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+) -> None:
+    """Extract specific content from a Claude Code session.
+
+    Currently supports:
+
+    \\b
+
+    **pbcopy** — text that was piped to the system clipboard via:
+
+        cat <<'EOF' | pbcopy
+
+        ...content...
+
+        EOF
+
+    Examples:
+
+        aise messages extract dddd0001 pbcopy
+
+        aise messages extract dddd0001 pbcopy --format json
+
+        aise messages extract dddd0001 pbcopy --format plain
+    """
+    _do_messages_extract(get_engine(), session_id, content_type, fmt)
 
 
 # ── tools_app commands ────────────────────────────────────────────────────────
