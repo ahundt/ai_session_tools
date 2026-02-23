@@ -5,6 +5,7 @@ Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 """
 
+import datetime
 import fnmatch
 import json
 import re
@@ -60,6 +61,13 @@ class SessionRecoveryEngine:
         """Get or create cached file info."""
         if file_path.name not in self._file_cache:
             versions = self.get_versions(file_path.name)
+            stat = file_path.stat()
+            last_modified = datetime.datetime.fromtimestamp(
+                stat.st_mtime, tz=datetime.timezone.utc
+            ).strftime("%Y-%m-%d")
+            created_date = datetime.datetime.fromtimestamp(
+                stat.st_ctime, tz=datetime.timezone.utc
+            ).strftime("%Y-%m-%d")
             self._file_cache[file_path.name] = RecoveredFile(
                 name=file_path.name,
                 path=str(file_path),
@@ -67,7 +75,9 @@ class SessionRecoveryEngine:
                 file_type=file_path.suffix[1:] or "unknown",
                 sessions=[v.session_id for v in versions],
                 edits=len(versions),
-                size_bytes=file_path.stat().st_size,
+                size_bytes=stat.st_size,
+                last_modified=last_modified,
+                created_date=created_date,
             )
         return self._file_cache[file_path.name]
 
@@ -86,6 +96,12 @@ class SessionRecoveryEngine:
             return False
 
         if not filters.matches_extension(file_info.file_type):
+            return False
+
+        if not filters.matches_date(file_info.last_modified):
+            return False
+
+        if not filters.matches_size(file_info.size_bytes):
             return False
 
         return True

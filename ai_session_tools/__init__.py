@@ -15,39 +15,64 @@ Example usage as library:
     results = engine.search("*.py", filters)
 """
 
+try:
+    from importlib.metadata import version
+    __version__ = version("ai_session_tools")
+except Exception:
+    __version__ = "1.0.0"
+
+__author__ = "Andrew Hundt"
+
 from .engine import SessionRecoveryEngine
-from .extractors import FileExtractor, MessageExtractor
 from .filters import LocationMatcher, MessageFilter, SearchFilter
-from .formatters import CsvFormatter, JsonFormatter, ResultFormatter, TableFormatter
+from .formatters import CsvFormatter, JsonFormatter, PlainFormatter, ResultFormatter, TableFormatter
 from .models import (
     FileLocation,
     FileType,
     FileVersion,
     FilterSpec,
+    MessageType,
     RecoveredFile,
-    SearchOptions,
+    RecoveryStatistics,
     SessionMessage,
+    SessionMetadata,
+)
+from .types import (
+    ComposableFilter,
+    ComposableSearch,
+    Extractable,
+    Filterable,
+    Formatter,
+    Reporter,
+    Searchable,
+    Storage,
 )
 
-__version__ = "2.0.0"
-__author__ = "Claude Code Recovery"
-
 __all__ = [
+    "ComposableFilter",
+    "ComposableSearch",
     "CsvFormatter",
-    "FileExtractor",
+    "Extractable",
     "FileLocation",
     "FileType",
     "FileVersion",
+    "Filterable",
     "FilterSpec",
+    "Formatter",
     "JsonFormatter",
     "LocationMatcher",
-    "MessageExtractor",
     "MessageFilter",
+    "MessageType",
+    "PlainFormatter",
     "RecoveredFile",
+    "RecoveryStatistics",
+    "Reporter",
     "ResultFormatter",
+    "Searchable",
     "SearchFilter",
-    "SearchOptions",
     "SessionMessage",
+    "SessionMetadata",
     "SessionRecoveryEngine",
+    "Storage",
     "TableFormatter",
 ]

@@ -10,19 +10,15 @@ Licensed under the Apache License, Version 2.0
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
-from .models import FileVersion, FilterSpec, RecoveredFile, SearchOptions
+from .models import FileVersion, FilterSpec, RecoveredFile
 
 
 @runtime_checkable
 class Searchable(Protocol):
     """Protocol for searchable storage backends."""
 
-    def search(self, pattern: str, options: Optional[SearchOptions] = None) -> List[RecoveredFile]:
-        """Search for files matching pattern."""
-        ...
-
-    def search_filtered(self, pattern: str, filters: FilterSpec) -> List[RecoveredFile]:
-        """Search with advanced filters."""
+    def search(self, pattern: str, filters: Optional[FilterSpec] = None) -> List[RecoveredFile]:
+        """Search for files matching pattern with optional filters."""
         ...
 
 
@@ -123,7 +119,6 @@ class ComposableSearch:
         self._searcher = searcher
         self._pattern = "*"
         self._filters: Optional[FilterSpec] = None
-        self._options: Optional[SearchOptions] = None
 
     def pattern(self, pattern: str) -> "ComposableSearch":
         """Set search pattern."""
@@ -135,16 +130,9 @@ class ComposableSearch:
         self._filters = filters
         return self
 
-    def with_options(self, options: SearchOptions) -> "ComposableSearch":
-        """Add options."""
-        self._options = options
-        return self
-
     def execute(self) -> List[RecoveredFile]:
         """Execute the search."""
-        if self._filters:
-            return self._searcher.search_filtered(self._pattern, self._filters)
-        return self._searcher.search(self._pattern, self._options)
+        return self._searcher.search(self._pattern, self._filters)
 
     def __iter__(self):
         """Support iteration."""

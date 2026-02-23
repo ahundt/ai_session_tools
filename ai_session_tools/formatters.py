@@ -127,19 +127,25 @@ class CsvFormatter(ResultFormatter):
 class MessageFormatter(ResultFormatter):
     """Format session messages."""
 
+    def __init__(self, max_chars: int = 0):
+        """Initialize with max_chars. 0 = full content (no truncation)."""
+        self.max_chars = max_chars
+
     def format(self, data: SessionMessage) -> str:
         """Format single message."""
+        text = data.preview(self.max_chars) if self.max_chars else data.content.replace("\n", " ")
         return f"""Type:       {data.type.value}
 Session:    {data.session_id}
 Timestamp:  {data.timestamp}
-Preview:    {data.preview}
+Content:    {text}
 Length:     {len(data.content)} chars"""
 
     def format_many(self, items: List[SessionMessage]) -> str:
         """Format multiple messages."""
         lines = []
         for msg in items:
-            lines.append(f"[{msg.type.value}] {msg.timestamp[:19]} - {msg.preview}")
+            text = msg.preview(self.max_chars) if self.max_chars else msg.content.replace("\n", " ")
+            lines.append(f"[{msg.type.value}] {msg.timestamp[:19]} - {text}")
         return "\n".join(lines)
 
 
@@ -151,7 +157,7 @@ class PlainFormatter(ResultFormatter):
         if isinstance(data, RecoveredFile):
             return f"{data.name} ({data.edits} edits) - {data.location.value}"
         elif isinstance(data, SessionMessage):
-            return f"[{data.type.value}] {data.preview}"
+            return f"[{data.type.value}] {data.preview()}"
         return str(data)
 
     def format_many(self, items: List[Any]) -> str:

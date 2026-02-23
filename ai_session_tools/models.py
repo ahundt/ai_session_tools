@@ -108,10 +108,16 @@ class SessionMessage:
     session_id: str
     line_count: Optional[int] = None
 
-    @property
-    def preview(self) -> str:
-        """Get preview of message content."""
-        return self.content[:100].replace("\n", " ")
+    def preview(self, limit: int = 100) -> str:
+        """Get preview of message content.
+
+        Args:
+            limit: Max characters to show. 0 = no limit (full content).
+        """
+        text = self.content.replace("\n", " ")
+        if limit and len(text) > limit:
+            return text[:limit]
+        return text
 
     @property
     def is_long(self) -> bool:
@@ -228,6 +234,24 @@ class FilterSpec:
             return False
         return True
 
+    def matches_date(self, date_str: Optional[str]) -> bool:
+        """Check if date falls within after_date/before_date range.
+
+        Args:
+            date_str: ISO date string e.g. "2026-02-22", or None.
+
+        Returns:
+            True if date passes filter. Files with no date (None) pass when no date filter is set;
+            are excluded when a filter IS set (conservative: unknown date treated as out-of-range).
+        """
+        if not date_str:
+            return not (self.after_date or self.before_date)
+        if self.after_date and date_str < self.after_date:
+            return False
+        if self.before_date and date_str > self.before_date:
+            return False
+        return True
+
     def with_pattern(self, *patterns: str) -> "FilterSpec":
         """Builder: set file patterns."""
         self.file_patterns = list(patterns)
@@ -267,28 +291,6 @@ class FilterSpec:
             self.exclude_extensions = exclude
         return self
 
-
-@dataclass
-class SearchOptions:
-    """Options for search operations (builder pattern)."""
-
-    case_sensitive: bool = False
-    use_regex: bool = False
-    limit: int = 1000
-    offset: int = 0
-    sort_by: str = "name"  # "name", "edits", "date"
-    sort_reverse: bool = True
-
-    def with_limit(self, limit: int) -> "SearchOptions":
-        """Builder: set result limit."""
-        self.limit = limit
-        return self
-
-    def with_sort(self, by: str, reverse: bool = True) -> "SearchOptions":
-        """Builder: set sorting."""
-        self.sort_by = by
-        self.sort_reverse = reverse
-        return self
 
 
 @dataclass

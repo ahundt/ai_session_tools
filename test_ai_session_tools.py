@@ -18,6 +18,11 @@ from ai_session_tools import (
     SearchFilter,
     FileLocation,
     FileVersion,
+    SessionMessage,
+    MessageType,
+    RecoveryStatistics,
+    ComposableFilter,
+    ComposableSearch,
 )
 
 
@@ -409,3 +414,529 @@ class TestFilterComposition:
         if filtered:
             assert all(r.edits >= 1 for r in filtered)
             assert all(r.file_type == "py" for r in filtered)
+
+
+# ── Regression Tests: Already-completed steps ─────────────────────────────────
+
+class TestCompletedStepModels:
+    """Tests for already-completed models.py changes (Step 2)."""
+
+    def test_filter_spec_has_matches_date(self):
+        """FilterSpec should have matches_date method."""
+        spec = FilterSpec()
+        assert hasattr(spec, "matches_date")
+        assert callable(spec.matches_date)
+
+    def test_filter_spec_has_matches_extension(self):
+        """FilterSpec should have matches_extension method."""
+        spec = FilterSpec()
+        assert spec.matches_extension("py") is True
+        assert spec.matches_extension(".py") is True
+
+    def test_filter_spec_with_extensions_builder(self):
+        """FilterSpec.with_extensions() builder works."""
+        spec = FilterSpec().with_extensions(include={"py", "md"})
+        assert spec.matches_extension("py") is True
+        assert spec.matches_extension("rs") is False
+
+    def test_filter_spec_matches_edits(self):
+        """FilterSpec.matches_edits works with min/max."""
+        spec = FilterSpec(min_edits=5, max_edits=10)
+        assert spec.matches_edits(5) is True
+        assert spec.matches_edits(10) is True
+        assert spec.matches_edits(4) is False
+        assert spec.matches_edits(11) is False
+
+    def test_filter_spec_max_edits_none_is_unlimited(self):
+        """max_edits=None means unlimited."""
+        spec = FilterSpec(min_edits=0, max_edits=None)
+        assert spec.matches_edits(999999) is True
+
+    def test_filter_spec_matches_session(self):
+        """FilterSpec.matches_session works."""
+        spec = FilterSpec(include_sessions={"abc", "def"})
+        assert spec.matches_session("abc") is True
+        assert spec.matches_session("xyz") is False
+
+    def test_filter_spec_matches_location(self):
+        """FilterSpec.matches_location works."""
+        spec = FilterSpec(include_folders={"main"})
+        assert spec.matches_location("clautorun/main") is True
+        assert spec.matches_location("clautorun/worktree") is False
+
+
+class TestCompletedStepTypes:
+    """Tests for already-completed types.py changes (Step 5)."""
+
+    def test_searchable_protocol_has_search(self):
+        """Searchable protocol should have search() method."""
+        from ai_session_tools.types import Searchable
+        assert hasattr(Searchable, "search")
+
+    def test_searchable_protocol_no_search_filtered(self):
+        """Searchable protocol should NOT have search_filtered() (removed)."""
+        from ai_session_tools.types import Searchable
+        # search_filtered was removed because engine has no such method
+        assert not hasattr(Searchable, "search_filtered") or "search_filtered" not in dir(Searchable)
+
+    def test_composable_search_no_with_options(self):
+        """ComposableSearch should NOT have with_options() (SearchOptions removed)."""
+        assert not hasattr(ComposableSearch, "with_options")
+
+    def test_composable_search_has_with_filters(self):
+        """ComposableSearch should have with_filters() method."""
+        assert hasattr(ComposableSearch, "with_filters")
+
+    def test_composable_filter_callable(self):
+        """ComposableFilter should be callable."""
+        cf = ComposableFilter()
+        result = cf([1, 2, 3])
+        assert result == [1, 2, 3]
+
+
+class TestCompletedStepInitExports:
+    """Tests for already-completed __init__.py changes (Step 6)."""
+
+    def test_no_search_options_export(self):
+        """SearchOptions should NOT be exported (removed)."""
+        import ai_session_tools
+        assert not hasattr(ai_session_tools, "SearchOptions")
+
+    def test_no_file_extractor_export(self):
+        """FileExtractor should NOT be exported (extractors.py deleted)."""
+        import ai_session_tools
+        assert not hasattr(ai_session_tools, "FileExtractor")
+
+    def test_no_message_extractor_export(self):
+        """MessageExtractor should NOT be exported (extractors.py deleted)."""
+        import ai_session_tools
+        assert not hasattr(ai_session_tools, "MessageExtractor")
+
+    def test_exports_recovery_statistics(self):
+        """RecoveryStatistics should be exported."""
+        assert RecoveryStatistics is not None
+
+    def test_exports_message_type(self):
+        """MessageType should be exported."""
+        assert MessageType.USER.value == "user"
+
+    def test_exports_composable_filter(self):
+        """ComposableFilter should be exported."""
+        assert ComposableFilter is not None
+
+    def test_exports_composable_search(self):
+        """ComposableSearch should be exported."""
+        assert ComposableSearch is not None
+
+    def test_version_not_hardcoded_2(self):
+        """__version__ should not be '2.0.0' (was wrong, fixed to use importlib.metadata)."""
+        import ai_session_tools
+        assert ai_session_tools.__version__ != "2.0.0"
+
+    def test_author_is_andrew_hundt(self):
+        """__author__ should be Andrew Hundt."""
+        import ai_session_tools
+        assert ai_session_tools.__author__ == "Andrew Hundt"
+
+    def test_pyproject_has_ais_alias(self):
+        """pyproject.toml should have ais script alias."""
+        import configparser
+        from pathlib import Path
+        # Read pyproject.toml to verify ais entry
+        pyproject = Path(__file__).parent / "pyproject.toml"
+        content = pyproject.read_text()
+        assert 'ais = "ai_session_tools.cli:cli_main"' in content
+
+
+# ── TDD Tests: Step 2b — MessageFormatter max_chars ──────────────────────────
+
+class TestSessionMessagePreview:
+    """TDD tests for SessionMessage.preview() method (was @property, now method with limit)."""
+
+    def test_preview_default_limit_100(self):
+        """preview() with default limit truncates at 100 chars."""
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-02-22T10:00:00Z",
+            content="x" * 200,
+            session_id="test-session",
+        )
+        result = msg.preview()
+        assert len(result) == 100
+
+    def test_preview_zero_returns_full_content(self):
+        """preview(0) returns full content (no truncation)."""
+        content = "x" * 500
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-02-22T10:00:00Z",
+            content=content,
+            session_id="test-session",
+        )
+        result = msg.preview(0)
+        assert len(result) == 500
+
+    def test_preview_custom_limit(self):
+        """preview(50) truncates at 50 chars."""
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-02-22T10:00:00Z",
+            content="x" * 200,
+            session_id="test-session",
+        )
+        result = msg.preview(50)
+        assert len(result) == 50
+
+    def test_preview_short_content_not_truncated(self):
+        """preview() does not truncate content shorter than limit."""
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-02-22T10:00:00Z",
+            content="short",
+            session_id="test-session",
+        )
+        assert msg.preview() == "short"
+        assert msg.preview(0) == "short"
+        assert msg.preview(100) == "short"
+
+    def test_preview_replaces_newlines(self):
+        """preview() replaces newlines with spaces."""
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-02-22T10:00:00Z",
+            content="line1\nline2\nline3",
+            session_id="test-session",
+        )
+        assert "\n" not in msg.preview()
+        assert "\n" not in msg.preview(0)
+
+
+class TestMessageFormatterMaxChars:
+    """TDD tests for MessageFormatter accepting max_chars parameter."""
+
+    def test_formatter_default_shows_full_content(self):
+        """MessageFormatter() with default max_chars=0 shows full content in format()."""
+        from ai_session_tools.formatters import MessageFormatter
+        formatter = MessageFormatter()
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-02-22T10:00:00Z",
+            content="a" * 300,
+            session_id="test-session",
+        )
+        output = formatter.format(msg)
+        # Full content should appear (300 chars of 'a')
+        assert "a" * 300 in output.replace("\n", " ") or len([c for c in output if c == 'a']) >= 300
+
+    def test_formatter_max_chars_truncates(self):
+        """MessageFormatter(max_chars=50) truncates in format()."""
+        from ai_session_tools.formatters import MessageFormatter
+        formatter = MessageFormatter(max_chars=50)
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-02-22T10:00:00Z",
+            content="a" * 300,
+            session_id="test-session",
+        )
+        output = formatter.format(msg)
+        # Should NOT contain 300 chars of 'a'
+        assert "a" * 300 not in output
+
+    def test_formatter_format_many_default_full_content(self):
+        """MessageFormatter().format_many() shows full content by default."""
+        from ai_session_tools.formatters import MessageFormatter
+        formatter = MessageFormatter()
+        msgs = [
+            SessionMessage(
+                type=MessageType.USER,
+                timestamp="2026-02-22T10:00:00Z",
+                content="b" * 200,
+                session_id="test-session",
+            )
+        ]
+        output = formatter.format_many(msgs)
+        assert "b" * 200 in output
+
+    def test_formatter_format_many_max_chars_truncates(self):
+        """MessageFormatter(max_chars=50).format_many() truncates."""
+        from ai_session_tools.formatters import MessageFormatter
+        formatter = MessageFormatter(max_chars=50)
+        msgs = [
+            SessionMessage(
+                type=MessageType.USER,
+                timestamp="2026-02-22T10:00:00Z",
+                content="b" * 200,
+                session_id="test-session",
+            )
+        ]
+        output = formatter.format_many(msgs)
+        assert "b" * 200 not in output
+
+
+class TestPlainFormatterPreview:
+    """TDD tests for PlainFormatter using preview() method call."""
+
+    def test_plain_formatter_uses_preview_method(self):
+        """PlainFormatter should use preview() as method, not property."""
+        from ai_session_tools.formatters import PlainFormatter
+        formatter = PlainFormatter()
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-02-22T10:00:00Z",
+            content="hello world " * 20,
+            session_id="test-session",
+        )
+        # Should not raise TypeError (would if preview is still @property and called as method)
+        output = formatter.format(msg)
+        assert isinstance(output, str)
+        assert "user" in output.lower()
+
+
+# ── TDD Tests: Step 3 — Engine date/size filtering ───────────────────────────
+
+class TestFilterSpecMatchesDate:
+    """TDD tests for FilterSpec.matches_date() method."""
+
+    def test_no_filter_passes_any_date(self):
+        """With no date filters set, any date passes."""
+        spec = FilterSpec()
+        assert spec.matches_date("2026-02-22") is True
+        assert spec.matches_date("2020-01-01") is True
+
+    def test_no_filter_passes_none_date(self):
+        """With no date filters, None date passes."""
+        spec = FilterSpec()
+        assert spec.matches_date(None) is True
+
+    def test_after_date_excludes_earlier(self):
+        """after_date excludes dates before the threshold."""
+        spec = FilterSpec(after_date="2026-02-01")
+        assert spec.matches_date("2026-01-15") is False
+        assert spec.matches_date("2026-02-01") is True
+        assert spec.matches_date("2026-02-22") is True
+
+    def test_before_date_excludes_later(self):
+        """before_date excludes dates after the threshold."""
+        spec = FilterSpec(before_date="2026-02-15")
+        assert spec.matches_date("2026-02-22") is False
+        assert spec.matches_date("2026-02-15") is True
+        assert spec.matches_date("2026-01-01") is True
+
+    def test_date_range(self):
+        """Combined after_date + before_date creates a range."""
+        spec = FilterSpec(after_date="2026-02-01", before_date="2026-02-28")
+        assert spec.matches_date("2026-02-15") is True
+        assert spec.matches_date("2026-01-15") is False
+        assert spec.matches_date("2026-03-01") is False
+
+    def test_none_date_excluded_when_filter_active(self):
+        """None date is excluded when any date filter is active (conservative)."""
+        spec = FilterSpec(after_date="2026-01-01")
+        assert spec.matches_date(None) is False
+
+    def test_none_date_excluded_with_before_date(self):
+        """None date is excluded when before_date is set."""
+        spec = FilterSpec(before_date="2026-12-31")
+        assert spec.matches_date(None) is False
+
+
+class TestEnginePopulatesDateFields:
+    """TDD tests for engine populating last_modified and created_date."""
+
+    def test_search_results_have_last_modified(self, engine):
+        """Search results should have last_modified populated (not None)."""
+        results = engine.search("*.py")
+        if results:
+            # At least some files should have last_modified set
+            dated = [r for r in results if r.last_modified is not None]
+            assert len(dated) > 0, "Engine should populate last_modified from file stat"
+
+    def test_search_results_have_created_date(self, engine):
+        """Search results should have created_date populated."""
+        results = engine.search("*.py")
+        if results:
+            dated = [r for r in results if r.created_date is not None]
+            assert len(dated) > 0, "Engine should populate created_date from file stat"
+
+    def test_last_modified_is_iso_format(self, engine):
+        """last_modified should be ISO YYYY-MM-DD format."""
+        results = engine.search("*.py")
+        if results:
+            for r in results:
+                if r.last_modified:
+                    assert len(r.last_modified) == 10, f"Expected YYYY-MM-DD, got {r.last_modified}"
+                    assert r.last_modified[4] == "-"
+                    assert r.last_modified[7] == "-"
+
+    def test_date_filter_actually_filters(self, engine):
+        """Date filter should actually exclude files outside the range."""
+        # Get all files first
+        all_results = engine.search("*.py")
+        if not all_results:
+            pytest.skip("No files found")
+
+        # Use a future date that should exclude everything
+        filters = FilterSpec(after_date="2099-01-01")
+        filtered = engine.search("*.py", filters)
+        assert len(filtered) < len(all_results), "Date filter should exclude some files"
+
+
+class TestEngineSizeFilterWired:
+    """TDD tests for engine wiring matches_size() in _apply_all_filters."""
+
+    def test_size_filter_excludes_small_files(self, engine):
+        """min_size filter should exclude files smaller than threshold."""
+        all_results = engine.search("*")
+        if not all_results:
+            pytest.skip("No files found")
+
+        # Find max size to set a threshold that excludes some
+        max_size = max(r.size_bytes for r in all_results)
+        if max_size == 0:
+            pytest.skip("All files have 0 size")
+
+        filters = FilterSpec(min_size=max_size)
+        filtered = engine.search("*", filters)
+        # Should have fewer results (only files >= max_size)
+        assert len(filtered) <= len(all_results)
+        assert all(r.size_bytes >= max_size for r in filtered)
+
+
+# ── TDD Tests: Step 7 — CLI dual-ordering ────────────────────────────────────
+
+class TestCLIDualOrdering:
+    """TDD tests for CLI dual-ordering commands."""
+
+    def test_cli_has_search_command(self):
+        """CLI app has 'search' command."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["search", "--help"])
+        assert result.exit_code == 0
+        assert "search" in result.output.lower() or "pattern" in result.output.lower()
+
+    def test_cli_has_files_group(self):
+        """CLI app has 'files' command group."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["files", "--help"])
+        assert result.exit_code == 0
+
+    def test_cli_has_messages_group(self):
+        """CLI app has 'messages' command group."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["messages", "--help"])
+        assert result.exit_code == 0
+
+    def test_cli_files_search_exists(self):
+        """'ais files search' route exists."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["files", "search", "--help"])
+        assert result.exit_code == 0
+        assert "pattern" in result.output.lower()
+
+    def test_cli_messages_search_exists(self):
+        """'ais messages search' route exists."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["messages", "search", "--help"])
+        assert result.exit_code == 0
+        assert "query" in result.output.lower()
+
+    def test_cli_messages_get_exists(self):
+        """'ais messages get' route exists."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["messages", "get", "--help"])
+        assert result.exit_code == 0
+        assert "session" in result.output.lower()
+
+    def test_cli_extract_uses_name_not_file(self):
+        """'extract' uses --name/-n, not --file/-f."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["extract", "--help"])
+        assert result.exit_code == 0
+        assert "--name" in result.output
+
+    def test_cli_get_command_exists(self):
+        """Root 'get' command exists."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["get", "--help"])
+        assert result.exit_code == 0
+        assert "session" in result.output.lower()
+
+    def test_cli_stats_command_exists(self):
+        """Root 'stats' command exists."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["stats", "--help"])
+        assert result.exit_code == 0
+
+    def test_cli_search_has_max_chars_for_messages(self):
+        """'search messages' or 'messages search' should have --max-chars option."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["messages", "search", "--help"])
+        assert result.exit_code == 0
+        assert "max-chars" in result.output.lower()
+
+    def test_cli_search_files_has_date_flags(self):
+        """File search should have --after-date and --before-date flags."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["files", "search", "--help"])
+        assert result.exit_code == 0
+        assert "after-date" in result.output.lower()
+        assert "before-date" in result.output.lower()
+
+    def test_cli_search_files_has_session_flags(self):
+        """File search should have --include-sessions and --exclude-sessions."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["files", "search", "--help"])
+        assert result.exit_code == 0
+        assert "include-sessions" in result.output.lower()
+        assert "exclude-sessions" in result.output.lower()
+
+    def test_cli_search_files_uses_include_extensions(self):
+        """File search should use --include-extensions (not --include-types)."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["files", "search", "--help"])
+        assert result.exit_code == 0
+        assert "include-extensions" in result.output.lower()
+
+    def test_cli_get_has_max_chars(self):
+        """'get' command should have --max-chars option."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["get", "--help"])
+        assert result.exit_code == 0
+        assert "max-chars" in result.output.lower()
+
+    def test_cli_get_has_format(self):
+        """'get' command should have --format option."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["get", "--help"])
+        assert result.exit_code == 0
+        assert "format" in result.output.lower()
