@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["claude", "sessions", "analysis", "jsonl", "recovery", "cli"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
@@ -58,7 +58,7 @@ Issues = "https://github.com/anthropics/ai_session_tools/issues"
 packages = ["ai_session_tools"]
 
 [tool.pytest.ini_options]
-testpaths = ["test_ai_session_tools.py"]
+testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"

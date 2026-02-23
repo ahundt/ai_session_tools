@@ -559,7 +559,7 @@ class TestCompletedStepInitExports:
         """pyproject.toml should have aise script alias."""
         import configparser
         from pathlib import Path
-        pyproject = Path(__file__).parent / "pyproject.toml"
+        pyproject = Path(__file__).parent.parent / "pyproject.toml"
         content = pyproject.read_text()
         assert 'aise = "ai_session_tools.cli:cli_main"' in content
 
