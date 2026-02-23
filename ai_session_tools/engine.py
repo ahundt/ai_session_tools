@@ -11,10 +11,9 @@ import functools
 import json
 import os
 import re
-import warnings
 from collections import defaultdict
 from pathlib import Path
-from typing import ClassVar, Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 try:
     from orjson import loads as _json_loads
@@ -145,7 +144,7 @@ class SessionRecoveryEngine:
 
         return True
 
-    def search(
+    def search(  # noqa: C901
         self,
         pattern: str,
         filters: Optional[FilterSpec] = None,
@@ -427,7 +426,7 @@ class SessionRecoveryEngine:
 
         return messages
 
-    def search_messages(self, query: str, message_type: Optional[str] = None) -> List[SessionMessage]:
+    def search_messages(self, query: str, message_type: Optional[str] = None) -> List[SessionMessage]:  # noqa: C901
         """Search for messages across all sessions.
 
         Args:
@@ -573,7 +572,7 @@ class SessionRecoveryEngine:
 
         return ""
 
-    def get_original_path(self, filename: str) -> Optional[str]:
+    def get_original_path(self, filename: str) -> Optional[str]:  # noqa: C901
         """Find the most recent original path where Claude wrote or edited this filename.
 
         Searches project JSONL files for Write/Edit/NotebookEdit tool calls and

@@ -19,7 +19,7 @@ try:
     from importlib.metadata import version
     __version__ = version("ai_session_tools")
 except Exception:
-    __version__ = "1.0.0"
+    __version__ = "0.1.0"
 
 __author__ = "Andrew Hundt"
 
@@ -53,8 +53,8 @@ __all__ = [
     "CsvFormatter",
     "Extractable",
     "FileVersion",
-    "Filterable",
     "FilterSpec",
+    "Filterable",
     "Formatter",
     "JsonFormatter",
     "LocationMatcher",
@@ -65,8 +65,8 @@ __all__ = [
     "RecoveryStatistics",
     "Reporter",
     "ResultFormatter",
-    "Searchable",
     "SearchFilter",
+    "Searchable",
     "SessionMessage",
     "SessionMetadata",
     "SessionRecoveryEngine",

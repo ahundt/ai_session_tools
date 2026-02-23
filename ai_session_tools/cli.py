@@ -202,7 +202,7 @@ def _resolve_output_path(target: Path) -> Path:
     return candidate
 
 
-def _do_extract(
+def _do_extract(  # noqa: C901
     engine: SessionRecoveryEngine,
     name: str,
     version: Optional[int] = None,
@@ -387,10 +387,10 @@ def _do_files_search(
     fmt: str = "table",
 ) -> None:
     """Search recovered files with filtering."""
-    inc_ext = set(e.strip() for e in include_extensions.split(",") if e.strip()) if include_extensions else set()
-    exc_ext = set(e.strip() for e in exclude_extensions.split(",") if e.strip()) if exclude_extensions else set()
-    inc_sessions = set(s.strip() for s in include_sessions.split(",") if s.strip()) if include_sessions else set()
-    exc_sessions = set(s.strip() for s in exclude_sessions.split(",") if s.strip()) if exclude_sessions else set()
+    inc_ext = {e.strip() for e in include_extensions.split(",") if e.strip()} if include_extensions else set()
+    exc_ext = {e.strip() for e in exclude_extensions.split(",") if e.strip()} if exclude_extensions else set()
+    inc_sessions = {s.strip() for s in include_sessions.split(",") if s.strip()} if include_sessions else set()
+    exc_sessions = {s.strip() for s in exclude_sessions.split(",") if s.strip()} if exclude_sessions else set()
 
     filters = FilterSpec(min_edits=min_edits, max_edits=max_edits, after=after, before=before)
     if inc_ext or exc_ext:
