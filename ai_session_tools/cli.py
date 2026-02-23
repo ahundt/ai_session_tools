@@ -620,6 +620,54 @@ def _do_list_sessions(
     _render_output(sessions, fmt, _LIST_SPEC, "No sessions found")
 
 
+def _parse_pattern_options(raw: List[str]) -> List[tuple]:
+    """Parse --pattern "CATEGORY:REGEX" options into engine-format tuples.
+
+    Each raw string must be "CATEGORY:REGEX". Multiple entries with the same
+    category are combined into one tuple with a list of regexes.
+
+    Example::
+        ["skip_step:you missed", "skip_step:you forgot", "custom:you broke it"]
+        → [("skip_step", ["you missed", "you forgot"]), ("custom", ["you broke it"])]
+
+    Raises:
+        typer.BadParameter: If any entry lacks the required "CATEGORY:REGEX" format.
+    """
+    from collections import OrderedDict
+    groups: "OrderedDict[str, List[str]]" = OrderedDict()
+    for entry in raw:
+        if ":" not in entry:
+            raise typer.BadParameter(
+                f"--pattern {entry!r} must be in 'CATEGORY:REGEX' format, "
+                f"e.g. --pattern 'skip_step:you missed'"
+            )
+        category, regex = entry.split(":", 1)
+        category = category.strip()
+        regex = regex.strip()
+        if not category or not regex:
+            raise typer.BadParameter(
+                f"--pattern {entry!r}: both CATEGORY and REGEX must be non-empty"
+            )
+        if category not in groups:
+            groups[category] = []
+        groups[category].append(regex)
+    return [(cat, regexes) for cat, regexes in groups.items()]
+
+
+def _parse_commands_option(raw: Optional[str]) -> Optional[List[str]]:
+    """Parse --commands comma-separated string into a list of regex patterns.
+
+    Returns None (use engine default) when raw is None or empty.
+
+    Example::
+        "/ar:plannew,/ar:pn,/mycommand"
+        → ["/ar:plannew", "/ar:pn", "/mycommand"]
+    """
+    if not raw:
+        return None
+    return [cmd.strip() for cmd in raw.split(",") if cmd.strip()]
+
+
 def _do_messages_corrections(
     engine: SessionRecoveryEngine,
     project: Optional[str] = None,
@@ -627,10 +675,18 @@ def _do_messages_corrections(
     before: Optional[str] = None,
     limit: int = 20,
     fmt: str = "table",
+    pattern_overrides: Optional[List[str]] = None,
 ) -> None:
-    """Find user corrections across sessions."""
+    """Find user corrections across sessions.
+
+    Args:
+        pattern_overrides: Raw --pattern option values in "CATEGORY:REGEX" format.
+                           When provided, replaces DEFAULT_CORRECTION_PATTERNS entirely.
+    """
+    patterns = _parse_pattern_options(pattern_overrides) if pattern_overrides else None
     corrections = engine.find_corrections(
-        project_filter=project, after=after, before=before, limit=limit
+        project_filter=project, after=after, before=before,
+        limit=limit, patterns=patterns,
     )
     _render_output(corrections, fmt, _CORRECTIONS_SPEC, "No corrections found")
 
@@ -641,10 +697,18 @@ def _do_messages_planning(
     after: Optional[str] = None,
     before: Optional[str] = None,
     fmt: str = "table",
+    commands_raw: Optional[str] = None,
 ) -> None:
-    """Show planning command usage."""
+    """Show planning command usage.
+
+    Args:
+        commands_raw: Raw --commands option value: comma-separated regex patterns.
+                      When provided, replaces DEFAULT_PLANNING_COMMANDS entirely.
+    """
+    commands = _parse_commands_option(commands_raw)
     results = engine.analyze_planning_usage(
-        project_filter=project, after=after, before=before
+        project_filter=project, after=after, before=before,
+        commands=commands,
     )
     _render_output(results, fmt, _PLANNING_SPEC, "No planning commands found")
 
@@ -1126,37 +1190,76 @@ def messages_corrections(
     before: Optional[str] = typer.Option(None, "--before"),
     limit: int = typer.Option(20, "--limit", help="Max corrections to return. Default: 20"),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    pattern: Optional[List[str]] = typer.Option(
+        None, "--pattern",
+        help=(
+            "Custom correction pattern: 'CATEGORY:REGEX'. Repeatable. "
+            "When provided, replaces built-in patterns entirely. "
+            "Categories are arbitrary labels (e.g. regression, skip_step). "
+            "Multiple --pattern flags with the same category are ORed together.\n\n"
+            "Example: --pattern 'skip_step:you missed' --pattern 'skip_step:you forgot' "
+            "--pattern 'custom:you broke it'"
+        ),
+    ),
 ) -> None:
     """Find user messages where corrections were given to Claude.
 
-    Detects patterns like 'you forgot', 'nono', 'that's wrong', etc.
+    By default detects patterns like 'you forgot', 'nono', 'that's wrong', etc.
+    across four built-in categories: regression, skip_step, misunderstanding, incomplete.
+
+    Use --pattern to supply your own patterns instead of the built-in set.
+    Each --pattern value is 'CATEGORY:REGEX' where REGEX is a Python regex.
+    Multiple --pattern values with the same category are combined (OR logic).
+    When any --pattern is given, built-in patterns are NOT used.
 
     Examples:
         aise messages corrections
         aise messages corrections --limit 50 --project myproject
         aise messages corrections --format json
+        aise messages corrections --pattern 'regression:you deleted' --pattern 'regression:you removed'
+        aise messages corrections --pattern 'oops:nono' --pattern 'oops:that.s wrong'
     """
-    _do_messages_corrections(get_engine(), project, after, before, limit, fmt)
+    _do_messages_corrections(get_engine(), project, after, before, limit, fmt,
+                              pattern_overrides=pattern)
 
 
 @messages_app.command("planning")
 def messages_planning(
-    project: Optional[str] = typer.Option(None, "--project"),
-    after: Optional[str] = typer.Option(None, "--after"),
-    before: Optional[str] = typer.Option(None, "--before"),
+    project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
+    after: Optional[str] = typer.Option(None, "--after", help="Only commands after this date."),
+    before: Optional[str] = typer.Option(None, "--before", help="Only commands before this date."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    commands: Optional[str] = typer.Option(
+        None, "--commands",
+        help=(
+            "Comma-separated list of slash-command patterns to count. "
+            "When provided, replaces the built-in list entirely. "
+            "Each entry is a Python regex (word boundaries added automatically if absent). "
+            "Example: --commands '/ar:plannew,/ar:pn,/myplanning,/plan'"
+        ),
+    ),
 ) -> None:
-    """Show planning command usage frequency across all sessions.
+    """Show slash-command usage frequency across all sessions.
 
-    Counts occurrences of /ar:plannew, /ar:planrefine, /ar:planupdate, /ar:planprocess
-    and their short aliases.
+    By default counts the built-in planning commands:
+      /ar:plannew, /ar:pn, /ar:planrefine, /ar:pr, /ar:planupdate, /ar:pu,
+      /ar:planprocess, /ar:pp, /plannew, /planrefine, /planupdate, /planprocess
+
+    These defaults reflect autorun plugin commands. Use --commands to count
+    your own slash commands instead (built-in list is not used when --commands
+    is given).
+
+    Each entry in --commands is matched as a Python regex, case-insensitive.
+    The display name strips trailing \\b from each pattern.
 
     Examples:
         aise messages planning
         aise messages planning --project myproject
         aise messages planning --format json
+        aise messages planning --commands '/ar:plannew,/ar:pn'
+        aise messages planning --commands '/mycommand,/mc,/plan,/p'
     """
-    _do_messages_planning(get_engine(), project, after, before, fmt)
+    _do_messages_planning(get_engine(), project, after, before, fmt, commands_raw=commands)
 
 
 # ── tools_app commands ────────────────────────────────────────────────────────

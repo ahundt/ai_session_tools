@@ -685,6 +685,35 @@ class TestMessagesCorrections:
         data = json.loads(result.output)
         assert isinstance(data, list)
 
+    def test_corrections_custom_pattern_replaces_defaults(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        # Custom pattern that matches "start the feature" (not a default correction)
+        result = runner.invoke(
+            app, ["messages", "corrections", "--pattern", "custom:start the feature"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "custom" in result.output
+
+    def test_corrections_custom_pattern_excludes_defaults(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        # Pattern that won't match anything — built-in "you forgot" should NOT appear
+        result = runner.invoke(
+            app, ["messages", "corrections", "--pattern", "custom:xyzzy_nomatch_xyzzy"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # Built-in skip_step pattern should not be active
+        assert "skip_step" not in result.output
+
+    def test_corrections_bad_pattern_format_exits_nonzero(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "corrections", "--pattern", "no-colon-here"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code != 0
+
 
 # ─── Part 2d: messages search --tool ─────────────────────────────────────────
 
@@ -740,6 +769,38 @@ class TestMessagesPlanning:
         )
         assert result.exit_code == 0
         assert "No planning commands found" in result.output
+
+    def test_planning_custom_commands_replaces_defaults(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        # /ar:plannew is in session 1; /custom is not — result should have only /ar:plannew
+        result = runner.invoke(
+            app, ["messages", "planning", "--commands", "/ar:plannew"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "/ar:plannew" in result.output
+        # Default /ar:pn should NOT appear (replaced by custom list)
+        assert "/ar:pn" not in result.output
+
+    def test_planning_custom_commands_no_match(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["messages", "planning", "--commands", "/xyzzy_nomatch"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "No planning commands found" in result.output
+
+    def test_planning_custom_commands_multiple(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        # Both /ar:plannew (s1) and /ar:pn (s2) are in fixture
+        result = runner.invoke(
+            app, ["messages", "planning", "--commands", "/ar:plannew,/ar:pn"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "/ar:plannew" in result.output
+        assert "/ar:pn" in result.output
 
 
 # ─── Part 2f: files cross-ref ────────────────────────────────────────────────
