@@ -85,6 +85,9 @@ class SessionRecoveryEngine:
         if not filters.matches_edits(file_info.edits):
             return False
 
+        if not filters.matches_extension(file_info.file_type):
+            return False
+
         return True
 
     def search(

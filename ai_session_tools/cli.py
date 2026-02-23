@@ -44,6 +44,8 @@ def search(
     pattern: str = typer.Option("*", "--pattern", "-p", help="File pattern (glob or regex). Default: all files"),
     min_edits: int = typer.Option(0, "--min-edits", help="Minimum number of edits. Default: 0 (no minimum)"),
     max_edits: Optional[int] = typer.Option(None, "--max-edits", help="Maximum number of edits. Default: unlimited"),
+    include_types: Optional[str] = typer.Option(None, "--include-types", "-t", help="Include only these file types (comma-separated, e.g., py,md,json)"),
+    exclude_types: Optional[str] = typer.Option(None, "--exclude-types", "-x", help="Exclude these file types (comma-separated, e.g., pyc,tmp)"),
     format: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ):
     """
@@ -55,10 +57,20 @@ def search(
     Examples:
         ai_session_tools search --pattern "*.py"
         ai_session_tools search --pattern "*.py" --min-edits 5
+        ai_session_tools search --include-types py,ts,js  # Only Python, TypeScript, JavaScript
+        ai_session_tools search --exclude-types pyc,tmp   # Everything except temp files
         ai_session_tools search  # Lists all files
     """
     engine = get_engine()
+
+    # Parse optional extension filters
+    include_ext_set = set(include_types.split(",")) if include_types else set()
+    exclude_ext_set = set(exclude_types.split(",")) if exclude_types else set()
+
     filters = FilterSpec(min_edits=min_edits, max_edits=max_edits)
+    if include_ext_set or exclude_ext_set:
+        filters.with_extensions(include=include_ext_set if include_ext_set else None,
+                                exclude=exclude_ext_set if exclude_ext_set else None)
 
     results = engine.search(pattern, filters)
 

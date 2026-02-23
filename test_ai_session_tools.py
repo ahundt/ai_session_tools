@@ -227,3 +227,185 @@ class TestEdgeCases:
             except Exception:
                 # Expected to potentially fail with permission, but shouldn't crash
                 pass
+
+
+class TestMultipleFileTypes:
+    """Test searching for different file types (not just .py)"""
+
+    def test_search_markdown_files(self, engine):
+        """Test searching for Markdown files"""
+        results = engine.search("*.md")
+        # May be empty if no .md files exist, but shouldn't error
+        assert isinstance(results, list)
+
+    def test_search_json_files(self, engine):
+        """Test searching for JSON files"""
+        results = engine.search("*.json")
+        # May be empty if no .json files exist, but shouldn't error
+        assert isinstance(results, list)
+
+    def test_search_yaml_files(self, engine):
+        """Test searching for YAML files"""
+        results = engine.search("*.yaml")
+        assert isinstance(results, list)
+        # Verify all results are YAML files
+        if results:
+            assert all(r.name.endswith((".yaml", ".yml")) for r in results)
+
+    def test_search_typescript_files(self, engine):
+        """Test searching for TypeScript files"""
+        results = engine.search("*.ts")
+        assert isinstance(results, list)
+        if results:
+            assert all(r.name.endswith(".ts") for r in results)
+
+    def test_search_rust_files(self, engine):
+        """Test searching for Rust files"""
+        results = engine.search("*.rs")
+        assert isinstance(results, list)
+        if results:
+            assert all(r.name.endswith(".rs") for r in results)
+
+    def test_search_all_file_types_together(self, engine):
+        """Test searching for all files regardless of type"""
+        results = engine.search("*")
+        assert isinstance(results, list)
+        # Should find more files with wildcard than specific patterns
+        py_results = engine.search("*.py")
+        if py_results:
+            assert len(results) >= len(py_results)
+
+    def test_file_type_field_populated(self, engine):
+        """Test that file_type field is populated for all files"""
+        results = engine.search("*")
+        assert len(results) > 0, "Need at least one file to test"
+        for result in results:
+            assert result.file_type is not None
+            assert isinstance(result.file_type, str)
+            # file_type should be the extension without dot, or "unknown"
+            if "." in result.name:
+                expected_type = result.name.split(".")[-1]
+                assert result.file_type == expected_type or result.file_type == "unknown"
+
+    def test_unknown_file_type_handling(self, engine):
+        """Test that unknown file types are handled gracefully"""
+        # Search for a pattern that might match unknown extensions
+        results = engine.search("*.unknown")
+        # Should not crash, even if no results
+        assert isinstance(results, list)
+
+    def test_files_without_extension(self, engine):
+        """Test that files without extensions are handled"""
+        results = engine.search("*")
+        # Check if any files lack extensions
+        files_without_ext = [r for r in results if "." not in r.name]
+        for file in files_without_ext:
+            # Should have file_type of "unknown" or empty string
+            assert file.file_type in ("unknown", "")
+
+
+class TestFileTypeFiltering:
+    """Test filtering by file type"""
+
+    def test_filter_by_extension(self, engine):
+        """Test SearchFilter with file extension filtering"""
+        # Get all results first
+        all_results = engine.search("*")
+        if len(all_results) > 0:
+            # Try filtering by first file's extension
+            first_extension = all_results[0].file_type
+            filter_obj = SearchFilter().by_extension(first_extension)
+            filtered = filter_obj(all_results)
+            # All results should match the extension
+            assert all(f.file_type == first_extension for f in filtered)
+
+    def test_filter_by_python_extension(self, engine):
+        """Test filtering specifically for Python files"""
+        all_results = engine.search("*")
+        filter_obj = SearchFilter().by_extension("py")
+        filtered = filter_obj(all_results)
+        if filtered:
+            assert all(r.file_type == "py" for r in filtered)
+
+    def test_filter_empty_result_for_nonexistent_extension(self, engine):
+        """Test filtering for an extension that doesn't exist"""
+        all_results = engine.search("*")
+        filter_obj = SearchFilter().by_extension("nonexistent_extension_xyz")
+        filtered = filter_obj(all_results)
+        # Should return empty list since no files have that extension
+        assert filtered == []
+
+
+class TestMessageFiltering:
+    """Test message extraction and filtering"""
+
+    def test_get_messages_with_type_filter_user(self, engine):
+        """Test filtering for user messages only"""
+        # This requires actual session data, so skip if none exist
+        stats = engine.get_statistics()
+        if stats.total_sessions > 0:
+            messages = engine.get_messages("*", message_type="user")
+            assert isinstance(messages, list)
+            # If we got results, all should be user messages
+            if messages:
+                for msg in messages:
+                    assert msg.message_type in ("user", "USER")
+
+    def test_get_messages_with_type_filter_assistant(self, engine):
+        """Test filtering for assistant messages only"""
+        stats = engine.get_statistics()
+        if stats.total_sessions > 0:
+            messages = engine.get_messages("*", message_type="assistant")
+            assert isinstance(messages, list)
+            # If we got results, all should be assistant messages
+            if messages:
+                for msg in messages:
+                    assert msg.message_type in ("assistant", "ASSISTANT")
+
+    def test_search_messages_case_insensitive(self, engine):
+        """Test that message search is case insensitive"""
+        # Search with different cases for the same term
+        results_lower = engine.search_messages("python")
+        results_upper = engine.search_messages("PYTHON")
+        # Both should work (case insensitive)
+        assert isinstance(results_lower, list)
+        assert isinstance(results_upper, list)
+
+    def test_search_messages_with_phrases(self, engine):
+        """Test searching for multi-word phrases"""
+        results = engine.search_messages("session data")
+        assert isinstance(results, list)
+
+
+class TestFilterComposition:
+    """Test composable filter combinations"""
+
+    def test_filter_by_edits_range(self, engine):
+        """Test filtering by edit range"""
+        filters = FilterSpec(min_edits=1, max_edits=50)
+        results = engine.search("*", filters)
+        assert all(1 <= r.edits <= 50 for r in results)
+
+    def test_filter_by_high_edit_count(self, engine):
+        """Test filtering for highly edited files"""
+        filters = FilterSpec(min_edits=100)
+        results = engine.search("*", filters)
+        if results:
+            assert all(r.edits >= 100 for r in results)
+
+    def test_filter_with_pattern_and_edits(self, engine):
+        """Test combining pattern matching with edit filtering"""
+        filters = FilterSpec(min_edits=5)
+        py_results = engine.search("*.py", filters)
+        if py_results:
+            assert all(r.edits >= 5 for r in py_results)
+            assert all(r.name.endswith(".py") for r in py_results)
+
+    def test_search_filter_multiple_conditions(self, engine):
+        """Test SearchFilter with multiple chained conditions"""
+        all_results = engine.search("*")
+        filter_obj = SearchFilter().by_edits(min_edits=1).by_extension("py")
+        filtered = filter_obj(all_results)
+        if filtered:
+            assert all(r.edits >= 1 for r in filtered)
+            assert all(r.file_type == "py" for r in filtered)

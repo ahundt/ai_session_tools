@@ -30,11 +30,11 @@ class SearchFilter:
         self._predicates.append(predicate)
         return self
 
-    def by_type(self, file_type: str) -> "SearchFilter":
-        """Filter by file type."""
+    def by_extension(self, extension: str) -> "SearchFilter":
+        """Filter by file extension (e.g., 'py', 'md', 'json')."""
 
         def predicate(f: RecoveredFile) -> bool:
-            return f.file_type == file_type
+            return f.file_type == extension
 
         self._predicates.append(predicate)
         return self

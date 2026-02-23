@@ -130,6 +130,10 @@ class FilterSpec:
     # File patterns
     file_patterns: List[str] = field(default_factory=lambda: ["*"])
 
+    # File extension filtering (e.g., "py", "md", "json")
+    include_extensions: Set[str] = field(default_factory=set)
+    exclude_extensions: Set[str] = field(default_factory=set)
+
     # Edit count range
     min_edits: int = 0
     max_edits: Optional[int] = None
@@ -172,6 +176,28 @@ class FilterSpec:
 
         return True
 
+    def matches_extension(self, extension: str) -> bool:
+        """Check if file extension matches filter.
+
+        Args:
+            extension: File extension (with or without leading dot, e.g., "py" or ".py")
+
+        Returns:
+            True if extension passes include/exclude filters.
+        """
+        # Normalize extension (remove leading dot if present)
+        normalized_ext = extension.lstrip(".")
+
+        if self.include_extensions:
+            if normalized_ext not in self.include_extensions:
+                return False
+
+        if self.exclude_extensions:
+            if normalized_ext in self.exclude_extensions:
+                return False
+
+        return True
+
     def matches_edits(self, edit_count: int) -> bool:
         """Check if edit count matches filter."""
         if edit_count < self.min_edits:
@@ -205,6 +231,26 @@ class FilterSpec:
             self.include_sessions = include
         if exclude:
             self.exclude_sessions = exclude
+        return self
+
+    def with_extensions(self, include: Optional[Set[str]] = None, exclude: Optional[Set[str]] = None) -> "FilterSpec":
+        """Builder: filter by file extensions.
+
+        Args:
+            include: Set of extensions to include (e.g., {"py", "md", "json"}). None means all extensions.
+            exclude: Set of extensions to exclude (e.g., {"pyc", "tmp"}). Applied after include filter.
+
+        Returns:
+            Self for builder chaining.
+
+        Examples:
+            FilterSpec().with_extensions(include={"py", "ts", "js"})  # Only Python, TypeScript, JavaScript
+            FilterSpec().with_extensions(exclude={"tmp", "bak"})  # Everything except temp/backup files
+        """
+        if include:
+            self.include_extensions = include
+        if exclude:
+            self.exclude_extensions = exclude
         return self
 
 
