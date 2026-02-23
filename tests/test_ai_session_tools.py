@@ -11,20 +11,21 @@ Tests cover:
 """
 
 import json
-import os
-import pytest
 from pathlib import Path
+
+import pytest
+
 from ai_session_tools import (
     ChainedFilter,
-    SessionRecoveryEngine,
-    FilterSpec,
-    SearchFilter,
-    FileVersion,
-    SessionMessage,
-    MessageType,
-    RecoveryStatistics,
     ComposableFilter,
     ComposableSearch,
+    FileVersion,
+    FilterSpec,
+    MessageType,
+    RecoveryStatistics,
+    SearchFilter,
+    SessionMessage,
+    SessionRecoveryEngine,
 )
 
 
@@ -557,7 +558,6 @@ class TestCompletedStepInitExports:
 
     def test_pyproject_has_aise_alias(self):
         """pyproject.toml should have aise script alias."""
-        import configparser
         from pathlib import Path
         pyproject = Path(__file__).parent.parent / "pyproject.toml"
         content = pyproject.read_text()
@@ -852,8 +852,9 @@ class TestCLIDualOrdering:
 
     def test_cli_has_search_command(self):
         """CLI app has 'search' command."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["search", "--help"])
         assert result.exit_code == 0
@@ -861,24 +862,27 @@ class TestCLIDualOrdering:
 
     def test_cli_has_files_group(self):
         """CLI app has 'files' command group."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "--help"])
         assert result.exit_code == 0
 
     def test_cli_has_messages_group(self):
         """CLI app has 'messages' command group."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["messages", "--help"])
         assert result.exit_code == 0
 
     def test_cli_files_search_exists(self):
         """'ais files search' route exists."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
@@ -886,8 +890,9 @@ class TestCLIDualOrdering:
 
     def test_cli_messages_search_exists(self):
         """'ais messages search' route exists."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["messages", "search", "--help"])
         assert result.exit_code == 0
@@ -895,8 +900,9 @@ class TestCLIDualOrdering:
 
     def test_cli_messages_get_exists(self):
         """'ais messages get' route exists."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["messages", "get", "--help"])
         assert result.exit_code == 0
@@ -904,8 +910,9 @@ class TestCLIDualOrdering:
 
     def test_cli_extract_positional_name(self):
         """'extract' uses a positional NAME argument (not --name/-n)."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["extract", "--help"])
         assert result.exit_code == 0
@@ -915,8 +922,9 @@ class TestCLIDualOrdering:
 
     def test_cli_get_command_exists(self):
         """Root 'get' command exists."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
@@ -924,16 +932,18 @@ class TestCLIDualOrdering:
 
     def test_cli_stats_command_exists(self):
         """Root 'stats' command exists."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["stats", "--help"])
         assert result.exit_code == 0
 
     def test_cli_search_has_max_chars_for_messages(self):
         """'search messages' or 'messages search' should have --max-chars option."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["messages", "search", "--help"])
         assert result.exit_code == 0
@@ -941,8 +951,9 @@ class TestCLIDualOrdering:
 
     def test_cli_search_files_has_datetime_flags(self):
         """File search should have --after and --before flags."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
@@ -951,8 +962,9 @@ class TestCLIDualOrdering:
 
     def test_cli_search_files_has_session_flags(self):
         """File search should have --include-sessions and --exclude-sessions."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
@@ -961,8 +973,9 @@ class TestCLIDualOrdering:
 
     def test_cli_search_files_uses_include_extensions(self):
         """File search should use --include-extensions (not --include-types)."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
@@ -970,8 +983,9 @@ class TestCLIDualOrdering:
 
     def test_cli_get_has_max_chars(self):
         """'get' command should have --max-chars option."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
@@ -979,8 +993,9 @@ class TestCLIDualOrdering:
 
     def test_cli_get_has_format(self):
         """'get' command should have --format option."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
@@ -1360,7 +1375,7 @@ class TestStatisticsGlobal:
 class TestCsvFormatterQuoting:
     """CsvFormatter produces RFC 4180-compliant output for special characters."""
 
-    def _make_file(self, name: str) -> "RecoveredFile":
+    def _make_file(self, name: str):
         from ai_session_tools import RecoveredFile
         return RecoveredFile(
             name=name,
@@ -1373,8 +1388,10 @@ class TestCsvFormatterQuoting:
         )
 
     def test_comma_in_filename_is_quoted(self):
+        import csv
+        import io
+
         from ai_session_tools.formatters import CsvFormatter
-        import csv, io
         f = self._make_file("foo, bar.py")
         output = CsvFormatter().format(f)
         reader = csv.reader(io.StringIO(output))
@@ -1383,8 +1400,10 @@ class TestCsvFormatterQuoting:
         assert rows[1][0] == "foo, bar.py"
 
     def test_format_many_produces_valid_csv(self):
+        import csv
+        import io
+
         from ai_session_tools.formatters import CsvFormatter
-        import csv, io
         files = [self._make_file("a.py"), self._make_file('b,"quoted".py')]
         output = CsvFormatter().format_many(files)
         reader = csv.reader(io.StringIO(output))
@@ -1395,8 +1414,10 @@ class TestCsvFormatterQuoting:
 
     def test_newline_in_location_is_quoted(self):
         """csv.writer must quote fields containing newlines."""
+        import csv
+        import io
+
         from ai_session_tools.formatters import CsvFormatter
-        import csv, io
         f = self._make_file("ok.py")
         output = CsvFormatter().format(f)
         # Verify it parses back cleanly
@@ -1828,7 +1849,7 @@ class TestSessionsForProject:
     """_sessions_for_project() returns session IDs from project directory."""
 
     def test_returns_session_ids(self, tmp_path):
-        from ai_session_tools.cli import _sessions_for_project, _project_dir_name
+        from ai_session_tools.cli import _project_dir_name, _sessions_for_project
         # Create projects dir structure matching the encoded path
         projects = tmp_path / "projects"
         project_path = str(tmp_path / "myproject")
@@ -1854,8 +1875,8 @@ class TestClaudeConfigDirEnvVar:
     """get_engine() respects CLAUDE_CONFIG_DIR env var."""
 
     def test_claude_config_dir_sets_projects(self, tmp_path, monkeypatch):
-        from ai_session_tools.cli import get_engine
         import ai_session_tools.cli as cli_module
+        from ai_session_tools.cli import get_engine
         # Reset global to ensure env var path is tested
         original = cli_module._g_claude_dir
         cli_module._g_claude_dir = None
@@ -1873,9 +1894,9 @@ class TestClaudeDirCliFlag:
     """--claude-dir CLI flag takes precedence over CLAUDE_CONFIG_DIR env var."""
 
     def test_claude_dir_flag_used_as_base(self, tmp_path, monkeypatch):
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
-        import ai_session_tools.cli as cli_module
+
+        from ai_session_tools.cli import app
         monkeypatch.delenv("AI_SESSION_TOOLS_PROJECTS", raising=False)
         monkeypatch.delenv("AI_SESSION_TOOLS_RECOVERY", raising=False)
         # Create minimal structure so search doesn't crash
@@ -2126,9 +2147,10 @@ class TestPositionalArgExtract:
     """CLI extract command uses positional NAME argument."""
 
     def test_positional_name_works(self, tmp_path):
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
         import ai_session_tools.cli as cli_module
+        from ai_session_tools.cli import app
         runner = CliRunner()
         # Set up tmp recovery dir
         recovery = _make_recovery_dir(tmp_path)
@@ -2156,8 +2178,9 @@ class TestPositionalArgExtract:
 
     def test_no_name_flag_accepted(self):
         """--name flag should no longer be accepted."""
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["extract", "--help"])
         assert result.exit_code == 0
@@ -2168,8 +2191,9 @@ class TestPositionalArgHistory:
     """CLI history command uses positional NAME argument."""
 
     def test_history_help_shows_positional(self):
-        from ai_session_tools.cli import app
         from typer.testing import CliRunner
+
+        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "history", "--help"])
         assert result.exit_code == 0
@@ -2184,8 +2208,8 @@ class TestSearchTableShowsSessions:
     """TableFormatter.format_many() shows sessions column."""
 
     def test_sessions_column_in_table(self):
-        from ai_session_tools.formatters import TableFormatter
         from ai_session_tools import RecoveredFile
+        from ai_session_tools.formatters import TableFormatter
         files = [
             RecoveredFile(
                 name="cli.py", path="/cli.py", file_type="py", edits=3,
@@ -2199,8 +2223,8 @@ class TestSearchTableShowsSessions:
         assert "abc123de" in output
 
     def test_sessions_column_multiple_sessions(self):
-        from ai_session_tools.formatters import TableFormatter
         from ai_session_tools import RecoveredFile
+        from ai_session_tools.formatters import TableFormatter
         files = [
             RecoveredFile(
                 name="test.py", path="/test.py", file_type="py", edits=5,
@@ -2249,6 +2273,7 @@ class TestExtractMissingVersionFile:
     def test_restore_missing_version_file_exits_cleanly(self, tmp_path):
         """restore branch: missing version file on disk → Exit(1), not FileNotFoundError."""
         import typer
+
         from ai_session_tools.cli import _do_extract
         engine, _ = self._setup_engine_with_stale_cache(tmp_path, with_original_path=True)
         with pytest.raises(typer.Exit) as exc_info:
@@ -2258,6 +2283,7 @@ class TestExtractMissingVersionFile:
     def test_output_dir_missing_version_file_exits_cleanly(self, tmp_path):
         """output_dir branch: missing version file on disk → Exit(1), not FileNotFoundError."""
         import typer
+
         from ai_session_tools.cli import _do_extract
         engine, _ = self._setup_engine_with_stale_cache(tmp_path)
         with pytest.raises(typer.Exit) as exc_info:

@@ -56,3 +56,6 @@ uv.lock
 
 # Local planning notes (not for distribution)
 notes/
+
+# pyuvstarter audit log (https://github.com/ahundt/pyuvstarter)
+pyuvstarter_setup_log.json
