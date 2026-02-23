@@ -27,6 +27,7 @@ from .engine import SessionRecoveryEngine
 from .filters import ChainedFilter, LocationMatcher, MessageFilter, SearchFilter
 from .formatters import CsvFormatter, JsonFormatter, PlainFormatter, ResultFormatter, TableFormatter
 from .models import (
+    ContextMatch,
     CorrectionMatch,
     FileVersion,
     FilterSpec,
@@ -34,6 +35,7 @@ from .models import (
     PlanningCommandCount,
     RecoveredFile,
     RecoveryStatistics,
+    SessionAnalysis,
     SessionInfo,
     SessionMessage,
     SessionMetadata,
@@ -53,6 +55,7 @@ __all__ = [
     "ChainedFilter",
     "ComposableFilter",
     "ComposableSearch",
+    "ContextMatch",
     "CorrectionMatch",
     "CsvFormatter",
     "Extractable",
@@ -72,6 +75,7 @@ __all__ = [
     "ResultFormatter",
     "SearchFilter",
     "Searchable",
+    "SessionAnalysis",
     "SessionInfo",
     "SessionMessage",
     "SessionMetadata",

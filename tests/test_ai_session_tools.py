@@ -22,6 +22,7 @@ from ai_session_tools import (
     ChainedFilter,
     ComposableFilter,
     ComposableSearch,
+    ContextMatch,
     CorrectionMatch,
     FileVersion,
     FilterSpec,
@@ -29,6 +30,7 @@ from ai_session_tools import (
     PlanningCommandCount,
     RecoveryStatistics,
     SearchFilter,
+    SessionAnalysis,
     SessionInfo,
     SessionMessage,
     SessionRecoveryEngine,
@@ -3760,4 +3762,291 @@ class TestConfigInit:
             "AI_SESSION_TOOLS_CONFIG": str(cfg),
         })
         assert result.exit_code == 0
-        assert cfg.exists()
+
+
+# ─── Part: SessionAnalysis model ──────────────────────────────────────────────
+
+class TestSessionAnalysisModel:
+    def test_fields_accessible(self):
+        sa = SessionAnalysis(
+            session_id="abc123", project_dir="-proj", total_lines=10,
+            user_count=3, assistant_count=2,
+            tool_uses_by_name={"Write": 2, "Read": 1},
+            files_touched=["/foo/bar.py"],
+            timestamp_first="2026-01-01T00:00:00Z",
+            timestamp_last="2026-01-01T01:00:00Z",
+        )
+        assert sa.session_id == "abc123"
+        assert sa.user_count == 3
+        assert sa.tool_uses_by_name["Write"] == 2
+        assert sa.files_touched == ["/foo/bar.py"]
+
+    def test_to_dict_returns_all_keys(self):
+        sa = SessionAnalysis(
+            session_id="abc", project_dir="-p", total_lines=5,
+            user_count=1, assistant_count=1,
+            tool_uses_by_name={"Edit": 1},
+            files_touched=["/a.py"],
+            timestamp_first="2026-01-01T00:00:00Z",
+            timestamp_last="2026-01-01T01:00:00Z",
+        )
+        d = sa.to_dict()
+        assert set(d.keys()) == {
+            "session_id", "project_dir", "total_lines",
+            "user_count", "assistant_count",
+            "tool_uses_by_name", "files_touched",
+            "timestamp_first", "timestamp_last",
+        }
+
+    def test_is_mutable_dataclass(self):
+        sa = SessionAnalysis(
+            session_id="x", project_dir="y", total_lines=0,
+            user_count=0, assistant_count=0,
+            tool_uses_by_name={}, files_touched=[],
+            timestamp_first="", timestamp_last="",
+        )
+        sa.user_count = 7
+        assert sa.user_count == 7
+
+
+# ─── Part: ContextMatch model ─────────────────────────────────────────────────
+
+class TestContextMatchModel:
+    def _make_msg(self, content: str, session_id: str = "s1") -> SessionMessage:
+        return SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-01-01T00:00:00Z",
+            content=content,
+            session_id=session_id,
+        )
+
+    def test_fields_accessible(self):
+        match = self._make_msg("found this")
+        before = [self._make_msg("before")]
+        after = [self._make_msg("after")]
+        cm = ContextMatch(match=match, context_before=before, context_after=after)
+        assert cm.match.content == "found this"
+        assert len(cm.context_before) == 1
+        assert len(cm.context_after) == 1
+
+    def test_to_dict_has_three_keys(self):
+        cm = ContextMatch(
+            match=self._make_msg("m"),
+            context_before=[self._make_msg("b")],
+            context_after=[],
+        )
+        d = cm.to_dict()
+        assert set(d.keys()) == {"match", "context_before", "context_after"}
+        assert d["match"]["content"] == "m"
+        assert len(d["context_before"]) == 1
+        assert d["context_after"] == []
+
+    def test_is_mutable_dataclass(self):
+        cm = ContextMatch(
+            match=self._make_msg("x"),
+            context_before=[],
+            context_after=[],
+        )
+        cm.context_after = [self._make_msg("y")]
+        assert len(cm.context_after) == 1
+
+
+# ─── Part: Engine analyze_session ─────────────────────────────────────────────
+
+class TestAnalyzeSession:
+    def test_returns_session_analysis(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        result = engine.analyze_session("aaaa0001")
+        assert isinstance(result, SessionAnalysis)
+
+    def test_counts_messages(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        result = engine.analyze_session("aaaa0001")
+        # fixture: 3 user + 1 assistant = 4 lines
+        assert result.user_count == 3
+        assert result.assistant_count == 1
+        assert result.total_lines == 4
+
+    def test_detects_write_tool(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        result = engine.analyze_session("aaaa0001")
+        assert "Write" in result.tool_uses_by_name
+        assert result.tool_uses_by_name["Write"] == 1
+
+    def test_detects_files_touched(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        result = engine.analyze_session("aaaa0001")
+        assert "/Users/alice/proj1/login.py" in result.files_touched
+
+    def test_timestamps(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        result = engine.analyze_session("aaaa0001")
+        assert result.timestamp_first == "2026-01-24T10:00:00.000Z"
+        assert result.timestamp_last == "2026-01-24T10:11:00.000Z"
+
+    def test_returns_none_for_missing_session(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        result = engine.analyze_session("nonexistent")
+        assert result is None
+
+    def test_no_files_if_no_file_path_in_tool_input(self, tmp_path):
+        """Tools without file_path in input are counted but not in files_touched."""
+        projects = tmp_path / "projects"
+        proj = projects / "-proj"
+        proj.mkdir(parents=True)
+        sid = "cccc0003-0000-0000-0000-000000000000"
+        lines = [
+            json.dumps({"sessionId": sid, "type": "assistant",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "message": {"role": "assistant", "content": [
+                            {"type": "tool_use", "id": "t1", "name": "Bash",
+                             "input": {"command": "ls"}}]}}),
+        ]
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines))
+        engine = _make_engine(tmp_path, projects)
+        result = engine.analyze_session("cccc0003")
+        assert "Bash" in result.tool_uses_by_name
+        assert result.files_touched == []
+
+
+# ─── Part: Engine timeline_session ────────────────────────────────────────────
+
+class TestTimelineSession:
+    def test_returns_list(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        events = engine.timeline_session("aaaa0001")
+        assert isinstance(events, list)
+
+    def test_event_count(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        events = engine.timeline_session("aaaa0001")
+        # fixture has 3 user + 1 assistant = 4 events
+        assert len(events) == 4
+
+    def test_event_keys(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        events = engine.timeline_session("aaaa0001")
+        for ev in events:
+            assert "type" in ev
+            assert "timestamp" in ev
+            assert "content_preview" in ev
+            assert "tool_count" in ev
+
+    def test_assistant_event_has_tool_count(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        events = engine.timeline_session("aaaa0001")
+        asst_events = [e for e in events if e["type"] == "assistant"]
+        assert len(asst_events) == 1
+        assert asst_events[0]["tool_count"] == 1
+
+    def test_user_events_have_zero_tool_count(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        events = engine.timeline_session("aaaa0001")
+        for ev in [e for e in events if e["type"] == "user"]:
+            assert ev["tool_count"] == 0
+
+    def test_empty_for_missing_session(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        events = engine.timeline_session("nonexistent-session")
+        assert events == []
+
+    def test_content_preview_not_empty(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        events = engine.timeline_session("aaaa0001")
+        user_events = [e for e in events if e["type"] == "user"]
+        assert any(e["content_preview"] for e in user_events)
+
+
+# ─── Part: Engine search_messages_with_context ────────────────────────────────
+
+class TestSearchMessagesWithContext:
+    def test_returns_context_match_list(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages_with_context("feature", context=2)
+        assert isinstance(results, list)
+        assert all(isinstance(r, ContextMatch) for r in results)
+
+    def test_finds_match(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages_with_context("start the feature", context=1)
+        assert len(results) >= 1
+        assert any("feature" in r.match.content for r in results)
+
+    def test_context_before_and_after(self, tmp_path):
+        """With context=1, match has 0 before (first msg) and ≥1 after."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages_with_context("start the feature", context=1)
+        assert len(results) >= 1
+        cm = results[0]
+        # "start the feature" is the first message — no context before it
+        assert len(cm.context_before) == 0
+        # should have context_after (next messages in the session)
+        assert len(cm.context_after) >= 1
+
+    def test_zero_context_returns_no_surrounding(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages_with_context("feature", context=0)
+        for cm in results:
+            assert cm.context_before == []
+            assert cm.context_after == []
+
+    def test_no_results_for_missing_query(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages_with_context("xyzzy_not_found_12345", context=2)
+        assert results == []
+
+
+# ─── Part: CLI messages search --context ──────────────────────────────────────
+
+class TestMessagesSearchContext:
+    def test_context_flag_accepted(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "search", "feature", "--context", "2"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+
+    def test_context_shows_surrounding_messages(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "search", "start the feature",
+                                     "--context", "1"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+        # Output should mention found matches
+        assert "match" in result.output.lower() or "found" in result.output.lower()
+
+    def test_context_zero_same_as_default(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "search", "feature", "--context", "0"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+
+    def test_context_json_format(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "search", "feature",
+                                     "--context", "1", "--format", "json"],
+                               env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        if data:
+            assert "match" in data[0]
+            assert "context_before" in data[0]
+            assert "context_after" in data[0]

@@ -724,18 +724,45 @@ def _do_messages_search(
     max_chars: int = 0,
     fmt: str = "table",
     tool: Optional[str] = None,
+    context: int = 0,
 ) -> None:
-    """Search messages across all sessions."""
+    """Search messages across all sessions. When context > 0, each result includes
+    up to ``context`` surrounding messages from the same session file."""
+    tag = f" [tool: {tool}]" if tool else ""
+
+    if context > 0:
+        ctx_results = engine.search_messages_with_context(
+            query, context=context, message_type=message_type, tool=tool
+        )[:limit]
+        if not ctx_results:
+            console.print(f"[yellow]No messages match query{tag}[/yellow]")
+            return
+        if fmt == "json":
+            sys.stdout.write(json.dumps([r.to_dict() for r in ctx_results], indent=2) + "\n")
+            return
+        # Flat display: separator + before context + match + after context
+        truncate = max_chars if max_chars > 0 else 500
+        for cm in ctx_results:
+            console.print(f"[dim]{'─' * 60}[/dim]")
+            for m in cm.context_before:
+                console.print(f"[dim][{m.type.value}] {m.timestamp[:19]}[/dim]")
+                console.print(f"[dim]{m.content[:truncate]}[/dim]\n")
+            console.print(f"[bold cyan][{cm.match.type.value}] {cm.match.timestamp[:19]}[/bold cyan]")
+            console.print(f"{cm.match.content[:truncate]}\n")
+            for m in cm.context_after:
+                console.print(f"[dim][{m.type.value}] {m.timestamp[:19]}[/dim]")
+                console.print(f"[dim]{m.content[:truncate]}[/dim]\n")
+        console.print(f"\n[bold]Found {len(ctx_results)} matches{tag} (context ±{context})[/bold]")
+        return
+
     results = engine.search_messages(query, message_type, tool=tool)[:limit]
 
     if not results:
-        tag = f" [tool: {tool}]" if tool else ""
         console.print(f"[yellow]No messages match query{tag}[/yellow]")
         return
 
     if fmt in ("json", "csv", "plain"):
         truncate = max_chars if max_chars > 0 else 500
-        tag = f" [tool: {tool}]" if tool else ""
         spec = TableSpec(
             title_template=f"Messages ({{n}} found){tag}",
             columns=[
@@ -1354,6 +1381,10 @@ def _messages_search_cmd(
         None, "--tool",
         help="Filter for tool call invocations (e.g. Bash, Edit, Write). Implies --type assistant.",
     ),
+    context: int = typer.Option(
+        0, "--context", "-c",
+        help="Include N messages before and after each match (from the same session). Default: 0.",
+    ),
 ) -> None:
     """Search or find conversation messages from Claude Code sessions.
 
@@ -1364,9 +1395,11 @@ def _messages_search_cmd(
         aise messages search --query "authentication"  # backward compat
         aise messages find "error"                     # find is an alias
         aise messages search "*" --tool Write          # all Write tool calls
+        aise messages search "error" --context 3       # show 3 surrounding messages
     """
     q = query or query_opt
-    _do_messages_search(get_engine(), q or "", message_type, limit, max_chars, fmt, tool=tool)
+    _do_messages_search(get_engine(), q or "", message_type, limit, max_chars, fmt,
+                        tool=tool, context=context)
 
 
 _register_alias(messages_app, _messages_search_cmd, "search", "find")

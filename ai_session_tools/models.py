@@ -9,7 +9,7 @@ Licensed under the Apache License, Version 2.0
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 
 class MessageType(str, Enum):
@@ -415,4 +415,58 @@ class PlanningCommandCount:
             "unique_projects": len(self.project_dirs),
             "session_ids": self.session_ids,
             "project_dirs": self.project_dirs,
+        }
+
+
+@dataclass
+class SessionAnalysis:
+    """Per-session statistics: message counts, tool usage, and files touched.
+
+    Files touched are detected from any tool_use block where the tool's input
+    contains a ``file_path`` key — not hardcoded to Edit/Write/Read, so it
+    captures any future or custom tool that operates on files.
+    """
+
+    session_id: str
+    project_dir: str
+    total_lines: int               # JSONL lines (all types)
+    user_count: int                # type == "user" messages
+    assistant_count: int           # type == "assistant" messages
+    tool_uses_by_name: Dict[str, int]   # tool_name -> invocation count
+    files_touched: List[str]       # unique file paths from any tool with file_path input
+    timestamp_first: str           # ISO 8601 or ""
+    timestamp_last: str            # ISO 8601 or ""
+
+    def to_dict(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "project_dir": self.project_dir,
+            "total_lines": self.total_lines,
+            "user_count": self.user_count,
+            "assistant_count": self.assistant_count,
+            "tool_uses_by_name": self.tool_uses_by_name,
+            "files_touched": self.files_touched,
+            "timestamp_first": self.timestamp_first,
+            "timestamp_last": self.timestamp_last,
+        }
+
+
+@dataclass
+class ContextMatch:
+    """A message search match with surrounding context messages.
+
+    When ``search_messages_with_context`` is called with ``context > 0``,
+    each result wraps the matching message with up to ``context`` messages
+    before and after it from the same session file.
+    """
+
+    match: "SessionMessage"
+    context_before: List["SessionMessage"]  # messages before match, oldest first
+    context_after: List["SessionMessage"]   # messages after match, oldest first
+
+    def to_dict(self) -> dict:
+        return {
+            "match": self.match.to_dict(),
+            "context_before": [m.to_dict() for m in self.context_before],
+            "context_after": [m.to_dict() for m in self.context_after],
         }

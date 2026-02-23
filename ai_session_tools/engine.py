@@ -21,6 +21,7 @@ except ImportError:
     from json import loads as _json_loads  # type: ignore[assignment]
 
 from .models import (
+    ContextMatch,
     CorrectionMatch,
     FileVersion,
     FilterSpec,
@@ -28,6 +29,7 @@ from .models import (
     PlanningCommandCount,
     RecoveredFile,
     RecoveryStatistics,
+    SessionAnalysis,
     SessionInfo,
     SessionMessage,
 )
@@ -85,6 +87,63 @@ class SessionRecoveryEngine:
         self.recovery_dir = Path(recovery_dir)
         self._file_cache: Dict[str, RecoveredFile] = {}
         self._version_cache: Dict[str, List[FileVersion]] = {}
+
+    # ── Private JSONL iteration helpers ──────────────────────────────────────
+
+    def _iter_all_jsonl(
+        self, project_filter: Optional[str] = None
+    ):
+        """Yield (project_dir_name, jsonl_path) for every session across all projects.
+
+        Handles missing directory gracefully. All multi-session scanning methods
+        use this to avoid duplicating the glob + filter scaffolding.
+        """
+        if not self.projects_dir.exists():
+            return
+        for project_dir in self.projects_dir.glob("*"):
+            if not project_dir.is_dir():
+                continue
+            if project_filter and project_filter.lower() not in project_dir.name.lower():
+                continue
+            for jsonl_file in project_dir.glob("*.jsonl"):
+                yield project_dir.name, jsonl_file
+
+    def _find_session_file(self, session_id: str) -> Optional[tuple]:
+        """Return (jsonl_path, project_dir_name) for the given session ID prefix.
+
+        Returns None if no session matches. Raises ValueError if multiple match.
+        """
+        matches = []
+        for project_dir_name, jsonl_path in self._iter_all_jsonl():
+            if jsonl_path.stem.startswith(session_id):
+                matches.append((jsonl_path, project_dir_name))
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise ValueError(
+                f"Ambiguous session ID {session_id!r} matches {len(matches)} files"
+            )
+        return matches[0]
+
+    @staticmethod
+    def _scan_jsonl(path: Path):
+        """Yield parsed JSON dicts from a JSONL file, silently skipping malformed lines.
+
+        Handles OSError (permission denied, missing file) by returning nothing.
+        """
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    try:
+                        data = _json_loads(line)
+                        if isinstance(data, dict):
+                            yield data
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+        except OSError:
+            return
+
+    # ── End private helpers ───────────────────────────────────────────────────
 
     @functools.cached_property
     def _version_dirs(self) -> List[Path]:
@@ -964,6 +1023,236 @@ class SessionRecoveryEngine:
             f"---\n\n"
         )
         return header + "\n".join(lines_md)
+
+    def analyze_session(self, session_id: str) -> Optional[SessionAnalysis]:
+        """Return per-session statistics: message counts, tool usage, and files touched.
+
+        Files touched are detected by scanning every ``tool_use`` block for an input
+        key named ``file_path`` — this is not hardcoded to Edit/Write/Read, so it
+        captures any tool that operates on files, including future or custom tools.
+
+        Args:
+            session_id: Session ID prefix. Must match exactly one session JSONL file.
+
+        Returns:
+            SessionAnalysis, or None if no matching session is found.
+        """
+        session_file: Optional[Path] = None
+        project_dir_name = ""
+        if self.projects_dir.exists():
+            for project_dir in self.projects_dir.glob("*"):
+                if project_dir.is_dir():
+                    for f in project_dir.glob(f"{session_id}*.jsonl"):
+                        session_file = f
+                        project_dir_name = project_dir.name
+                        break
+                if session_file:
+                    break
+        if session_file is None:
+            return None
+
+        total_lines = 0
+        user_count = 0
+        assistant_count = 0
+        tool_uses_by_name: Dict[str, int] = {}
+        files_touched_set: Set[str] = set()
+        ts_first = ""
+        ts_last = ""
+
+        try:
+            with open(session_file, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    try:
+                        data = _json_loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    total_lines += 1
+                    ts = data.get("timestamp", "")
+                    if ts and not ts_first:
+                        ts_first = ts
+                    if ts:
+                        ts_last = ts
+                    msg_type = data.get("type", "")
+                    if msg_type == "user":
+                        user_count += 1
+                    elif msg_type == "assistant":
+                        assistant_count += 1
+                        # Scan tool_use blocks — general: detect any tool with file_path input
+                        msg_content = data.get("message", {}).get("content", [])
+                        if isinstance(msg_content, list):
+                            for item in msg_content:
+                                if not isinstance(item, dict) or item.get("type") != "tool_use":
+                                    continue
+                                tool_name = item.get("name", "unknown")
+                                tool_uses_by_name[tool_name] = tool_uses_by_name.get(tool_name, 0) + 1
+                                inp = item.get("input", {})
+                                if isinstance(inp, dict) and "file_path" in inp:
+                                    fp = inp["file_path"]
+                                    if fp:
+                                        files_touched_set.add(fp)
+        except OSError:
+            return None
+
+        return SessionAnalysis(
+            session_id=session_id,
+            project_dir=project_dir_name,
+            total_lines=total_lines,
+            user_count=user_count,
+            assistant_count=assistant_count,
+            tool_uses_by_name=tool_uses_by_name,
+            files_touched=sorted(files_touched_set),
+            timestamp_first=ts_first,
+            timestamp_last=ts_last,
+        )
+
+    def timeline_session(self, session_id: str) -> List[dict]:
+        """Return a chronological timeline of user/assistant events for one session.
+
+        Each event includes the message type, timestamp, a content preview,
+        and the number of tool_use blocks invoked (for assistant messages).
+
+        Args:
+            session_id: Session ID prefix. Must match exactly one JSONL file.
+
+        Returns:
+            List of dicts sorted by timestamp ascending, each with keys:
+                type (str), timestamp (str), content_preview (str, ≤150 chars),
+                tool_count (int)
+        """
+        session_file: Optional[Path] = None
+        if self.projects_dir.exists():
+            for project_dir in self.projects_dir.glob("*"):
+                if project_dir.is_dir():
+                    for f in project_dir.glob(f"{session_id}*.jsonl"):
+                        session_file = f
+                        break
+                if session_file:
+                    break
+        if session_file is None:
+            return []
+
+        events: List[dict] = []
+        try:
+            with open(session_file, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    try:
+                        data = _json_loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    msg_type = data.get("type", "")
+                    if msg_type not in ("user", "assistant"):
+                        continue
+                    ts = data.get("timestamp", "")
+                    content = self._extract_content(data)
+                    tool_count = 0
+                    if msg_type == "assistant":
+                        msg_content = data.get("message", {}).get("content", [])
+                        if isinstance(msg_content, list):
+                            tool_count = sum(
+                                1 for item in msg_content
+                                if isinstance(item, dict) and item.get("type") == "tool_use"
+                            )
+                    events.append({
+                        "type": msg_type,
+                        "timestamp": ts,
+                        "content_preview": content[:150],
+                        "tool_count": tool_count,
+                    })
+        except OSError:
+            return []
+
+        return events
+
+    def search_messages_with_context(
+        self,
+        query: str,
+        context: int = 3,
+        message_type: Optional[str] = None,
+        tool: Optional[str] = None,
+    ) -> List[ContextMatch]:
+        """Search messages and return each match with surrounding context messages.
+
+        Unlike ``search_messages``, this buffers each JSONL file in memory to
+        retrieve up to ``context`` messages before and after each match from the
+        same session file.
+
+        Args:
+            query:        Text or glob/regex pattern to search for.
+            context:      Number of messages before AND after each match to include.
+            message_type: Optional filter: 'user', 'assistant', or 'system'.
+            tool:         Optional tool name filter (same semantics as search_messages).
+
+        Returns:
+            List of ContextMatch, one per matching message (not deduplicated).
+        """
+        if tool is not None and message_type is None:
+            message_type = "assistant"
+
+        pattern = self._compile_pattern(query) if query else None
+        tool_lower = tool.lower() if tool else None
+
+        results: List[ContextMatch] = []
+        if not self.projects_dir.exists():
+            return results
+
+        for project_dir in self.projects_dir.glob("*"):
+            if not project_dir.is_dir():
+                continue
+            for jsonl_file in project_dir.glob("*.jsonl"):
+                # Buffer all messages from this file (needed for context window)
+                all_msgs: List[SessionMessage] = []
+                try:
+                    with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            try:
+                                data = _json_loads(line)
+                                msg_type_raw = data.get("type", "").lower()
+                                if msg_type_raw not in ("user", "assistant", "system"):
+                                    continue
+                                if message_type and msg_type_raw != message_type.lower():
+                                    continue
+                                if tool is not None:
+                                    msg_content = data.get("message", {}).get("content", [])
+                                    if not isinstance(msg_content, list):
+                                        continue
+                                    for item in msg_content:
+                                        if (isinstance(item, dict)
+                                                and item.get("type") == "tool_use"
+                                                and item.get("name", "").lower() == tool_lower):
+                                            input_str = json.dumps(item.get("input", {}))
+                                            all_msgs.append(SessionMessage(
+                                                type=self._parse_message_type(msg_type_raw),
+                                                timestamp=data.get("timestamp", ""),
+                                                content=input_str,
+                                                session_id=data.get("sessionId", ""),
+                                            ))
+                                            break
+                                else:
+                                    content = self._extract_content(data)
+                                    if content:
+                                        all_msgs.append(SessionMessage(
+                                            type=self._parse_message_type(msg_type_raw),
+                                            timestamp=data.get("timestamp", ""),
+                                            content=content,
+                                            session_id=data.get("sessionId", ""),
+                                        ))
+                            except (json.JSONDecodeError, KeyError, ValueError):
+                                continue
+                except OSError:
+                    continue
+
+                # Find matches and collect context windows
+                for i, msg in enumerate(all_msgs):
+                    if not pattern or pattern.search(msg.content):
+                        before = all_msgs[max(0, i - context): i]
+                        after = all_msgs[i + 1: i + 1 + context]
+                        results.append(ContextMatch(
+                            match=msg,
+                            context_before=before,
+                            context_after=after,
+                        ))
+
+        return results
 
     def get_statistics(self) -> RecoveryStatistics:
         """Get recovery statistics across all sessions."""
