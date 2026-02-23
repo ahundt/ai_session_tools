@@ -62,7 +62,20 @@ class FileVersion:
 
 @dataclass
 class RecoveredFile:
-    """Recovered file with metadata."""
+    """Recovered file from Claude Code sessions with edit history.
+
+    Attributes:
+        name: Filename (e.g., "session_manager.py")
+        path: Full file path
+        location: Where file was saved (main repo, worktree, etc)
+        file_type: File extension without dot (e.g., "py", "md", "json")
+        sessions: List of session IDs that touched this file
+        edits: Total number of times THIS FILE was modified across ALL sessions
+               (1-2 = simple one-off file, 10+ = heavily refined project file)
+        created_date: When file was first created
+        last_modified: When file was last edited
+        size_bytes: File size in bytes
+    """
 
     name: str
     path: str
@@ -134,7 +147,8 @@ class FilterSpec:
     include_extensions: Set[str] = field(default_factory=set)
     exclude_extensions: Set[str] = field(default_factory=set)
 
-    # Edit count range
+    # Edit count range: how many times a FILE was modified across all sessions
+    # (1-2 = simple one-off files, 10+ = major project files with long history)
     min_edits: int = 0
     max_edits: Optional[int] = None
 

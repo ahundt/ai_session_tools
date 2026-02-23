@@ -42,8 +42,8 @@ def get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] =
 @app.command()
 def search(
     pattern: str = typer.Option("*", "--pattern", "-p", help="File pattern (glob or regex). Default: all files"),
-    min_edits: int = typer.Option(0, "--min-edits", help="Minimum number of edits. Default: 0 (no minimum)"),
-    max_edits: Optional[int] = typer.Option(None, "--max-edits", help="Maximum number of edits. Default: unlimited"),
+    min_edits: int = typer.Option(0, "--min-edits", help="Minimum times THIS FILE was edited across all sessions (1=touched once, 10+=heavily refined). Default: 0"),
+    max_edits: Optional[int] = typer.Option(None, "--max-edits", help="Maximum times this file was edited across all sessions. Default: unlimited"),
     include_types: Optional[str] = typer.Option(None, "--include-types", "-t", help="Include only these file types (comma-separated, e.g., py,md,json)"),
     exclude_types: Optional[str] = typer.Option(None, "--exclude-types", "-x", help="Exclude these file types (comma-separated, e.g., pyc,tmp)"),
     format: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
@@ -54,9 +54,14 @@ def search(
     This searches FILES that were recovered from Claude Code sessions,
     not the session message data (JSONL). Use 'session-messages' for message search.
 
+    Filtering by edits: Shows files based on how many times they were modified.
+    - 1-2 edits = simple one-off files touched briefly
+    - 10+ edits = major project files refined across many sessions
+
     Examples:
         ai_session_tools search --pattern "*.py"
-        ai_session_tools search --pattern "*.py" --min-edits 5
+        ai_session_tools search --pattern "*.py" --min-edits 5  # Python files edited 5+ times
+        ai_session_tools search --max-edits 3  # Find simple one-off files
         ai_session_tools search --include-types py,ts,js  # Only Python, TypeScript, JavaScript
         ai_session_tools search --exclude-types pyc,tmp   # Everything except temp files
         ai_session_tools search  # Lists all files
