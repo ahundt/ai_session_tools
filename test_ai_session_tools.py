@@ -421,11 +421,11 @@ class TestFilterComposition:
 class TestCompletedStepModels:
     """Tests for already-completed models.py changes (Step 2)."""
 
-    def test_filter_spec_has_matches_date(self):
-        """FilterSpec should have matches_date method."""
+    def test_filter_spec_has_matches_datetime(self):
+        """FilterSpec should have matches_datetime method."""
         spec = FilterSpec()
-        assert hasattr(spec, "matches_date")
-        assert callable(spec.matches_date)
+        assert hasattr(spec, "matches_datetime")
+        assert callable(spec.matches_datetime)
 
     def test_filter_spec_has_matches_extension(self):
         """FilterSpec should have matches_extension method."""
@@ -693,50 +693,72 @@ class TestPlainFormatterPreview:
 
 # ── TDD Tests: Step 3 — Engine date/size filtering ───────────────────────────
 
-class TestFilterSpecMatchesDate:
-    """TDD tests for FilterSpec.matches_date() method."""
+class TestFilterSpecMatchesDatetime:
+    """TDD tests for FilterSpec.matches_datetime() method."""
 
-    def test_no_filter_passes_any_date(self):
-        """With no date filters set, any date passes."""
+    def test_no_filter_passes_any_datetime(self):
+        """With no datetime filters set, any datetime passes."""
         spec = FilterSpec()
-        assert spec.matches_date("2026-02-22") is True
-        assert spec.matches_date("2020-01-01") is True
+        assert spec.matches_datetime("2026-02-22") is True
+        assert spec.matches_datetime("2026-02-22T14:30:00") is True
+        assert spec.matches_datetime("2020-01-01") is True
 
-    def test_no_filter_passes_none_date(self):
-        """With no date filters, None date passes."""
+    def test_no_filter_passes_none(self):
+        """With no datetime filters, None passes."""
         spec = FilterSpec()
-        assert spec.matches_date(None) is True
+        assert spec.matches_datetime(None) is True
 
-    def test_after_date_excludes_earlier(self):
-        """after_date excludes dates before the threshold."""
-        spec = FilterSpec(after_date="2026-02-01")
-        assert spec.matches_date("2026-01-15") is False
-        assert spec.matches_date("2026-02-01") is True
-        assert spec.matches_date("2026-02-22") is True
+    def test_after_excludes_earlier(self):
+        """after excludes datetimes before the threshold."""
+        spec = FilterSpec(after="2026-02-01")
+        assert spec.matches_datetime("2026-01-15") is False
+        assert spec.matches_datetime("2026-02-01") is True
+        assert spec.matches_datetime("2026-02-22T14:30:00") is True
 
-    def test_before_date_excludes_later(self):
-        """before_date excludes dates after the threshold."""
-        spec = FilterSpec(before_date="2026-02-15")
-        assert spec.matches_date("2026-02-22") is False
-        assert spec.matches_date("2026-02-15") is True
-        assert spec.matches_date("2026-01-01") is True
+    def test_before_excludes_later(self):
+        """before excludes datetimes after the threshold."""
+        spec = FilterSpec(before="2026-02-15")
+        assert spec.matches_datetime("2026-02-22") is False
+        assert spec.matches_datetime("2026-02-15") is True
+        assert spec.matches_datetime("2026-01-01T08:00:00") is True
 
-    def test_date_range(self):
-        """Combined after_date + before_date creates a range."""
-        spec = FilterSpec(after_date="2026-02-01", before_date="2026-02-28")
-        assert spec.matches_date("2026-02-15") is True
-        assert spec.matches_date("2026-01-15") is False
-        assert spec.matches_date("2026-03-01") is False
+    def test_datetime_range(self):
+        """Combined after + before creates a range."""
+        spec = FilterSpec(after="2026-02-01", before="2026-02-28")
+        assert spec.matches_datetime("2026-02-15") is True
+        assert spec.matches_datetime("2026-02-15T12:00:00") is True
+        assert spec.matches_datetime("2026-01-15") is False
+        assert spec.matches_datetime("2026-03-01") is False
 
-    def test_none_date_excluded_when_filter_active(self):
-        """None date is excluded when any date filter is active (conservative)."""
-        spec = FilterSpec(after_date="2026-01-01")
-        assert spec.matches_date(None) is False
+    def test_none_excluded_when_filter_active(self):
+        """None is excluded when any datetime filter is active (conservative)."""
+        spec = FilterSpec(after="2026-01-01")
+        assert spec.matches_datetime(None) is False
 
-    def test_none_date_excluded_with_before_date(self):
-        """None date is excluded when before_date is set."""
-        spec = FilterSpec(before_date="2026-12-31")
-        assert spec.matches_date(None) is False
+    def test_none_excluded_with_before(self):
+        """None is excluded when before is set."""
+        spec = FilterSpec(before="2026-12-31")
+        assert spec.matches_datetime(None) is False
+
+    def test_full_datetime_filter_with_full_datetime_value(self):
+        """Full datetime filter against full datetime value."""
+        spec = FilterSpec(after="2026-02-15T10:00:00", before="2026-02-15T18:00:00")
+        assert spec.matches_datetime("2026-02-15T12:00:00") is True
+        assert spec.matches_datetime("2026-02-15T08:00:00") is False
+        assert spec.matches_datetime("2026-02-15T20:00:00") is False
+
+    def test_date_filter_with_datetime_value(self):
+        """Date-only filter works with full datetime values (mixed precision)."""
+        spec = FilterSpec(after="2026-02-15")
+        assert spec.matches_datetime("2026-02-15T14:30:00") is True
+        assert spec.matches_datetime("2026-02-14T23:59:59") is False
+
+    def test_datetime_filter_with_date_value(self):
+        """Full datetime filter works with date-only values (mixed precision)."""
+        spec = FilterSpec(after="2026-02-15T14:30:00")
+        # "2026-02-15" < "2026-02-15T14:30:00" lexicographically, so excluded
+        assert spec.matches_datetime("2026-02-15") is False
+        assert spec.matches_datetime("2026-02-16") is True
 
 
 class TestEnginePopulatesDateFields:
@@ -757,25 +779,28 @@ class TestEnginePopulatesDateFields:
             dated = [r for r in results if r.created_date is not None]
             assert len(dated) > 0, "Engine should populate created_date from file stat"
 
-    def test_last_modified_is_iso_format(self, engine):
-        """last_modified should be ISO YYYY-MM-DD format."""
+    def test_last_modified_is_iso_datetime_format(self, engine):
+        """last_modified should be ISO YYYY-MM-DDTHH:MM:SS format."""
         results = engine.search("*.py")
         if results:
             for r in results:
                 if r.last_modified:
-                    assert len(r.last_modified) == 10, f"Expected YYYY-MM-DD, got {r.last_modified}"
+                    assert len(r.last_modified) == 19, f"Expected YYYY-MM-DDTHH:MM:SS (19 chars), got {r.last_modified!r}"
                     assert r.last_modified[4] == "-"
                     assert r.last_modified[7] == "-"
+                    assert r.last_modified[10] == "T"
+                    assert r.last_modified[13] == ":"
+                    assert r.last_modified[16] == ":"
 
-    def test_date_filter_actually_filters(self, engine):
-        """Date filter should actually exclude files outside the range."""
+    def test_datetime_filter_actually_filters(self, engine):
+        """Datetime filter should actually exclude files outside the range."""
         # Get all files first
         all_results = engine.search("*.py")
         if not all_results:
             pytest.skip("No files found")
 
-        # Use a future date that should exclude everything
-        filters = FilterSpec(after_date="2099-01-01")
+        # Use a future datetime that should exclude everything
+        filters = FilterSpec(after="2099-01-01T00:00:00")
         filtered = engine.search("*.py", filters)
         assert len(filtered) < len(all_results), "Date filter should exclude some files"
 
@@ -893,15 +918,15 @@ class TestCLIDualOrdering:
         assert result.exit_code == 0
         assert "max-chars" in result.output.lower()
 
-    def test_cli_search_files_has_date_flags(self):
-        """File search should have --after-date and --before-date flags."""
+    def test_cli_search_files_has_datetime_flags(self):
+        """File search should have --after and --before flags."""
         from ai_session_tools.cli import app
         from typer.testing import CliRunner
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
-        assert "after-date" in result.output.lower()
-        assert "before-date" in result.output.lower()
+        assert "--after" in result.output
+        assert "--before" in result.output
 
     def test_cli_search_files_has_session_flags(self):
         """File search should have --include-sessions and --exclude-sessions."""

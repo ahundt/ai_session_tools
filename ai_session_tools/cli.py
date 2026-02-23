@@ -77,8 +77,8 @@ def _do_files_search(
     exclude_extensions: Optional[str] = None,
     include_sessions: Optional[str] = None,
     exclude_sessions: Optional[str] = None,
-    after_date: Optional[str] = None,
-    before_date: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
     limit: Optional[int] = None,
     fmt: str = "table",
 ) -> None:
@@ -88,7 +88,7 @@ def _do_files_search(
     inc_sessions = set(s.strip() for s in include_sessions.split(",") if s.strip()) if include_sessions else set()
     exc_sessions = set(s.strip() for s in exclude_sessions.split(",") if s.strip()) if exclude_sessions else set()
 
-    filters = FilterSpec(min_edits=min_edits, max_edits=max_edits, after_date=after_date, before_date=before_date)
+    filters = FilterSpec(min_edits=min_edits, max_edits=max_edits, after=after, before=before)
     if inc_ext or exc_ext:
         filters.with_extensions(include=inc_ext or None, exclude=exc_ext or None)
     if inc_sessions or exc_sessions:
@@ -197,23 +197,24 @@ def files_search(
     exclude_extensions: Optional[str] = typer.Option(None, "--exclude-extensions", "-x", help="Skip these file extensions, comma-separated (e.g. pyc,tmp)"),
     include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="Only search these session UUIDs, comma-separated"),
     exclude_sessions: Optional[str] = typer.Option(None, "--exclude-sessions", help="Skip these session UUIDs, comma-separated"),
-    after_date: Optional[str] = typer.Option(None, "--after-date", help="Only files modified after this ISO date (e.g. 2026-01-01)"),
-    before_date: Optional[str] = typer.Option(None, "--before-date", help="Only files modified before this ISO date (e.g. 2026-12-31)"),
+    after: Optional[str] = typer.Option(None, "--after", help="Only files modified after this datetime (e.g. 2026-01-15 or 2026-01-15T14:30:00)"),
+    before: Optional[str] = typer.Option(None, "--before", help="Only files modified before this datetime (e.g. 2026-12-31 or 2026-12-31T23:59:59)"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited"),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ) -> None:
     """Search source files found in Claude Code session data.
 
     Finds files (*.py, *.md, etc.) that Claude wrote or edited during sessions.
-    Filter by extension, edit count, date range, or session ID.
+    Filter by extension, edit count, datetime range, or session ID.
 
     Examples:
         aise files search                                  # all files
         aise files search --pattern "*.py"                 # Python files only
         aise files search --min-edits 3                    # files edited 3+ times across sessions
-        aise files search -i py,md --after-date 2026-01-15 # Python/Markdown since Jan 15
+        aise files search -i py,md --after 2026-01-15      # Python/Markdown since Jan 15
+        aise files search --after 2026-01-15T14:30:00      # files modified after specific time
     """
-    _do_files_search(get_engine(), pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, after_date, before_date, limit, fmt)
+    _do_files_search(get_engine(), pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, after, before, limit, fmt)
 
 
 @files_app.command("extract")
@@ -304,8 +305,8 @@ def search(
     exclude_extensions: Optional[str] = typer.Option(None, "--exclude-extensions", "-x", help="[files] Skip these file extensions, comma-separated (e.g. pyc,tmp)"),
     include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="[files] Only search these session UUIDs, comma-separated"),
     exclude_sessions: Optional[str] = typer.Option(None, "--exclude-sessions", help="[files] Skip these session UUIDs, comma-separated"),
-    after_date: Optional[str] = typer.Option(None, "--after-date", help="[files] Only files modified after this ISO date (e.g. 2026-01-01)"),
-    before_date: Optional[str] = typer.Option(None, "--before-date", help="[files] Only files modified before this ISO date (e.g. 2026-12-31)"),
+    after: Optional[str] = typer.Option(None, "--after", help="[files] Only files modified after this datetime (e.g. 2026-01-15 or 2026-01-15T14:30:00)"),
+    before: Optional[str] = typer.Option(None, "--before", help="[files] Only files modified before this datetime (e.g. 2026-12-31 or 2026-12-31T23:59:59)"),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="[messages] Show only 'user' or 'assistant' messages. Default: both"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited for files, 10 for messages"),
     max_chars: int = typer.Option(0, "--max-chars", help="[messages] Truncate each message to this many characters. 0 = full message. Default: 0"),
@@ -364,7 +365,7 @@ def search(
             engine, pattern or "*", min_edits, max_edits,
             include_extensions, exclude_extensions,
             include_sessions, exclude_sessions,
-            after_date, before_date, limit, fmt,
+            after, before, limit, fmt,
         )
 
     if domain in ("messages", "both"):

@@ -64,10 +64,10 @@ class SessionRecoveryEngine:
             stat = file_path.stat()
             last_modified = datetime.datetime.fromtimestamp(
                 stat.st_mtime, tz=datetime.timezone.utc
-            ).strftime("%Y-%m-%d")
+            ).strftime("%Y-%m-%dT%H:%M:%S")
             created_date = datetime.datetime.fromtimestamp(
                 stat.st_ctime, tz=datetime.timezone.utc
-            ).strftime("%Y-%m-%d")
+            ).strftime("%Y-%m-%dT%H:%M:%S")
             self._file_cache[file_path.name] = RecoveredFile(
                 name=file_path.name,
                 path=str(file_path),
@@ -98,7 +98,7 @@ class SessionRecoveryEngine:
         if not filters.matches_extension(file_info.file_type):
             return False
 
-        if not filters.matches_date(file_info.last_modified):
+        if not filters.matches_datetime(file_info.last_modified):
             return False
 
         if not filters.matches_size(file_info.size_bytes):

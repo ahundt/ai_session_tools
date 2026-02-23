@@ -46,11 +46,13 @@ class TableFormatter(ResultFormatter):
     def format(self, data: RecoveredFile) -> str:
         """Format single file."""
         lines = [
-            f"Name:       {data.name}",
-            f"Location:   {data.location.value}",
-            f"Type:       {data.file_type}",
-            f"Edits:      {data.edits}",
-            f"Sessions:   {len(data.sessions)}",
+            f"Name:          {data.name}",
+            f"Location:      {data.location.value}",
+            f"Type:          {data.file_type}",
+            f"Edits:         {data.edits}",
+            f"Sessions:      {len(data.sessions)}",
+            f"Last Modified: {data.last_modified or 'unknown'}",
+            f"Created:       {data.created_date or 'unknown'}",
         ]
         return "\n".join(lines)
 
@@ -60,10 +62,11 @@ class TableFormatter(ResultFormatter):
         table.add_column("File", style="cyan")
         table.add_column("Edits", justify="right", style="magenta")
         table.add_column("Type", style="green")
+        table.add_column("Last Modified", style="blue")
         table.add_column("Location", style="yellow")
 
         for item in items:
-            table.add_row(item.name, str(item.edits), item.file_type, item.location.value)
+            table.add_row(item.name, str(item.edits), item.file_type, item.last_modified or "", item.location.value)
 
         console = Console()
         with console.capture() as capture:
@@ -74,34 +77,25 @@ class TableFormatter(ResultFormatter):
 class JsonFormatter(ResultFormatter):
     """Format results as JSON."""
 
+    def _file_dict(self, data: RecoveredFile) -> dict:
+        return {
+            "name": data.name,
+            "location": data.location.value,
+            "type": data.file_type,
+            "edits": data.edits,
+            "sessions": data.sessions,
+            "size_bytes": data.size_bytes,
+            "last_modified": data.last_modified,
+            "created_date": data.created_date,
+        }
+
     def format(self, data: RecoveredFile) -> str:
         """Format single file."""
-        return json.dumps(
-            {
-                "name": data.name,
-                "location": data.location.value,
-                "type": data.file_type,
-                "edits": data.edits,
-                "sessions": data.sessions,
-                "size_bytes": data.size_bytes,
-            },
-            indent=2,
-        )
+        return json.dumps(self._file_dict(data), indent=2)
 
     def format_many(self, items: List[RecoveredFile]) -> str:
         """Format multiple files as JSON array."""
-        data = [
-            {
-                "name": item.name,
-                "location": item.location.value,
-                "type": item.file_type,
-                "edits": item.edits,
-                "sessions": item.sessions,
-                "size_bytes": item.size_bytes,
-            }
-            for item in items
-        ]
-        return json.dumps(data, indent=2)
+        return json.dumps([self._file_dict(item) for item in items], indent=2)
 
 
 class CsvFormatter(ResultFormatter):
@@ -109,17 +103,16 @@ class CsvFormatter(ResultFormatter):
 
     def format(self, data: RecoveredFile) -> str:
         """Format single file."""
-        # Header + data
-        header = "name,location,type,edits,sessions,size_bytes\n"
-        row = f'{data.name},"{data.location.value}",{data.file_type},{data.edits},{len(data.sessions)},{data.size_bytes}\n'
+        header = "name,location,type,edits,sessions,size_bytes,last_modified,created_date\n"
+        row = f'{data.name},"{data.location.value}",{data.file_type},{data.edits},{len(data.sessions)},{data.size_bytes},{data.last_modified or ""},{data.created_date or ""}\n'
         return header + row
 
     def format_many(self, items: List[RecoveredFile]) -> str:
         """Format multiple files as CSV."""
-        lines = ["name,location,type,edits,sessions,size_bytes"]
+        lines = ["name,location,type,edits,sessions,size_bytes,last_modified,created_date"]
 
         for item in items:
-            lines.append(f'{item.name},"{item.location.value}",{item.file_type},{item.edits},{len(item.sessions)},{item.size_bytes}')
+            lines.append(f'{item.name},"{item.location.value}",{item.file_type},{item.edits},{len(item.sessions)},{item.size_bytes},{item.last_modified or ""},{item.created_date or ""}')
 
         return "\n".join(lines)
 

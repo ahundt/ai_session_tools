@@ -166,9 +166,9 @@ class FilterSpec:
     include_folders: Set[str] = field(default_factory=set)
     exclude_folders: Set[str] = field(default_factory=set)
 
-    # Date range filtering (ISO format: 2026-02-22)
-    after_date: Optional[str] = None
-    before_date: Optional[str] = None
+    # Datetime range filtering (ISO format: "2026-02-22" or "2026-02-22T14:30:00")
+    after: Optional[str] = None
+    before: Optional[str] = None
 
     # File size range (bytes)
     min_size: int = 0
@@ -234,21 +234,24 @@ class FilterSpec:
             return False
         return True
 
-    def matches_date(self, date_str: Optional[str]) -> bool:
-        """Check if date falls within after_date/before_date range.
+    def matches_datetime(self, datetime_str: Optional[str]) -> bool:
+        """Check if datetime falls within after/before range.
+
+        Accepts any ISO 8601 prefix: "2026-02-22", "2026-02-22T14:30:00", etc.
+        Lexicographic comparison works for all ISO 8601 precisions.
 
         Args:
-            date_str: ISO date string e.g. "2026-02-22", or None.
+            datetime_str: ISO datetime string (e.g. "2026-02-22" or "2026-02-22T14:30:00"), or None.
 
         Returns:
-            True if date passes filter. Files with no date (None) pass when no date filter is set;
-            are excluded when a filter IS set (conservative: unknown date treated as out-of-range).
+            True if datetime passes filter. Files with no datetime (None) pass when no filter is set;
+            are excluded when a filter IS set (conservative: unknown datetime treated as out-of-range).
         """
-        if not date_str:
-            return not (self.after_date or self.before_date)
-        if self.after_date and date_str < self.after_date:
+        if not datetime_str:
+            return not (self.after or self.before)
+        if self.after and datetime_str < self.after:
             return False
-        if self.before_date and date_str > self.before_date:
+        if self.before and datetime_str > self.before:
             return False
         return True
 

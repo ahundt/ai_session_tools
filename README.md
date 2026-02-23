@@ -68,8 +68,9 @@ aise search files --pattern "*.py"
 # Files edited 5+ times (likely important project files, not one-off scripts)
 aise search files --min-edits 5
 
-# Only Python and Markdown, modified after a specific date
-aise search files -i py,md --after-date 2026-01-15
+# Only Python and Markdown, modified after a specific date or datetime
+aise search files -i py,md --after 2026-01-15
+aise search files -i py,md --after 2026-01-15T14:30:00
 
 # Exclude compiled/temporary files
 aise search files -x pyc,tmp,o
@@ -192,7 +193,7 @@ for f in all_files:
     print(f"{f.name}  ({f.total_edits} edits, last modified {f.last_modified})")
 
 # Filter to heavily-edited Python/Markdown files from 2026
-filters = FilterSpec(min_edits=5, after_date="2026-01-01")
+filters = FilterSpec(min_edits=5, after="2026-01-01T00:00:00")
 filters.with_extensions(include={"py", "md"})
 results = engine.search("*", filters)
 
