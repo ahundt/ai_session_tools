@@ -51,6 +51,7 @@ def engine(recovery_dir, projects_dir):
 
 class TestFileSearch:
     """Test file search functionality"""
+    pytestmark = pytest.mark.integration
 
     def test_search_returns_list(self, engine):
         """Test that search returns a list"""
@@ -85,6 +86,7 @@ class TestFileSearch:
 
 class TestVersionExtraction:
     """Test version extraction functionality"""
+    pytestmark = pytest.mark.integration
 
     def test_get_versions_returns_list(self, engine):
         """Test that get_versions returns a list"""
@@ -114,6 +116,7 @@ class TestVersionExtraction:
 
 class TestStatistics:
     """Test statistics collection"""
+    pytestmark = pytest.mark.integration
 
     def test_get_statistics_returns_object(self, engine):
         """Test that get_statistics returns proper object"""
@@ -137,6 +140,7 @@ class TestStatistics:
 
 class TestMessages:
     """Test message extraction"""
+    pytestmark = pytest.mark.integration
 
     def test_search_messages_returns_list(self, engine):
         """Test that search_messages returns a list"""
@@ -188,6 +192,7 @@ class TestFileLocation:
 
 class TestIntegration:
     """Integration tests combining multiple operations"""
+    pytestmark = pytest.mark.integration
 
     def test_search_and_get_versions(self, engine):
         """Test searching then getting versions"""
@@ -213,6 +218,7 @@ class TestIntegration:
 
 class TestEdgeCases:
     """Test edge cases and error handling"""
+    pytestmark = pytest.mark.integration
 
     def test_search_nonexistent_pattern(self, engine):
         """Test searching for pattern that matches nothing"""
@@ -239,6 +245,7 @@ class TestEdgeCases:
 
 class TestMultipleFileTypes:
     """Test searching for different file types (not just .py)"""
+    pytestmark = pytest.mark.integration
 
     def test_search_markdown_files(self, engine):
         """Test searching for Markdown files"""
@@ -314,6 +321,7 @@ class TestMultipleFileTypes:
 
 class TestFileTypeFiltering:
     """Test filtering by file type"""
+    pytestmark = pytest.mark.integration
 
     def test_filter_by_extension(self, engine):
         """Test SearchFilter with file extension filtering"""
@@ -346,6 +354,7 @@ class TestFileTypeFiltering:
 
 class TestMessageFiltering:
     """Test message extraction and filtering"""
+    pytestmark = pytest.mark.integration
 
     def test_get_messages_with_type_filter_user(self, engine):
         """Test filtering for user messages only"""
@@ -383,6 +392,7 @@ class TestMessageFiltering:
 
 class TestFilterComposition:
     """Test composable filter combinations"""
+    pytestmark = pytest.mark.integration
 
     def test_filter_by_edits_range(self, engine):
         """Test filtering by edit range"""
@@ -762,6 +772,7 @@ class TestFilterSpecMatchesDatetime:
 
 class TestEnginePopulatesDateFields:
     """TDD tests for engine populating last_modified and created_date."""
+    pytestmark = pytest.mark.integration
 
     def test_search_results_have_last_modified(self, engine):
         """Search results should have last_modified populated (not None)."""
@@ -806,6 +817,7 @@ class TestEnginePopulatesDateFields:
 
 class TestEngineSizeFilterWired:
     """TDD tests for engine wiring matches_size() in _apply_all_filters."""
+    pytestmark = pytest.mark.integration
 
     def test_size_filter_excludes_small_files(self, engine):
         """min_size filter should exclude files smaller than threshold."""

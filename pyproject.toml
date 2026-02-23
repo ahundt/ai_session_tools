@@ -61,7 +61,9 @@ testpaths = ["test_ai_session_tools.py"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short --strict-markers"
+# Default: skip @pytest.mark.integration tests (they scan real ~/.claude data, ~3 min).
+# Run all tests including integration with: uv run pytest -m "" or uv run pytest --run-integration
+addopts = "-v --tb=short --strict-markers -m 'not integration'"
 markers = [
     "unit: Unit tests",
     "integration: Integration tests",
