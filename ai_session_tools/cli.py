@@ -61,10 +61,22 @@ tools_app = typer.Typer(
     ),
 )
 
+config_app = typer.Typer(
+    help=(
+        "View and manage the ai_session_tools config file.\n\n"
+        "Config file location (priority order):\n\n"
+        "  1. --config CLI flag\n"
+        "  2. AI_SESSION_TOOLS_CONFIG env var\n"
+        "  3. OS default: ~/Library/Application Support/ai_session_tools/config.json (macOS)\n"
+        "               : ~/.config/ai_session_tools/config.json (Linux)"
+    ),
+)
+
 app.add_typer(files_app, name="files", rich_help_panel="Domain Groups")
 app.add_typer(messages_app, name="messages", rich_help_panel="Domain Groups")
 app.add_typer(export_app, name="export", rich_help_panel="Domain Groups")
 app.add_typer(tools_app, name="tools", rich_help_panel="Domain Groups")
+app.add_typer(config_app, name="config", rich_help_panel="Configuration")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -1642,6 +1654,136 @@ def get(
 def stats() -> None:
     """Show counts of sessions, files, versions, and the most-edited file."""
     _do_stats(get_engine())
+
+
+# ── Config app ───────────────────────────────────────────────────────────────
+
+def _get_config_file_path() -> Path:
+    """Return the resolved config file path based on current priority chain."""
+    if _g_config_path:
+        return Path(_g_config_path).expanduser()
+    env_val = os.getenv("AI_SESSION_TOOLS_CONFIG")
+    if env_val:
+        return Path(env_val).expanduser()
+    return Path(typer.get_app_dir("ai_session_tools")) / "config.json"
+
+
+@config_app.command("path")
+def config_path() -> None:
+    """Print the config file path (whether or not the file exists).
+
+    Examples:
+        aise config path
+        aise --config /tmp/my.json config path   # show path after override
+    """
+    console.print(str(_get_config_file_path()))
+
+
+@config_app.command("show")
+def config_show(
+    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, plain."),
+) -> None:
+    """Show the effective configuration (file contents + resolved path).
+
+    Displays all keys loaded from the config file, or a message if no file exists.
+
+    Examples:
+        aise config show
+        aise config show --format json
+    """
+    config_file = _get_config_file_path()
+    cfg = load_config()
+
+    if fmt == "json":
+        sys.stdout.write(json.dumps({
+            "config_file": str(config_file),
+            "exists": config_file.exists(),
+            "config": cfg,
+        }, indent=2) + "\n")
+        return
+
+    console.print(f"Config file: [cyan]{config_file}[/cyan]")
+    if not config_file.exists():
+        console.print("[yellow]File does not exist. Run 'aise config init' to create it.[/yellow]")
+        return
+
+    if not cfg:
+        console.print("[dim]File exists but is empty (no keys set).[/dim]")
+        return
+
+    if fmt in ("plain", "csv"):
+        for k, v in cfg.items():
+            console.print(f"{k}: {v}")
+        return
+
+    from rich.table import Table
+    table = Table(title=f"Config ({config_file.name})")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value")
+    for k, v in cfg.items():
+        table.add_row(k, json.dumps(v) if not isinstance(v, str) else v)
+    console.print(table)
+
+
+_CONFIG_INIT_TEMPLATE = {
+    "correction_patterns": [
+        "regression:you deleted",
+        "regression:you removed",
+        "skip_step:you forgot",
+        "skip_step:you missed",
+        "misunderstanding:that's wrong",
+        "incomplete:also need",
+    ],
+    "planning_commands": [
+        "/ar:plannew",
+        "/ar:pn",
+        "/ar:planrefine",
+        "/ar:pr",
+        "/ar:planupdate",
+        "/ar:pu",
+        "/ar:planprocess",
+        "/ar:pp",
+    ],
+}
+
+
+@config_app.command("init")
+def config_init(
+    force: bool = typer.Option(
+        False, "--force",
+        help="Overwrite the config file if it already exists.",
+    ),
+) -> None:
+    """Create a starter config.json with documented default values.
+
+    Safe by default — will NOT overwrite an existing config file unless --force is given.
+    Creates any missing parent directories automatically.
+
+    Examples:
+        aise config init             # create if not exists
+        aise config init --force     # overwrite existing file
+    """
+    config_file = _get_config_file_path()
+
+    if config_file.exists() and not force:
+        err_console.print(
+            f"[yellow]Config file already exists:[/yellow] {config_file}\n"
+            "Use --force to overwrite."
+        )
+        raise typer.Exit(code=1)
+
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(json.dumps(_CONFIG_INIT_TEMPLATE, indent=2) + "\n", encoding="utf-8")
+
+    # Invalidate cache so next command picks up the new file
+    global _config_cache
+    _config_cache = None
+
+    console.print(f"[green]Created:[/green] {config_file}")
+    console.print(
+        "[dim]Edit the file to customize correction patterns and planning commands.[/dim]\n"
+        "[dim]Run 'aise config show' to verify the active configuration.[/dim]"
+    )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

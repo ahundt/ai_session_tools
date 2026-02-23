@@ -3457,3 +3457,307 @@ class TestTrailingBbStripping:
         assert re.sub(r"\\b$", "", r"/ar:plannew\b") == "/ar:plannew"
         assert re.sub(r"\\b$", "", r"\b/ar:plannew\b") == r"\b/ar:plannew"
         assert re.sub(r"\\b$", "", r"/ar:plannew") == "/ar:plannew"  # no trailing \b, unchanged
+
+
+# ── Slash command discovery tests ─────────────────────────────────────────────
+
+class TestSlashCommandDiscovery:
+    """analyze_planning_usage(commands=None) auto-discovers leading-slash commands."""
+
+    def test_discovery_finds_ar_plannew(self, tmp_path):
+        """Discovery mode detects /ar:plannew from session fixture."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.analyze_planning_usage()  # no commands arg = discovery mode
+        commands = [r.command for r in results]
+        assert "/ar:plannew" in commands
+
+    def test_discovery_finds_ar_pn(self, tmp_path):
+        """Discovery mode detects /ar:pn (short alias) from session fixture."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.analyze_planning_usage()
+        commands = [r.command for r in results]
+        assert "/ar:pn" in commands
+
+    def test_discovery_sorted_by_count(self, tmp_path):
+        """Results are sorted by count descending."""
+        # Make two sessions both using /ar:plannew — it should rank first
+        projects = tmp_path / "projects"
+        proj = projects / "-test-proj"
+        proj.mkdir(parents=True)
+        s1 = "disc0001-0000-0000-0000-000000000000"
+        lines = [
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "message": {"role": "user", "content": "/ar:plannew first"}}),
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:01:00.000Z",
+                        "message": {"role": "user", "content": "/ar:plannew second"}}),
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:02:00.000Z",
+                        "message": {"role": "user", "content": "/ar:pn once"}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.analyze_planning_usage()
+        assert results[0].command == "/ar:plannew"
+        assert results[0].count == 2
+        assert results[1].command == "/ar:pn"
+        assert results[1].count == 1
+
+    def test_discovery_ignores_assistant_messages(self, tmp_path):
+        """Discovery mode only looks at user messages (assistant content is not a slash command invocation)."""
+        projects = tmp_path / "projects"
+        proj = projects / "-test-proj"
+        proj.mkdir(parents=True)
+        s1 = "disc0002-0000-0000-0000-000000000000"
+        lines = [
+            # assistant message that starts with /: should NOT be counted
+            json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "message": {"role": "assistant", "content": [
+                            {"type": "text", "text": "/some/file/path description"}]}}),
+            # user message: should be counted
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:01:00.000Z",
+                        "message": {"role": "user", "content": "/mycommand do something"}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.analyze_planning_usage()
+        commands = [r.command for r in results]
+        assert "/mycommand" in commands
+        assert "/some" not in commands  # assistant content not counted
+
+    def test_discovery_ignores_non_leading_slashes(self, tmp_path):
+        """Messages with slash in the middle (file paths, URLs) are not counted."""
+        projects = tmp_path / "projects"
+        proj = projects / "-test-proj"
+        proj.mkdir(parents=True)
+        s1 = "disc0003-0000-0000-0000-000000000000"
+        lines = [
+            # Does NOT start with slash — should not be counted
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "message": {"role": "user", "content": "see the file at /path/to/file"}}),
+            # Starts with slash — should be counted
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:01:00.000Z",
+                        "message": {"role": "user", "content": "/mycommand"}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.analyze_planning_usage()
+        commands = [r.command for r in results]
+        assert "/mycommand" in commands
+        assert "/path" not in commands  # mid-message slash not counted
+
+    def test_discovery_returns_correct_session_ids(self, tmp_path):
+        """PlanningCommandCount.session_ids lists unique sessions where command was used."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.analyze_planning_usage()
+        ar_plannew = next((r for r in results if r.command == "/ar:plannew"), None)
+        assert ar_plannew is not None
+        assert "aaaa0001-0000-0000-0000-000000000000" in ar_plannew.session_ids
+
+    def test_pattern_mode_still_works(self, tmp_path):
+        """Passing explicit commands still uses pattern mode (unchanged behavior)."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.analyze_planning_usage(commands=[r"/ar:plannew\b"])
+        assert any(r.command == "/ar:plannew" for r in results)
+
+    def test_empty_projects_returns_empty(self, tmp_path):
+        """Empty projects dir returns empty list in discovery mode."""
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.analyze_planning_usage()
+        assert results == []
+
+    def test_project_filter_limits_discovery(self, tmp_path):
+        """project_filter limits which projects are scanned in discovery mode."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        # proj1 has /ar:plannew, proj2 has /ar:pn
+        results = engine.analyze_planning_usage(project_filter="proj1")
+        commands = [r.command for r in results]
+        assert "/ar:plannew" in commands
+        assert "/ar:pn" not in commands
+
+
+class TestMessagesPlanningDiscovery:
+    """CLI aise messages planning uses discovery mode by default."""
+
+    def test_planning_discovery_exit0(self, tmp_path):
+        """Default (no --commands) uses discovery mode and exits 0."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "planning"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(projects),
+        })
+        assert result.exit_code == 0, result.output
+
+    def test_planning_discovery_finds_commands(self, tmp_path):
+        """Default output includes auto-discovered /ar:plannew."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "planning"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(projects),
+        })
+        assert result.exit_code == 0
+        assert "/ar:plannew" in result.output
+
+    def test_planning_discovery_json_format(self, tmp_path):
+        """Discovery mode with --format json returns valid JSON with command key."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "planning", "--format", "json"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(projects),
+        })
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        assert any(d["command"] == "/ar:plannew" for d in data)
+
+    def test_planning_commands_flag_overrides_discovery(self, tmp_path):
+        """--commands flag switches to pattern mode, overriding discovery."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, [
+            "messages", "planning", "--commands", r"/ar:plannew\b", "--format", "json"
+        ], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(projects),
+        })
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert any(d["command"] == "/ar:plannew" for d in data)
+
+
+# ── Config app tests ──────────────────────────────────────────────────────────
+
+class TestConfigPath:
+    """aise config path shows the config file path."""
+
+    def test_config_path_exits0(self, tmp_path):
+        result = runner.invoke(app, ["config", "path"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+        })
+        assert result.exit_code == 0
+
+    def test_config_path_shows_json_filename(self, tmp_path):
+        result = runner.invoke(app, ["config", "path"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+        })
+        assert "config.json" in result.output
+
+    def test_config_path_respects_env_override(self, tmp_path):
+        custom_cfg = tmp_path / "my_config.json"
+        result = runner.invoke(app, ["config", "path"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+            "AI_SESSION_TOOLS_CONFIG": str(custom_cfg),
+        })
+        assert result.exit_code == 0
+        assert "my_config.json" in result.output
+
+
+class TestConfigShow:
+    """aise config show displays config contents."""
+
+    def test_config_show_no_file(self, tmp_path):
+        """When no config file exists, shows a helpful message."""
+        import ai_session_tools.cli as cli_mod
+        cli_mod._config_cache = None
+        result = runner.invoke(app, ["config", "show"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+            "AI_SESSION_TOOLS_CONFIG": str(tmp_path / "nonexistent.json"),
+        })
+        cli_mod._config_cache = None
+        assert result.exit_code == 0
+        assert "does not exist" in result.output or "init" in result.output.lower()
+
+    def test_config_show_with_file(self, tmp_path):
+        """With a config file, shows its contents."""
+        import ai_session_tools.cli as cli_mod
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"planning_commands": ["/mycommand"]}))
+        cli_mod._config_cache = None
+        result = runner.invoke(app, ["config", "show"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+            "AI_SESSION_TOOLS_CONFIG": str(cfg),
+        })
+        cli_mod._config_cache = None
+        assert result.exit_code == 0
+        assert "planning_commands" in result.output or "/mycommand" in result.output
+
+    def test_config_show_json_format(self, tmp_path):
+        """--format json returns valid JSON with config_file and exists keys."""
+        import ai_session_tools.cli as cli_mod
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"planning_commands": ["/mycommand"]}))
+        cli_mod._config_cache = None
+        result = runner.invoke(app, ["config", "show", "--format", "json"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+            "AI_SESSION_TOOLS_CONFIG": str(cfg),
+        })
+        cli_mod._config_cache = None
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "config_file" in data
+        assert "exists" in data
+        assert "config" in data
+        assert data["exists"] is True
+
+
+class TestConfigInit:
+    """aise config init creates a starter config.json."""
+
+    def test_config_init_creates_file(self, tmp_path):
+        """init creates config.json in the specified path."""
+        cfg = tmp_path / "sub" / "config.json"
+        result = runner.invoke(app, ["config", "init"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+            "AI_SESSION_TOOLS_CONFIG": str(cfg),
+        })
+        assert result.exit_code == 0
+        assert cfg.exists()
+
+    def test_config_init_creates_valid_json(self, tmp_path):
+        """Created config.json is valid JSON with expected keys."""
+        cfg = tmp_path / "config.json"
+        runner.invoke(app, ["config", "init"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+            "AI_SESSION_TOOLS_CONFIG": str(cfg),
+        })
+        assert cfg.exists()
+        data = json.loads(cfg.read_text())
+        assert "correction_patterns" in data
+        assert "planning_commands" in data
+        assert isinstance(data["correction_patterns"], list)
+        assert isinstance(data["planning_commands"], list)
+
+    def test_config_init_does_not_overwrite_by_default(self, tmp_path):
+        """init exits non-zero if file already exists (safe by default)."""
+        cfg = tmp_path / "config.json"
+        cfg.write_text('{"existing": true}')
+        result = runner.invoke(app, ["config", "init"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+            "AI_SESSION_TOOLS_CONFIG": str(cfg),
+        })
+        assert result.exit_code != 0
+        # Original file preserved
+        assert json.loads(cfg.read_text()) == {"existing": True}
+
+    def test_config_init_force_overwrites(self, tmp_path):
+        """init --force overwrites an existing file."""
+        cfg = tmp_path / "config.json"
+        cfg.write_text('{"existing": true}')
+        result = runner.invoke(app, ["config", "init", "--force"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+            "AI_SESSION_TOOLS_CONFIG": str(cfg),
+        })
+        assert result.exit_code == 0
+        data = json.loads(cfg.read_text())
+        assert "correction_patterns" in data
+        assert "existing" not in data
+
+    def test_config_init_creates_parent_dirs(self, tmp_path):
+        """init creates parent directories that don't exist yet."""
+        cfg = tmp_path / "deep" / "nested" / "config.json"
+        result = runner.invoke(app, ["config", "init"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+            "AI_SESSION_TOOLS_CONFIG": str(cfg),
+        })
+        assert result.exit_code == 0
+        assert cfg.exists()

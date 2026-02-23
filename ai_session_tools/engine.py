@@ -55,6 +55,11 @@ DEFAULT_PLANNING_COMMANDS: List[str] = [
     r"/plannew\b", r"/planrefine\b", r"/planupdate\b", r"/planprocess\b",
 ]
 
+#: Regex to auto-discover slash commands that START a user message.
+#: Matches e.g. "/ar:plannew", "/commit", "/help" — not file paths or URLs.
+#: Used when analyze_planning_usage() is called with commands=None (discovery mode).
+_SLASH_CMD_DISCOVERY_RE = re.compile(r"^/(\w[\w:.-]*)")
+
 #: System message patterns to filter from export
 _EXPORT_FILTER_PATTERNS = (
     "[Request interrupted",
@@ -715,10 +720,22 @@ class SessionRecoveryEngine:
         after: Optional[str] = None,
         before: Optional[str] = None,
     ) -> List[PlanningCommandCount]:
-        """Count planning command usage across all sessions, sorted by frequency.
+        """Count slash command usage across all sessions, sorted by frequency.
+
+        Two modes depending on whether ``commands`` is provided:
+
+        **Discovery mode** (``commands=None``, the default):
+            Auto-discovers every slash command actually used — any user message whose
+            content starts with ``/word`` (e.g. ``/commit``, ``/ar:plannew``, ``/help``).
+            No configuration required; works on any Claude Code workspace.
+
+        **Pattern mode** (``commands`` is a list of regex strings):
+            Counts only the commands matching the supplied regex patterns.
+            Useful when you want to track a specific set of commands and apply
+            word-boundary anchors for precision.
 
         Args:
-            commands:       Override DEFAULT_PLANNING_COMMANDS list (regex strings).
+            commands:       Regex patterns to match (pattern mode). ``None`` = auto-discover.
             project_filter: Substring to match project_dir. None = all projects.
             after:          Only messages >= this timestamp (ISO prefix).
             before:         Only messages <= this timestamp (ISO prefix).
@@ -726,8 +743,13 @@ class SessionRecoveryEngine:
         Returns:
             List of PlanningCommandCount, sorted by count descending.
         """
-        _commands = commands or DEFAULT_PLANNING_COMMANDS
-        compiled = [(cmd, re.compile(cmd, re.IGNORECASE)) for cmd in _commands]
+        discovery_mode = commands is None
+        # Pattern mode only: compile provided patterns
+        compiled = (
+            []
+            if discovery_mode
+            else [(cmd, re.compile(cmd, re.IGNORECASE)) for cmd in commands]  # type: ignore[union-attr]
+        )
         counts: Dict[str, int] = defaultdict(int)
         session_ids_by_cmd: Dict[str, set] = defaultdict(set)
         project_dirs_by_cmd: Dict[str, set] = defaultdict(set)
@@ -743,7 +765,13 @@ class SessionRecoveryEngine:
                     with open(jsonl_file, encoding="utf-8", errors="replace") as f:
                         for line in f:
                             try:
+                                # Discovery mode: only user messages carry slash commands
+                                if discovery_mode:
+                                    if '"type":"user"' not in line and '"type": "user"' not in line:
+                                        continue
                                 data = _json_loads(line)
+                                if discovery_mode and data.get("type") != "user":
+                                    continue
                                 ts = data.get("timestamp", "")
                                 if after and ts and ts < after:
                                     continue
@@ -753,25 +781,45 @@ class SessionRecoveryEngine:
                                 if not content:
                                     continue
                                 session_id = data.get("sessionId", "")
-                                for cmd, regex in compiled:
-                                    if regex.search(content):
+                                if discovery_mode:
+                                    # Match slash command at the very start of message content
+                                    m = _SLASH_CMD_DISCOVERY_RE.match(content.lstrip())
+                                    if m:
+                                        cmd = m.group(0)  # e.g. "/ar:plannew", "/commit"
                                         counts[cmd] += 1
                                         session_ids_by_cmd[cmd].add(session_id)
                                         project_dirs_by_cmd[cmd].add(project_dir.name)
+                                else:
+                                    for cmd, regex in compiled:
+                                        if regex.search(content):
+                                            counts[cmd] += 1
+                                            session_ids_by_cmd[cmd].add(session_id)
+                                            project_dirs_by_cmd[cmd].add(project_dir.name)
                             except (json.JSONDecodeError, KeyError, ValueError):
                                 continue
                 except OSError:
                     continue
-        result = [
-            PlanningCommandCount(
-                # Normalize display name: strip regex \b suffix
-                command=re.sub(r"\\b$", "", cmd),
-                count=counts[cmd],
-                session_ids=sorted(session_ids_by_cmd[cmd]),
-                project_dirs=sorted(project_dirs_by_cmd[cmd]),
-            )
-            for cmd in _commands if counts[cmd] > 0
-        ]
+        if discovery_mode:
+            result = [
+                PlanningCommandCount(
+                    command=cmd,
+                    count=counts[cmd],
+                    session_ids=sorted(session_ids_by_cmd[cmd]),
+                    project_dirs=sorted(project_dirs_by_cmd[cmd]),
+                )
+                for cmd in counts
+            ]
+        else:
+            result = [
+                PlanningCommandCount(
+                    # Normalize display name: strip trailing \b regex suffix
+                    command=re.sub(r"\\b$", "", cmd),
+                    count=counts[cmd],
+                    session_ids=sorted(session_ids_by_cmd[cmd]),
+                    project_dirs=sorted(project_dirs_by_cmd[cmd]),
+                )
+                for cmd in (commands or []) if counts[cmd] > 0
+            ]
         result.sort(key=lambda x: x.count, reverse=True)
         return result
 
