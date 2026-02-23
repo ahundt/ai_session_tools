@@ -8,7 +8,7 @@ Licensed under the Apache License, Version 2.0
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 from .models import FileVersion, FilterSpec, RecoveredFile
 
@@ -92,9 +92,9 @@ class ComposableFilter:
 
     def __init__(self):
         """Initialize filter."""
-        self._filters: List[callable] = []
+        self._filters: List[Callable] = []
 
-    def add(self, predicate: callable) -> "ComposableFilter":
+    def add(self, predicate: Callable) -> "ComposableFilter":
         """Add a filter predicate."""
         self._filters.append(predicate)
         return self

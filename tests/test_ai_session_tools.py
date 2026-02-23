@@ -3119,3 +3119,341 @@ class TestExtractMissingVersionFile:
         with pytest.raises(typer.Exit) as exc_info:
             _do_extract(engine, "hello.py", output_dir=str(tmp_path / "out"))
         assert exc_info.value.exit_code == 1
+
+
+# ── New tests: _parse_list_input ─────────────────────────────────────────────
+
+class TestParseListInput:
+    """Tests for _parse_list_input: accepts plain CSV and Python-style bracketed lists."""
+
+    def _fn(self, raw):
+        from ai_session_tools.cli import _parse_list_input
+        return _parse_list_input(raw)
+
+    def test_plain_csv(self):
+        assert self._fn("/ar:plannew,/ar:pn,/mycommand") == ["/ar:plannew", "/ar:pn", "/mycommand"]
+
+    def test_bracketed_double_quotes(self):
+        assert self._fn('["/ar:plannew", "/ar:pn"]') == ["/ar:plannew", "/ar:pn"]
+
+    def test_bracketed_single_quotes(self):
+        assert self._fn("['/ar:plannew', '/ar:pn']") == ["/ar:plannew", "/ar:pn"]
+
+    def test_bracketed_no_quotes(self):
+        assert self._fn("[/ar:plannew, /ar:pn]") == ["/ar:plannew", "/ar:pn"]
+
+    def test_bracketed_mixed_quotes(self):
+        assert self._fn('[/ar:plannew, "/ar:pn"]') == ["/ar:plannew", "/ar:pn"]
+
+    def test_trailing_comma_ignored(self):
+        assert self._fn("a,b,c,") == ["a", "b", "c"]
+
+    def test_extra_spaces_stripped(self):
+        assert self._fn("  a ,  b  ,  c  ") == ["a", "b", "c"]
+
+    def test_single_item(self):
+        assert self._fn("only") == ["only"]
+
+    def test_bracketed_single_item(self):
+        assert self._fn('["only"]') == ["only"]
+
+    def test_empty_string_returns_empty(self):
+        assert self._fn("") == []
+
+    def test_bracketed_empty_returns_empty(self):
+        assert self._fn("[]") == []
+
+    def test_json_array_double_quotes(self):
+        """JSON parsing path: standard double-quoted JSON array."""
+        assert self._fn('["/ar:plannew", "/ar:pn"]') == ["/ar:plannew", "/ar:pn"]
+
+    def test_python_literal_single_quotes(self):
+        """ast.literal_eval path: single-quoted Python list."""
+        assert self._fn("['/ar:plannew', '/ar:pn']") == ["/ar:plannew", "/ar:pn"]
+
+    def test_file_path_input(self, tmp_path):
+        """File-path input: reads file contents and parses as JSON."""
+        list_file = tmp_path / "cmds.json"
+        list_file.write_text(json.dumps(["/ar:plannew", "/ar:pn"]))
+        result = self._fn(str(list_file))
+        assert result == ["/ar:plannew", "/ar:pn"]
+
+    def test_file_path_csv_contents(self, tmp_path):
+        """File-path input: reads file containing plain CSV."""
+        list_file = tmp_path / "cmds.txt"
+        list_file.write_text("/ar:plannew,/ar:pn")
+        result = self._fn(str(list_file))
+        assert result == ["/ar:plannew", "/ar:pn"]
+
+
+class TestParseCommandsOptionListFormat:
+    """_parse_commands_option now accepts bracketed list format via _parse_list_input."""
+
+    def _fn(self, raw):
+        from ai_session_tools.cli import _parse_commands_option
+        return _parse_commands_option(raw)
+
+    def test_none_returns_none(self):
+        assert self._fn(None) is None
+
+    def test_empty_returns_none(self):
+        assert self._fn("") is None
+
+    def test_plain_csv(self):
+        assert self._fn("/ar:plannew,/ar:pn") == ["/ar:plannew", "/ar:pn"]
+
+    def test_bracketed_double_quotes(self):
+        assert self._fn('["/ar:plannew", "/ar:pn"]') == ["/ar:plannew", "/ar:pn"]
+
+    def test_bracketed_no_quotes(self):
+        assert self._fn("[/ar:plannew, /ar:pn]") == ["/ar:plannew", "/ar:pn"]
+
+
+class TestParsePatternOptionsListFormat:
+    """_parse_pattern_options now expands a single bracketed-list entry."""
+
+    def _fn(self, raw):
+        from ai_session_tools.cli import _parse_pattern_options
+        return _parse_pattern_options(raw)
+
+    def test_normal_repeated_entries(self):
+        result = self._fn(["skip_step:you missed", "skip_step:you forgot", "custom:nope"])
+        assert len(result) == 2
+        assert result[0] == ("skip_step", ["you missed", "you forgot"])
+        assert result[1] == ("custom", ["nope"])
+
+    def test_single_bracketed_entry_expanded(self):
+        result = self._fn(['["skip_step:you missed", "skip_step:you forgot"]'])
+        assert result == [("skip_step", ["you missed", "you forgot"])]
+
+    def test_bracketed_entry_no_quotes(self):
+        result = self._fn(["[regression:you deleted, skip_step:you forgot]"])
+        assert len(result) == 2
+        assert ("regression", ["you deleted"]) in result
+        assert ("skip_step", ["you forgot"]) in result
+
+
+# ── New tests: config file ───────────────────────────────────────────────────
+
+class TestLoadConfig:
+    """Tests for load_config(): reads JSON, falls back gracefully, respects env var."""
+
+    def _reset_cache(self):
+        import ai_session_tools.cli as cli_mod
+        cli_mod._config_cache = None
+        cli_mod._g_config_path = None
+
+    def test_missing_file_returns_empty_dict(self, tmp_path):
+        self._reset_cache()
+        import os
+        env = {"AI_SESSION_TOOLS_CONFIG": str(tmp_path / "nonexistent.json")}
+        result = runner.invoke(app, ["list"], env=env)
+        # No crash; config loading returns empty dict silently
+        from ai_session_tools.cli import load_config
+        self._reset_cache()
+        import ai_session_tools.cli as cli_mod
+        cli_mod._g_config_path = str(tmp_path / "nonexistent.json")
+        assert load_config() == {}
+
+    def test_valid_config_loaded(self, tmp_path):
+        self._reset_cache()
+        from ai_session_tools.cli import load_config
+        cfg = {"planning_commands": ["/mycommand", "/mc"]}
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps(cfg))
+        import ai_session_tools.cli as cli_mod
+        cli_mod._g_config_path = str(config_file)
+        result = load_config()
+        assert result == cfg
+        self._reset_cache()
+
+    def test_invalid_json_returns_empty_dict(self, tmp_path):
+        self._reset_cache()
+        config_file = tmp_path / "config.json"
+        config_file.write_text("{ bad json !!!")
+        import ai_session_tools.cli as cli_mod
+        cli_mod._g_config_path = str(config_file)
+        from ai_session_tools.cli import load_config
+        result = load_config()
+        assert result == {}
+        self._reset_cache()
+
+    def test_cached_after_first_load(self, tmp_path):
+        self._reset_cache()
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"planning_commands": ["/x"]}))
+        import ai_session_tools.cli as cli_mod
+        cli_mod._g_config_path = str(config_file)
+        from ai_session_tools.cli import load_config
+        r1 = load_config()
+        r2 = load_config()
+        assert r1 is r2  # same object (cached)
+        self._reset_cache()
+
+
+class TestConfigFileCorrectionsIntegration:
+    """Config file correction_patterns used when no --pattern CLI flag."""
+
+    def _projects(self, tmp_path):
+        return _make_projects_with_sessions(tmp_path)
+
+    def test_config_patterns_used_when_no_cli_flag(self, tmp_path):
+        """Config file correction_patterns override built-in defaults."""
+        import ai_session_tools.cli as cli_mod
+        cli_mod._config_cache = None
+        config_file = tmp_path / "config.json"
+        # Pattern that matches "you forgot" (present in fixture session)
+        config_file.write_text(json.dumps({
+            "correction_patterns": ["config_cat:you forgot"]
+        }))
+        projects = self._projects(tmp_path)
+        result = runner.invoke(app, ["messages", "corrections", "--format", "json"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(projects),
+            "AI_SESSION_TOOLS_CONFIG": str(config_file),
+        })
+        cli_mod._config_cache = None
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert any(d["category"] == "config_cat" for d in data)
+
+    def test_cli_pattern_overrides_config(self, tmp_path):
+        """--pattern flag takes priority over config file."""
+        import ai_session_tools.cli as cli_mod
+        cli_mod._config_cache = None
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "correction_patterns": ["config_cat:NOMATCH_UNIQUE_XYZ"]
+        }))
+        projects = self._projects(tmp_path)
+        result = runner.invoke(app, [
+            "messages", "corrections", "--format", "json",
+            "--pattern", "cli_cat:you forgot",
+        ], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(projects),
+            "AI_SESSION_TOOLS_CONFIG": str(config_file),
+        })
+        cli_mod._config_cache = None
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        # CLI pattern wins — category is "cli_cat", not "config_cat"
+        assert any(d["category"] == "cli_cat" for d in data)
+        assert not any(d["category"] == "config_cat" for d in data)
+
+
+class TestConfigFilePlanningIntegration:
+    """Config file planning_commands used when no --commands CLI flag."""
+
+    def _projects(self, tmp_path):
+        return _make_projects_with_sessions(tmp_path)
+
+    def test_config_commands_used_when_no_cli_flag(self, tmp_path):
+        """Config file planning_commands override built-in defaults."""
+        import ai_session_tools.cli as cli_mod
+        cli_mod._config_cache = None
+        config_file = tmp_path / "config.json"
+        # "/ar:plannew" appears in the fixture session
+        config_file.write_text(json.dumps({
+            "planning_commands": [r"/ar:plannew\b"]
+        }))
+        projects = self._projects(tmp_path)
+        result = runner.invoke(app, ["messages", "planning", "--format", "json"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(projects),
+            "AI_SESSION_TOOLS_CONFIG": str(config_file),
+        })
+        cli_mod._config_cache = None
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert any("/ar:plannew" in d["command"] for d in data)
+
+    def test_cli_commands_override_config(self, tmp_path):
+        """--commands flag takes priority over config file."""
+        import ai_session_tools.cli as cli_mod
+        cli_mod._config_cache = None
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "planning_commands": [r"/NOMATCH_UNIQUE_XYZ\b"]
+        }))
+        projects = self._projects(tmp_path)
+        result = runner.invoke(app, [
+            "messages", "planning", "--format", "json",
+            "--commands", r"/ar:plannew\b",
+        ], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(projects),
+            "AI_SESSION_TOOLS_CONFIG": str(config_file),
+        })
+        cli_mod._config_cache = None
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        # CLI commands win
+        assert any("/ar:plannew" in d["command"] for d in data)
+
+
+# ── New tests: bug fixes ─────────────────────────────────────────────────────
+
+class TestDoGetNullSessionId:
+    """_do_get with no session_id should exit 1 with a helpful message."""
+
+    def test_messages_get_no_arg_exits_nonzero(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["messages", "get"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(projects),
+        })
+        # No positional arg → session_id=None → exits 1 with error message
+        assert result.exit_code == 1
+        assert "Session ID is required" in result.output or "Session ID is required" in (result.stderr or "")
+
+    def test_root_get_no_arg_exits_nonzero(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(app, ["get"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(projects),
+        })
+        assert result.exit_code == 1
+
+
+class TestExportMarkdownMessageCount:
+    """export_session_markdown message_count should only count rendered messages."""
+
+    def test_count_excludes_filtered_messages(self, tmp_path):
+        """Messages matching _EXPORT_FILTER_PATTERNS don't inflate message_count."""
+        projects = tmp_path / "projects"
+        proj = projects / "-Users-test-proj"
+        proj.mkdir(parents=True)
+        sid = "cccc0003-0000-0000-0000-000000000000"
+        lines = [
+            json.dumps({"sessionId": sid, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "gitBranch": "main", "cwd": "/Users/test/proj",
+                        "message": {"role": "user", "content": "visible message"}}),
+            # This message matches _EXPORT_FILTER_PATTERNS → should NOT be counted
+            json.dumps({"sessionId": sid, "type": "user", "timestamp": "2026-01-24T10:01:00.000Z",
+                        "message": {"role": "user", "content": "[Request interrupted by user]"}}),
+            json.dumps({"sessionId": sid, "type": "assistant", "timestamp": "2026-01-24T10:02:00.000Z",
+                        "message": {"role": "assistant", "content": [
+                            {"type": "text", "text": "visible assistant reply"}]}}),
+        ]
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines))
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        md = engine.export_session_markdown(sid)
+        # Only 2 messages rendered (visible message + visible assistant reply)
+        # The "[Request interrupted..." message is filtered and must NOT be counted
+        assert "**Messages**: 2" in md
+        assert "visible message" in md
+        assert "visible assistant reply" in md
+        assert "[Request interrupted" not in md
+
+
+class TestTrailingBbStripping:
+    """analyze_planning_usage display name strips only trailing \\b."""
+
+    def test_trailing_b_stripped(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.analyze_planning_usage(commands=[r"/ar:plannew\b"])
+        assert any(r.command == "/ar:plannew" for r in results)
+
+    def test_leading_b_preserved(self):
+        """re.sub(r'\\\\b$', '', cmd) strips trailing \\b only, not leading \\b."""
+        import re
+        # Verify the regex used in engine.py strips only trailing \b
+        assert re.sub(r"\\b$", "", r"/ar:plannew\b") == "/ar:plannew"
+        assert re.sub(r"\\b$", "", r"\b/ar:plannew\b") == r"\b/ar:plannew"
+        assert re.sub(r"\\b$", "", r"/ar:plannew") == "/ar:plannew"  # no trailing \b, unchanged

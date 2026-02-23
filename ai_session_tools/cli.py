@@ -203,11 +203,77 @@ _PLANNING_SPEC = TableSpec(
 )
 
 
-# Module-level override set by --claude-dir global option
+# Module-level overrides set by global options
 _g_claude_dir: Optional[str] = None
+_g_config_path: Optional[str] = None
+_config_cache: Optional[dict] = None  # lazily loaded, reset per process
 
 
-# ── Root app callback (global --claude-dir option) ────────────────────────────
+def load_config() -> dict:
+    """Load app config from JSON file. Returns empty dict if not found or unreadable.
+
+    Config file location priority:
+      1. ``--config`` CLI flag (set on the root app callback)
+      2. ``AI_SESSION_TOOLS_CONFIG`` environment variable
+      3. OS-appropriate default via ``typer.get_app_dir("ai_session_tools")``:
+           - macOS: ``~/Library/Application Support/ai_session_tools/config.json``
+           - Linux: ``~/.config/ai_session_tools/config.json``
+           - Windows: ``%APPDATA%/ai_session_tools/config.json``
+
+    Supported keys (all optional):
+
+    - ``correction_patterns`` (list of strings): correction patterns in
+      ``"CATEGORY:REGEX"`` format; replaces built-in defaults when present.
+      Example: ``["regression:you deleted", "skip_step:you forgot"]``
+    - ``planning_commands`` (list of strings): slash-command regex patterns
+      to count; replaces built-in defaults when present.
+      Example: ``["/ar:plannew", "/ar:pn", "/mycommand"]``
+
+    Example ``config.json``::
+
+        {
+            "correction_patterns": [
+                "regression:you deleted",
+                "regression:you removed",
+                "skip_step:you forgot",
+                "skip_step:you missed"
+            ],
+            "planning_commands": [
+                "/ar:plannew",
+                "/ar:pn",
+                "/mycommand"
+            ]
+        }
+    """
+    global _config_cache
+    if _config_cache is not None:
+        return _config_cache
+
+    # Priority: --config flag > AI_SESSION_TOOLS_CONFIG env > typer.get_app_dir default
+    if _g_config_path:
+        config_file = Path(_g_config_path).expanduser()
+    else:
+        env_val = os.getenv("AI_SESSION_TOOLS_CONFIG")
+        if env_val:
+            config_file = Path(env_val).expanduser()
+        else:
+            app_dir = typer.get_app_dir("ai_session_tools")
+            config_file = Path(app_dir) / "config.json"
+
+    if config_file.exists():
+        try:
+            with open(config_file, encoding="utf-8") as f:
+                _config_cache = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            err_console.print(f"[yellow]Warning: could not load config {config_file}: {exc}[/yellow]")
+            _config_cache = {}
+    else:
+        _config_cache = {}
+
+    return _config_cache
+
+
+# ── Root app callback (global options) ────────────────────────────────────────
 
 @app.callback(invoke_without_command=True)
 def app_callback(
@@ -221,9 +287,23 @@ def app_callback(
         ),
         envvar="CLAUDE_CONFIG_DIR",
     ),
+    config: Optional[str] = typer.Option(
+        None, "--config",
+        help=(
+            "Path to the ai_session_tools config JSON file. "
+            "Default: OS config dir / ai_session_tools / config.json "
+            "(macOS: ~/Library/Application Support/ai_session_tools/config.json, "
+            "Linux: ~/.config/ai_session_tools/config.json). "
+            "Also overridable via AI_SESSION_TOOLS_CONFIG env var."
+        ),
+        envvar="AI_SESSION_TOOLS_CONFIG",
+    ),
 ) -> None:
-    global _g_claude_dir
+    global _g_claude_dir, _g_config_path, _config_cache
     _g_claude_dir = claude_dir
+    if config != _g_config_path:
+        _g_config_path = config
+        _config_cache = None  # invalidate cache when path changes
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
@@ -268,6 +348,69 @@ def _parse_session_set(s: Optional[str]) -> Set[str]:
     if not s:
         return set()
     return {x.strip() for x in s.split(",") if x.strip()}
+
+
+def _strip_quotes(s: str) -> str:
+    """Strip surrounding single or double quotes from a stripped string."""
+    s = s.strip()
+    if len(s) >= 2 and s[0] in ('"', "'") and s[-1] == s[0]:
+        s = s[1:-1].strip()
+    return s
+
+
+def _parse_list_input(raw: str) -> List[str]:
+    """Parse a list from raw text or a file path. Tries parsers in order:
+
+    1. **File path** — if ``raw`` is an existing readable path, read its contents first.
+    2. **JSON array** (``json.loads``) — handles ``["a", "b"]``, ``["a","b"]``, etc.
+    3. **Python literal** (``ast.literal_eval``) — handles ``['a', 'b']``, mixed quotes.
+    4. **CSV fallback** — handles ``a,b,c``, ``[a,b,c]`` (brackets stripped then split).
+
+    Examples::
+
+        "a,b,c"                         → ["a", "b", "c"]         (CSV)
+        '["/ar:pn", "/ar:pr"]'          → ["/ar:pn", "/ar:pr"]    (JSON)
+        "['/ar:pn', '/ar:pr']"          → ["/ar:pn", "/ar:pr"]    (Python literal)
+        '[/ar:pn, "/ar:pr"]'            → ["/ar:pn", "/ar:pr"]    (CSV with brackets)
+        "/path/to/list.json"            → contents parsed above   (file path)
+
+    Empty items (trailing commas, whitespace-only) are always discarded.
+    """
+    import ast
+
+    s = raw.strip()
+
+    # 1. File path: if the string points to an existing file, read it first
+    try:
+        p = Path(s).expanduser()
+        if p.exists() and p.is_file():
+            s = p.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        pass  # not a valid path; continue with raw string
+
+    # 2. JSON array (handles double-quoted items, no-space format)
+    if s.startswith("["):
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 3. Python literal (handles single-quoted items, mixed quotes)
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except (ValueError, SyntaxError):
+            pass
+
+        # 4a. CSV with brackets: strip outer brackets then split
+        inner = s[1:-1] if s.endswith("]") else s[1:]
+        return [_strip_quotes(item) for item in inner.split(",") if item.strip()]
+
+    # 4b. Plain CSV
+    return [_strip_quotes(item) for item in s.split(",") if item.strip()]
 
 
 def _project_dir_name(path: str) -> str:
@@ -621,21 +764,41 @@ def _do_list_sessions(
 
 
 def _parse_pattern_options(raw: List[str]) -> List[tuple]:
-    """Parse --pattern "CATEGORY:REGEX" options into engine-format tuples.
+    """Parse correction pattern entries into engine-format tuples.
 
-    Each raw string must be "CATEGORY:REGEX". Multiple entries with the same
-    category are combined into one tuple with a list of regexes.
+    Each entry must be ``"CATEGORY:REGEX"``. Multiple entries with the same
+    category are combined (OR logic). A single entry that is a bracketed list
+    (e.g. ``'["regression:you deleted", "skip_step:you forgot"]'``) is expanded
+    automatically, so both ``--pattern`` repetition and Python-list syntax work:
 
-    Example::
-        ["skip_step:you missed", "skip_step:you forgot", "custom:you broke it"]
-        → [("skip_step", ["you missed", "you forgot"]), ("custom", ["you broke it"])]
+    Examples::
+        # Repeatable flags (standard):
+        --pattern "skip_step:you missed" --pattern "skip_step:you forgot"
+        → [("skip_step", ["you missed", "you forgot"])]
+
+        # Single bracketed-list value (also accepted):
+        --pattern '["skip_step:you missed", "skip_step:you forgot"]'
+        → [("skip_step", ["you missed", "you forgot"])]
+
+        # Config file list (same format as bracketed value items):
+        ["regression:you deleted", "skip_step:you forgot"]
+        → [("regression", ["you deleted"]), ("skip_step", ["you forgot"])]
 
     Raises:
         typer.BadParameter: If any entry lacks the required "CATEGORY:REGEX" format.
     """
     from collections import OrderedDict
-    groups: "OrderedDict[str, List[str]]" = OrderedDict()
+    # Expand any single entry that is a Python-style bracketed list
+    expanded: List[str] = []
     for entry in raw:
+        s = entry.strip()
+        if s.startswith("[") and s.endswith("]"):
+            expanded.extend(_parse_list_input(s))
+        else:
+            expanded.append(entry)
+
+    groups: "OrderedDict[str, List[str]]" = OrderedDict()
+    for entry in expanded:
         if ":" not in entry:
             raise typer.BadParameter(
                 f"--pattern {entry!r} must be in 'CATEGORY:REGEX' format, "
@@ -655,17 +818,22 @@ def _parse_pattern_options(raw: List[str]) -> List[tuple]:
 
 
 def _parse_commands_option(raw: Optional[str]) -> Optional[List[str]]:
-    """Parse --commands comma-separated string into a list of regex patterns.
+    """Parse --commands value into a list of regex patterns.
 
-    Returns None (use engine default) when raw is None or empty.
+    Returns None (use engine/config default) when raw is None or empty.
 
-    Example::
+    Accepts both plain CSV and Python-style bracketed lists (see _parse_list_input):
+
+    Examples::
         "/ar:plannew,/ar:pn,/mycommand"
         → ["/ar:plannew", "/ar:pn", "/mycommand"]
+
+        '["/ar:plannew", "/ar:pn"]'
+        → ["/ar:plannew", "/ar:pn"]
     """
     if not raw:
         return None
-    return [cmd.strip() for cmd in raw.split(",") if cmd.strip()]
+    return _parse_list_input(raw)
 
 
 def _do_messages_corrections(
@@ -679,11 +847,24 @@ def _do_messages_corrections(
 ) -> None:
     """Find user corrections across sessions.
 
+    Priority for correction patterns: CLI --pattern > config file > built-in defaults.
+
     Args:
         pattern_overrides: Raw --pattern option values in "CATEGORY:REGEX" format.
-                           When provided, replaces DEFAULT_CORRECTION_PATTERNS entirely.
+                           When provided, replaces config/defaults entirely.
     """
-    patterns = _parse_pattern_options(pattern_overrides) if pattern_overrides else None
+    if pattern_overrides:
+        # CLI flag — highest priority
+        patterns = _parse_pattern_options(pattern_overrides)
+    else:
+        cfg = load_config()
+        cfg_patterns = cfg.get("correction_patterns")
+        if cfg_patterns:
+            # Config file — middle priority; same format as --pattern values
+            patterns = _parse_pattern_options(list(cfg_patterns))
+        else:
+            # Built-in defaults — lowest priority (engine uses DEFAULT_CORRECTION_PATTERNS)
+            patterns = None
     corrections = engine.find_corrections(
         project_filter=project, after=after, before=before,
         limit=limit, patterns=patterns,
@@ -701,11 +882,24 @@ def _do_messages_planning(
 ) -> None:
     """Show planning command usage.
 
+    Priority for command list: CLI --commands > config file > built-in defaults.
+
     Args:
-        commands_raw: Raw --commands option value: comma-separated regex patterns.
-                      When provided, replaces DEFAULT_PLANNING_COMMANDS entirely.
+        commands_raw: Raw --commands option value (CSV or bracketed list).
+                      When provided, replaces config/defaults entirely.
     """
-    commands = _parse_commands_option(commands_raw)
+    if commands_raw:
+        # CLI flag — highest priority
+        commands = _parse_commands_option(commands_raw)
+    else:
+        cfg = load_config()
+        cfg_commands = cfg.get("planning_commands")
+        if cfg_commands:
+            # Config file — middle priority; list of regex strings
+            commands = list(cfg_commands)
+        else:
+            # Built-in defaults — lowest priority (engine uses DEFAULT_PLANNING_COMMANDS)
+            commands = None
     results = engine.analyze_planning_usage(
         project_filter=project, after=after, before=before,
         commands=commands,
@@ -795,7 +989,7 @@ def _do_export_recent(
 ) -> None:
     """Export all sessions from last N days to markdown."""
     import datetime as _dt
-    after = (_dt.datetime.now() - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
+    after = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
     sessions = engine.get_sessions(project_filter=project, after=after)
     if not sessions:
         console.print("[yellow]No sessions found[/yellow]")
@@ -895,13 +1089,16 @@ def _do_search(  # noqa: C901
 
 def _do_get(
     engine: SessionRecoveryEngine,
-    session_id: str,
+    session_id: Optional[str],
     message_type: Optional[str] = None,
     limit: int = 10,
     max_chars: int = 0,
     fmt: str = "table",
 ) -> None:
     """Get messages from a specific session."""
+    if not session_id:
+        err_console.print("[red]Session ID is required.[/red] Use 'aise list' to find session IDs.")
+        raise typer.Exit(code=1)
     messages_list = engine.get_messages(session_id, message_type)[:limit]
 
     if not messages_list:

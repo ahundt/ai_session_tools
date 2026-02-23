@@ -765,7 +765,7 @@ class SessionRecoveryEngine:
         result = [
             PlanningCommandCount(
                 # Normalize display name: strip regex \b suffix
-                command=cmd.replace(r"\b", ""),
+                command=re.sub(r"\\b$", "", cmd),
                 count=counts[cmd],
                 session_ids=sorted(session_ids_by_cmd[cmd]),
                 project_dirs=sorted(project_dirs_by_cmd[cmd]),
@@ -892,14 +892,14 @@ class SessionRecoveryEngine:
                 msg_type = data.get("type", "")
                 if msg_type not in ("user", "assistant"):
                     continue
-                message_count += 1
                 is_summary = data.get("isCompactSummary", False)
                 content = self._extract_content(data)
-                # Filter system noise
+                # Filter system noise — count only messages that are actually rendered
                 if any(pat in content for pat in _EXPORT_FILTER_PATTERNS):
                     continue
                 if not content.strip():
                     continue
+                message_count += 1
                 ts_short = ts[:16].replace("T", " ") if ts else "\u2014"
                 if is_summary:
                     lines_md.append(f"## Session Summary\n\n{content}\n\n---\n")
