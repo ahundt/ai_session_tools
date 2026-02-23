@@ -108,22 +108,24 @@ class SessionRecoveryEngine:
             for jsonl_file in project_dir.glob("*.jsonl"):
                 yield project_dir.name, jsonl_file
 
-    def _find_session_file(self, session_id: str) -> Optional[tuple]:
-        """Return (jsonl_path, project_dir_name) for the given session ID prefix.
+    def _find_session_files(self, session_id: str) -> List[tuple]:
+        """Return all (jsonl_path, project_dir_name) tuples for the given session ID prefix.
 
-        Returns None if no session matches. Raises ValueError if multiple match.
+        Returns an empty list if no session matches.
+        Results are sorted by file modification time descending (newest first),
+        so callers that need a single session can use matches[0].
         """
         matches = []
         for project_dir_name, jsonl_path in self._iter_all_jsonl():
             if jsonl_path.stem.startswith(session_id):
-                matches.append((jsonl_path, project_dir_name))
-        if not matches:
-            return None
-        if len(matches) > 1:
-            raise ValueError(
-                f"Ambiguous session ID {session_id!r} matches {len(matches)} files"
-            )
-        return matches[0]
+                try:
+                    mtime = jsonl_path.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                matches.append((mtime, jsonl_path, project_dir_name))
+        # Sort newest first, then strip the mtime sort key
+        matches.sort(key=lambda x: x[0], reverse=True)
+        return [(path, proj) for _mtime, path, proj in matches]
 
     @staticmethod
     def _scan_jsonl(path: Path):
@@ -928,10 +930,15 @@ class SessionRecoveryEngine:
         Raises:
             ValueError: If no session matches, or multiple sessions match.
         """
-        found = self._find_session_file(session_id)
-        if found is None:
+        matches = self._find_session_files(session_id)
+        if not matches:
             raise ValueError(f"No session found matching: {session_id!r}")
-        session_file, _project_dir_name = found
+        if len(matches) > 1:
+            candidates = ", ".join(m[0].stem[:16] for m in matches)
+            raise ValueError(
+                f"Ambiguous session ID {session_id!r} matches {len(matches)} sessions: {candidates}"
+            )
+        session_file, _project_dir_name = matches[0]
 
         # Scan file for metadata + messages
         cwd, git_branch, ts_first = "", "unknown", ""
@@ -987,10 +994,10 @@ class SessionRecoveryEngine:
         Returns:
             SessionAnalysis, or None if no matching session is found.
         """
-        found = self._find_session_file(session_id)
-        if found is None:
+        matches = self._find_session_files(session_id)
+        if not matches:
             return None
-        session_file, project_dir_name = found
+        session_file, project_dir_name = matches[0]  # newest first on ambiguous prefix
 
         total_lines = 0
         user_count = 0
@@ -1057,10 +1064,10 @@ class SessionRecoveryEngine:
                 type (str), timestamp (str), content_preview (str, ≤preview_chars),
                 tool_count (int)
         """
-        found = self._find_session_file(session_id)
-        if found is None:
+        matches = self._find_session_files(session_id)
+        if not matches:
             return []
-        session_file, _project_dir_name = found
+        session_file, _project_dir_name = matches[0]  # newest first on ambiguous prefix
 
         events: List[dict] = []
         for data in self._scan_jsonl(session_file):

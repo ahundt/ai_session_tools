@@ -4139,3 +4139,110 @@ class TestMessagesTimeline:
         data = json.loads(result.output)
         for ev in data:
             assert len(ev["content_preview"]) <= 10
+
+
+def _make_projects_with_prefix_ambiguity(tmp_path: Path) -> Path:
+    """Create projects dir with two sessions sharing the same ID prefix 'aaaa'.
+
+    - aaaa0001-... in proj1 (older mtime)
+    - aaaa0002-... in proj2 (newer mtime — will be matches[0] after mtime sort)
+    Used to test that _find_session_files returns both and callers use newest-first.
+    """
+    projects = tmp_path / "projects"
+    s1 = "aaaa0001-0000-0000-0000-000000000000"
+    s2 = "aaaa0002-0000-0000-0000-000000000000"
+
+    proj1 = projects / "-Users-alice-proj1"
+    proj1.mkdir(parents=True)
+    (proj1 / f"{s1}.jsonl").write_text(
+        json.dumps({"sessionId": s1, "type": "user",
+                    "timestamp": "2026-01-24T10:00:00.000Z",
+                    "gitBranch": "main", "cwd": "/Users/alice/proj1",
+                    "message": {"role": "user", "content": "session one"}})
+        + "\n"
+    )
+
+    import time
+    time.sleep(0.01)  # ensure different mtime
+
+    proj2 = projects / "-Users-alice-proj2"
+    proj2.mkdir(parents=True)
+    (proj2 / f"{s2}.jsonl").write_text(
+        json.dumps({"sessionId": s2, "type": "user",
+                    "timestamp": "2026-01-25T09:00:00.000Z",
+                    "gitBranch": "feature", "cwd": "/Users/alice/proj2",
+                    "message": {"role": "user", "content": "session two"}})
+        + "\n"
+    )
+    return projects
+
+
+class TestFindSessionFilesMultipleMatches:
+    """_find_session_files returns all matches sorted newest-first; callers use matches[0]."""
+
+    def test_find_session_files_returns_both_on_prefix_match(self, tmp_path):
+        projects = _make_projects_with_prefix_ambiguity(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        matches = engine._find_session_files("aaaa")
+        assert len(matches) == 2
+
+    def test_find_session_files_empty_on_no_match(self, tmp_path):
+        projects = _make_projects_with_prefix_ambiguity(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        matches = engine._find_session_files("zzzz")
+        assert matches == []
+
+    def test_find_session_files_sorted_newest_first(self, tmp_path):
+        projects = _make_projects_with_prefix_ambiguity(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        matches = engine._find_session_files("aaaa")
+        # The newer file (aaaa0002) should be first
+        assert matches[0][0].stem.startswith("aaaa0002")
+
+    def test_analyze_session_uses_newest_on_ambiguous_prefix(self, tmp_path):
+        projects = _make_projects_with_prefix_ambiguity(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        # "aaaa" matches both; should return newest (aaaa0002) without raising
+        result = engine.analyze_session("aaaa")
+        assert result is not None
+        assert result.session_id == "aaaa"
+
+    def test_analyze_session_returns_none_on_no_match(self, tmp_path):
+        projects = _make_projects_with_prefix_ambiguity(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        result = engine.analyze_session("zzzz")
+        assert result is None
+
+    def test_timeline_session_uses_newest_on_ambiguous_prefix(self, tmp_path):
+        projects = _make_projects_with_prefix_ambiguity(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        events = engine.timeline_session("aaaa")
+        assert isinstance(events, list)
+        # Should return events without raising even though prefix is ambiguous
+        assert len(events) >= 1
+
+    def test_timeline_session_returns_empty_on_no_match(self, tmp_path):
+        projects = _make_projects_with_prefix_ambiguity(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        events = engine.timeline_session("zzzz")
+        assert events == []
+
+    def test_export_raises_on_ambiguous_prefix(self, tmp_path):
+        projects = _make_projects_with_prefix_ambiguity(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        with pytest.raises(ValueError, match="Ambiguous"):
+            engine.export_session_markdown("aaaa")
+
+    def test_export_raises_with_candidate_list(self, tmp_path):
+        projects = _make_projects_with_prefix_ambiguity(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        with pytest.raises(ValueError) as exc_info:
+            engine.export_session_markdown("aaaa")
+        # Error message should name the candidate session IDs
+        assert "aaaa0001" in str(exc_info.value) or "aaaa0002" in str(exc_info.value)
+
+    def test_export_raises_on_no_match(self, tmp_path):
+        projects = _make_projects_with_prefix_ambiguity(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        with pytest.raises(ValueError, match="No session found"):
+            engine.export_session_markdown("zzzz")
