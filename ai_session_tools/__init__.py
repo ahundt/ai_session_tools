@@ -19,7 +19,7 @@ try:
     from importlib.metadata import version
     __version__ = version("ai_session_tools")
 except Exception:
-    __version__ = "0.1.0"
+    __version__ = "0.2.0"
 
 __author__ = "Andrew Hundt"
 
