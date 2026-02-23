@@ -255,12 +255,19 @@ class SessionRecoveryEngine:
                 if match:
                     version_num = int(match.group(1))
                     line_count = int(match.group(2))
+                    try:
+                        ts = datetime.datetime.fromtimestamp(
+                            version_file.stat().st_mtime, tz=datetime.timezone.utc
+                        ).strftime("%Y-%m-%d %H:%M")
+                    except OSError:
+                        ts = ""
                     versions.append(
                         FileVersion(
                             filename=filename,
                             version_num=version_num,
                             line_count=line_count,
                             session_id=session_dir.name.replace("session_all_versions_", ""),
+                            timestamp=ts,
                         )
                     )
 

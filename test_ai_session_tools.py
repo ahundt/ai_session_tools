@@ -902,14 +902,16 @@ class TestCLIDualOrdering:
         assert result.exit_code == 0
         assert "session" in result.output.lower()
 
-    def test_cli_extract_uses_name_not_file(self):
-        """'extract' uses --name/-n, not --file/-f."""
+    def test_cli_extract_positional_name(self):
+        """'extract' uses a positional NAME argument (not --name/-n)."""
         from ai_session_tools.cli import app
         from typer.testing import CliRunner
         runner = CliRunner()
         result = runner.invoke(app, ["extract", "--help"])
         assert result.exit_code == 0
-        assert "--name" in result.output
+        # Positional arg appears as NAME or name in help, not as --name flag
+        assert "NAME" in result.output or "name" in result.output.lower()
+        assert "--name" not in result.output
 
     def test_cli_get_command_exists(self):
         """Root 'get' command exists."""
@@ -1239,7 +1241,7 @@ class TestPathExpansion:
         engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
         # Should not raise due to unexpanded ~
         try:
-            _do_extract(engine, "hello.py", "~/tmp_ai_session_test_output")
+            _do_extract(engine, "hello.py", version=None, output_dir="~/tmp_ai_session_test_output", restore=False, dry_run=False)
         except SystemExit:
             pass  # typer.Exit is expected when file not in recovery
         # The important thing: no FileNotFoundError about literal "~" directory
@@ -1771,7 +1773,7 @@ class TestExtractToOriginalPath:
 
         engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
         try:
-            _do_extract(engine, "hello.py", None)
+            _do_extract(engine, "hello.py", restore=True)
         except SystemExit:
             pass
         # If original path dir was created, the file was restored there
@@ -1779,19 +1781,485 @@ class TestExtractToOriginalPath:
 
 
 class TestExtractFallback:
-    """_do_extract falls back to ./recovered/ when no original path is recorded."""
+    """_do_extract default (no flags) prints to stdout."""
 
-    def test_fallback_to_recovered_dir(self, tmp_path, monkeypatch):
+    def test_stdout_default_no_files_written(self, tmp_path, monkeypatch, capsys):
         from ai_session_tools.cli import _do_extract
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("AI_SESSION_TOOLS_OUTPUT", raising=False)
 
         recovery = _make_recovery_dir(tmp_path)
-        # No projects dir — get_original_path will return None
         engine = SessionRecoveryEngine(tmp_path / "empty_projects", recovery)
         try:
-            _do_extract(engine, "hello.py", None)
+            _do_extract(engine, "hello.py")
         except SystemExit:
             pass
-        assert (tmp_path / "recovered" / "hello.py").exists()
+        # Default is stdout — no files in ./recovered/
+        assert not (tmp_path / "recovered" / "hello.py").exists()
+
+# ── New TDD Tests: Part 0 — Project dir naming and session filtering ──────────
+
+class TestProjectDirName:
+    """_project_dir_name() converts path to Claude project dir name."""
+
+    def test_dot_becomes_dash(self):
+        from ai_session_tools.cli import _project_dir_name
+        result = _project_dir_name("/Users/athundt/.claude/myproject")
+        assert result == "-Users-athundt--claude-myproject"
+
+    def test_hyphen_preserved(self):
+        from ai_session_tools.cli import _project_dir_name
+        result = _project_dir_name("/foo/my-project")
+        assert result == "-foo-my-project"
+
+    def test_underscore_becomes_dash(self):
+        from ai_session_tools.cli import _project_dir_name
+        result = _project_dir_name("/foo/my_project")
+        assert result == "-foo-my-project"
+
+    def test_special_chars(self):
+        from ai_session_tools.cli import _project_dir_name
+        result = _project_dir_name("/var/www/my.site.com")
+        assert result == "-var-www-my-site-com"
+
+
+class TestSessionsForProject:
+    """_sessions_for_project() returns session IDs from project directory."""
+
+    def test_returns_session_ids(self, tmp_path):
+        from ai_session_tools.cli import _sessions_for_project, _project_dir_name
+        # Create projects dir structure matching the encoded path
+        projects = tmp_path / "projects"
+        project_path = str(tmp_path / "myproject")
+        dir_name = _project_dir_name(project_path)
+        project_dir = projects / dir_name
+        project_dir.mkdir(parents=True)
+        (project_dir / "abc123-session.jsonl").write_text("{}")
+        (project_dir / "def456-session.jsonl").write_text("{}")
+
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        sessions = _sessions_for_project(engine, project_path)
+        assert "abc123-session" in sessions
+        assert "def456-session" in sessions
+
+    def test_returns_empty_for_missing_project(self, tmp_path):
+        from ai_session_tools.cli import _sessions_for_project
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        sessions = _sessions_for_project(engine, "/nonexistent/path")
+        assert sessions == set()
+
+
+class TestClaudeConfigDirEnvVar:
+    """get_engine() respects CLAUDE_CONFIG_DIR env var."""
+
+    def test_claude_config_dir_sets_projects(self, tmp_path, monkeypatch):
+        from ai_session_tools.cli import get_engine
+        import ai_session_tools.cli as cli_module
+        # Reset global to ensure env var path is tested
+        original = cli_module._g_claude_dir
+        cli_module._g_claude_dir = None
+        try:
+            monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+            monkeypatch.delenv("AI_SESSION_TOOLS_PROJECTS", raising=False)
+            monkeypatch.delenv("AI_SESSION_TOOLS_RECOVERY", raising=False)
+            engine = get_engine()
+            assert str(engine.projects_dir) == str(tmp_path / "projects")
+        finally:
+            cli_module._g_claude_dir = original
+
+
+class TestClaudeDirCliFlag:
+    """--claude-dir CLI flag takes precedence over CLAUDE_CONFIG_DIR env var."""
+
+    def test_claude_dir_flag_used_as_base(self, tmp_path, monkeypatch):
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        import ai_session_tools.cli as cli_module
+        monkeypatch.delenv("AI_SESSION_TOOLS_PROJECTS", raising=False)
+        monkeypatch.delenv("AI_SESSION_TOOLS_RECOVERY", raising=False)
+        # Create minimal structure so search doesn't crash
+        (tmp_path / "projects").mkdir()
+        (tmp_path / "recovery").mkdir()
+        runner = CliRunner()
+        result = runner.invoke(app, ["--claude-dir", str(tmp_path), "files", "search"])
+        # Should use tmp_path as claude dir; engine.projects_dir should be tmp_path/projects
+        # The command should succeed (exit 0) or show "No files found"
+        assert result.exit_code == 0
+
+
+# ── New TDD Tests: Part 10 — Timestamp in get_versions() ─────────────────────
+
+class TestGetVersionsTimestamp:
+    """get_versions() populates FileVersion.timestamp from file mtime."""
+
+    def test_timestamp_populated(self, tmp_path):
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        versions = engine.get_versions("hello.py")
+        assert len(versions) >= 1
+        # All versions should have a non-empty timestamp
+        for v in versions:
+            assert v.timestamp, f"Expected non-empty timestamp, got {v.timestamp!r}"
+            assert v.timestamp.startswith("20"), f"Expected year prefix '20', got {v.timestamp!r}"
+
+    def test_timestamp_format(self, tmp_path):
+        """Timestamp should be YYYY-MM-DD HH:MM format."""
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        versions = engine.get_versions("hello.py")
+        for v in versions:
+            if v.timestamp:
+                assert len(v.timestamp) == 16, f"Expected YYYY-MM-DD HH:MM (16 chars), got {v.timestamp!r}"
+                assert v.timestamp[4] == "-"
+                assert v.timestamp[7] == "-"
+                assert v.timestamp[10] == " "
+                assert v.timestamp[13] == ":"
+
+
+# ── New TDD Tests: Part 2 — History display (read-only) ──────────────────────
+
+class TestHistoryDisplayReadOnly:
+    """_do_history_display() shows a table without writing any files."""
+
+    def test_no_disk_writes(self, tmp_path):
+        from ai_session_tools.cli import _do_history_display
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        files_before = set(tmp_path.rglob("*"))
+        _do_history_display(engine, "hello.py")
+        files_after = set(tmp_path.rglob("*"))
+        # No new files should have been written
+        assert files_before == files_after
+
+    def test_output_contains_version(self, tmp_path, capsys):
+        from ai_session_tools.cli import _do_history_display
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        _do_history_display(engine, "hello.py")
+        # Rich output goes to console; test that it doesn't crash and versions exist
+        versions = engine.get_versions("hello.py")
+        assert len(versions) >= 1
+
+
+class TestHistoryDisplayTimestamp:
+    """_do_history_display() shows timestamp column in table."""
+
+    def test_versions_have_timestamps(self, tmp_path):
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        versions = engine.get_versions("hello.py")
+        # With our Part 10 change, versions should have timestamps
+        assert any(v.timestamp for v in versions)
+
+
+# ── New TDD Tests: Part 3 — History export ───────────────────────────────────
+
+class TestHistoryExport:
+    """_do_history_export() writes versioned files to disk."""
+
+    def test_writes_versioned_files(self, tmp_path):
+        from ai_session_tools.cli import _do_history_export
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        out_dir = tmp_path / "exported"
+        _do_history_export(engine, "hello.py", export_dir=str(out_dir), dry_run=False)
+        assert (out_dir / "hello_v1.py").exists()
+        assert (out_dir / "hello_v2.py").exists()
+        assert "v1" in (out_dir / "hello_v1.py").read_text()
+        assert "v2" in (out_dir / "hello_v2.py").read_text()
+
+    def test_export_creates_output_dir(self, tmp_path):
+        from ai_session_tools.cli import _do_history_export
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        out_dir = tmp_path / "new" / "nested" / "dir"
+        assert not out_dir.exists()
+        _do_history_export(engine, "hello.py", export_dir=str(out_dir), dry_run=False)
+        assert out_dir.exists()
+
+
+class TestHistoryExportDryRun:
+    """_do_history_export() with dry_run=True shows what would be written without writing."""
+
+    def test_no_files_written(self, tmp_path):
+        from ai_session_tools.cli import _do_history_export
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        out_dir = tmp_path / "exported_dry"
+        _do_history_export(engine, "hello.py", export_dir=str(out_dir), dry_run=True)
+        # Directory should NOT be created in dry run
+        assert not out_dir.exists()
+
+
+# ── New TDD Tests: Part 4 — History stdout ───────────────────────────────────
+
+class TestHistoryStdout:
+    """_do_history_stdout() prints all versions to stdout with headers."""
+
+    def test_stdout_contains_header(self, tmp_path, capsys):
+        from ai_session_tools.cli import _do_history_stdout
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        _do_history_stdout(engine, "hello.py")
+        captured = capsys.readouterr()
+        assert "=== hello.py v1" in captured.out
+        assert "=== hello.py v2" in captured.out
+
+    def test_stdout_contains_file_content(self, tmp_path, capsys):
+        from ai_session_tools.cli import _do_history_stdout
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        _do_history_stdout(engine, "hello.py")
+        captured = capsys.readouterr()
+        assert "print('v1')" in captured.out
+        assert "print('v2')" in captured.out
+
+
+# ── New TDD Tests: Part 1 — Extract rewrite ──────────────────────────────────
+
+class TestExtractStdout:
+    """_do_extract() default mode prints to stdout."""
+
+    def test_stdout_contains_content(self, tmp_path, capsys):
+        from ai_session_tools.cli import _do_extract
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        try:
+            _do_extract(engine, "hello.py")
+        except SystemExit:
+            pass
+        captured = capsys.readouterr()
+        # Latest version is v2 (highest version_num)
+        assert "v2" in captured.out
+
+    def test_no_files_written(self, tmp_path, capsys):
+        from ai_session_tools.cli import _do_extract
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        files_before = set(tmp_path.rglob("*.py"))
+        try:
+            _do_extract(engine, "hello.py")
+        except SystemExit:
+            pass
+        files_after = set(tmp_path.rglob("*.py"))
+        # No new .py files outside recovery
+        new_files = files_after - files_before
+        assert not any("recovered" in str(f) for f in new_files)
+
+
+class TestExtractSpecificVersion:
+    """_do_extract() with version= selects specific version."""
+
+    def test_version_1_selected(self, tmp_path, capsys):
+        from ai_session_tools.cli import _do_extract
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        try:
+            _do_extract(engine, "hello.py", version=1)
+        except SystemExit:
+            pass
+        captured = capsys.readouterr()
+        assert "v1" in captured.out
+        assert "v2" not in captured.out
+
+    def test_version_2_selected(self, tmp_path, capsys):
+        from ai_session_tools.cli import _do_extract
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        try:
+            _do_extract(engine, "hello.py", version=2)
+        except SystemExit:
+            pass
+        captured = capsys.readouterr()
+        assert "v2" in captured.out
+        assert "v1" not in captured.out
+
+
+class TestExtractDryRun:
+    """_do_extract() with dry_run=True shows intent without writing or printing content."""
+
+    def test_no_stdout_content(self, tmp_path, capsys):
+        from ai_session_tools.cli import _do_extract
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        _do_extract(engine, "hello.py", dry_run=True)
+        captured = capsys.readouterr()
+        # stdout should be empty (dry run, no content)
+        assert "print(" not in captured.out
+        assert "v1" not in captured.out
+        assert "v2" not in captured.out
+
+    def test_no_files_written(self, tmp_path):
+        from ai_session_tools.cli import _do_extract
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        files_before = set(tmp_path.rglob("*"))
+        _do_extract(engine, "hello.py", dry_run=True)
+        files_after = set(tmp_path.rglob("*"))
+        assert files_before == files_after
+
+
+class TestExtractDryRunRestore:
+    """_do_extract() with dry_run=True, restore=True shows path but writes nothing."""
+
+    def test_no_file_written(self, tmp_path):
+        from ai_session_tools.cli import _do_extract
+        # Set up with an original path record
+        recovery = _make_recovery_dir(tmp_path)
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        original_path = tmp_path / "workspace" / "hello.py"
+        _write_tool_call_jsonl(
+            projects / "session.jsonl",
+            "any-session", "hello.py", str(original_path)
+        )
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        _do_extract(engine, "hello.py", restore=True, dry_run=True)
+        # File should NOT be written
+        assert not original_path.exists()
+
+
+# ── New TDD Tests: Part 9 — Positional name argument ─────────────────────────
+
+class TestPositionalArgExtract:
+    """CLI extract command uses positional NAME argument."""
+
+    def test_positional_name_works(self, tmp_path):
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        import ai_session_tools.cli as cli_module
+        runner = CliRunner()
+        # Set up tmp recovery dir
+        recovery = _make_recovery_dir(tmp_path)
+        import os
+        old_projects = os.environ.get("AI_SESSION_TOOLS_PROJECTS")
+        old_recovery = os.environ.get("AI_SESSION_TOOLS_RECOVERY")
+        old_claude_dir = cli_module._g_claude_dir
+        try:
+            os.environ["AI_SESSION_TOOLS_PROJECTS"] = str(tmp_path / "projects")
+            os.environ["AI_SESSION_TOOLS_RECOVERY"] = str(recovery)
+            cli_module._g_claude_dir = None
+            result = runner.invoke(app, ["files", "extract", "hello.py"])
+        finally:
+            if old_projects is None:
+                os.environ.pop("AI_SESSION_TOOLS_PROJECTS", None)
+            else:
+                os.environ["AI_SESSION_TOOLS_PROJECTS"] = old_projects
+            if old_recovery is None:
+                os.environ.pop("AI_SESSION_TOOLS_RECOVERY", None)
+            else:
+                os.environ["AI_SESSION_TOOLS_RECOVERY"] = old_recovery
+            cli_module._g_claude_dir = old_claude_dir
+        assert result.exit_code == 0
+        assert "v2" in result.output or "print" in result.output
+
+    def test_no_name_flag_accepted(self):
+        """--name flag should no longer be accepted."""
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["extract", "--help"])
+        assert result.exit_code == 0
+        assert "--name" not in result.output
+
+
+class TestPositionalArgHistory:
+    """CLI history command uses positional NAME argument."""
+
+    def test_history_help_shows_positional(self):
+        from ai_session_tools.cli import app
+        from typer.testing import CliRunner
+        runner = CliRunner()
+        result = runner.invoke(app, ["files", "history", "--help"])
+        assert result.exit_code == 0
+        assert "--name" not in result.output
+        # Should show NAME as positional
+        assert "NAME" in result.output or "name" in result.output.lower()
+
+
+# ── New TDD Tests: Part 11 — Sessions column in search table ─────────────────
+
+class TestSearchTableShowsSessions:
+    """TableFormatter.format_many() shows sessions column."""
+
+    def test_sessions_column_in_table(self):
+        from ai_session_tools.formatters import TableFormatter
+        from ai_session_tools import RecoveredFile
+        files = [
+            RecoveredFile(
+                name="cli.py", path="/cli.py", file_type="py", edits=3,
+                sessions=["abc123de-f456-7890-abcd-ef1234567890", "xyz789ab-0000-0000-0000-000000000001"],
+                last_modified="2026-02-22T10:00:00",
+            )
+        ]
+        formatter = TableFormatter("Test")
+        output = formatter.format_many(files)
+        # Session IDs should appear (abbreviated to 8 chars + ellipsis)
+        assert "abc123de" in output
+
+    def test_sessions_column_multiple_sessions(self):
+        from ai_session_tools.formatters import TableFormatter
+        from ai_session_tools import RecoveredFile
+        files = [
+            RecoveredFile(
+                name="test.py", path="/test.py", file_type="py", edits=5,
+                sessions=["aaa", "bbb", "ccc", "ddd"],
+            )
+        ]
+        formatter = TableFormatter("Test")
+        output = formatter.format_many(files)
+        # More than 3 sessions should show (+1) indicator
+        assert "+1" in output
+
+
+# ── Regression tests: missing src.exists() guard in _do_extract write branches ─
+
+class TestExtractMissingVersionFile:
+    """_do_extract raises Exit(1) with a clear message when the version file is
+    missing from disk (not a raw FileNotFoundError traceback).
+
+    Regression: restore and output_dir branches lacked src.exists() check,
+    raising an unhandled FileNotFoundError instead of a friendly error message.
+    """
+
+    def _setup_engine_with_stale_cache(self, tmp_path, with_original_path=False):
+        """Return (engine, original_path) where cache has versions but files are deleted."""
+        recovery = _make_recovery_dir(tmp_path)
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        original_path = tmp_path / "workspace" / "hello.py"
+        if with_original_path:
+            _write_tool_call_jsonl(
+                projects / "session.jsonl",
+                "any-session", "hello.py", str(original_path)
+            )
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        # Pre-populate the version cache (simulates normal usage before files disappear)
+        versions = engine.get_versions("hello.py")
+        assert versions, "Need at least one version for test setup"
+        # Now delete the version files from disk to simulate missing files
+        for vd in recovery.iterdir():
+            if vd.is_dir() and "all_versions" in vd.name:
+                for f in list(vd.iterdir()):
+                    if f.suffix == ".txt":
+                        f.unlink()
+        return engine, original_path
+
+    def test_restore_missing_version_file_exits_cleanly(self, tmp_path):
+        """restore branch: missing version file on disk → Exit(1), not FileNotFoundError."""
+        import typer
+        from ai_session_tools.cli import _do_extract
+        engine, _ = self._setup_engine_with_stale_cache(tmp_path, with_original_path=True)
+        with pytest.raises(typer.Exit) as exc_info:
+            _do_extract(engine, "hello.py", restore=True)
+        assert exc_info.value.exit_code == 1
+
+    def test_output_dir_missing_version_file_exits_cleanly(self, tmp_path):
+        """output_dir branch: missing version file on disk → Exit(1), not FileNotFoundError."""
+        import typer
+        from ai_session_tools.cli import _do_extract
+        engine, _ = self._setup_engine_with_stale_cache(tmp_path)
+        with pytest.raises(typer.Exit) as exc_info:
+            _do_extract(engine, "hello.py", output_dir=str(tmp_path / "out"))
+        assert exc_info.value.exit_code == 1

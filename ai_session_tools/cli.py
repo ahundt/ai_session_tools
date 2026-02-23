@@ -9,15 +9,18 @@ Licensed under the Apache License, Version 2.0
 """
 
 import os
+import re as _re
+import shutil
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Set
 
 import typer
 from rich.console import Console
 
 from .engine import SessionRecoveryEngine
 from .formatters import MessageFormatter, get_formatter
-from .models import FilterSpec
+from .models import FileVersion, FilterSpec
 
 app = typer.Typer(
     help=(
@@ -26,6 +29,7 @@ app = typer.Typer(
         "user/assistant messages and source code snapshots. This tool searches those sessions to "
         "find source files that were written or edited, and to search conversation messages.\n\n"
         "Override default paths with environment variables:\n\n"
+        "  CLAUDE_CONFIG_DIR          Path to Claude config dir (default: ~/.claude)\n\n"
         "  AI_SESSION_TOOLS_PROJECTS  Path to Claude projects dir (default: ~/.claude/projects)\n\n"
         "  AI_SESSION_TOOLS_RECOVERY  Path to recovery output dir (default: ~/.claude/recovery)"
     ),
@@ -47,6 +51,32 @@ app.add_typer(files_app, name="files", rich_help_panel="Domain Groups")
 app.add_typer(messages_app, name="messages", rich_help_panel="Domain Groups")
 
 console = Console()
+err_console = Console(stderr=True)
+
+# Module-level override set by --claude-dir global option
+_g_claude_dir: Optional[str] = None
+
+
+# ── Root app callback (global --claude-dir option) ────────────────────────────
+
+@app.callback(invoke_without_command=True)
+def app_callback(
+    ctx: typer.Context,
+    claude_dir: Optional[str] = typer.Option(
+        None, "--claude-dir",
+        help=(
+            "Path to the Claude configuration directory. "
+            "Default: $CLAUDE_CONFIG_DIR if set, otherwise ~/.claude. "
+            "Example: --claude-dir /Volumes/External/.claude"
+        ),
+        envvar="CLAUDE_CONFIG_DIR",
+    ),
+) -> None:
+    global _g_claude_dir
+    _g_claude_dir = claude_dir
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
 
 
 # ── Engine factory ────────────────────────────────────────────────────────────
@@ -55,19 +85,292 @@ def get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] =
     """
     Get or create recovery engine.
 
-    Supports environment variables:
-        AI_SESSION_TOOLS_PROJECTS: Path to Claude projects directory
-        AI_SESSION_TOOLS_RECOVERY: Path to recovery directory
+    Priority for Claude config dir: --claude-dir CLI flag > CLAUDE_CONFIG_DIR env var > ~/.claude
+
+    Also supports:
+        AI_SESSION_TOOLS_PROJECTS: Path to Claude projects directory (overrides base dir)
+        AI_SESSION_TOOLS_RECOVERY: Path to recovery directory (overrides base dir)
     """
+    # Priority: --claude-dir (CLI) > CLAUDE_CONFIG_DIR (env) > ~/.claude (default)
+    # _g_claude_dir is set by --claude-dir; if not set, read env var directly (for non-CLI callers)
+    claude_dir = _g_claude_dir or os.getenv("CLAUDE_CONFIG_DIR")
+
     if projects_dir is None:
-        projects_dir = os.getenv("AI_SESSION_TOOLS_PROJECTS", str(Path.home() / ".claude" / "projects"))
+        projects_dir = os.getenv("AI_SESSION_TOOLS_PROJECTS")
+        if projects_dir is None:
+            base = Path(claude_dir).expanduser() if claude_dir else Path.home() / ".claude"
+            projects_dir = str(base / "projects")
+
     if recovery_dir is None:
-        recovery_dir = os.getenv("AI_SESSION_TOOLS_RECOVERY", str(Path.home() / ".claude" / "recovery"))
+        recovery_dir = os.getenv("AI_SESSION_TOOLS_RECOVERY")
+        if recovery_dir is None:
+            base = Path(claude_dir).expanduser() if claude_dir else Path.home() / ".claude"
+            recovery_dir = str(base / "recovery")
+
     # expanduser() so that env var values like "~/.claude/projects" work correctly
     return SessionRecoveryEngine(Path(projects_dir).expanduser(), Path(recovery_dir).expanduser())
 
 
-# ── Shared helper functions (business logic lives here, not in CLI funcs) ─────
+# ── Shared helper functions ───────────────────────────────────────────────────
+
+def _parse_session_set(s: Optional[str]) -> Set[str]:
+    """Parse comma-separated session IDs string to set. Empty string or None → empty set."""
+    if not s:
+        return set()
+    return {x.strip() for x in s.split(",") if x.strip()}
+
+
+def _project_dir_name(path: str) -> str:
+    """Convert a working directory path to the ~/.claude/projects/ directory name.
+
+    Matches Claude Code's own encoding: replace /[^a-zA-Z0-9-]/g with '-'.
+    Hyphens are preserved; slashes, dots, underscores, spaces all become '-'.
+
+    Source: ~/source/happy/packages/happy-cli/src/claude/utils/path.ts getProjectPath()
+
+    Examples:
+        /Users/athundt/.claude        → -Users-athundt--claude
+        /Users/me/my_project          → -Users-me-my-project
+        /var/www/my.site.com/public   → -var-www-my-site-com-public
+    """
+    abs_path = os.path.abspath(path)
+    return _re.sub(r'[^a-zA-Z0-9-]', '-', abs_path)
+
+
+def _sessions_for_project(engine: SessionRecoveryEngine, project_path: str) -> Set[str]:
+    """Return all session IDs whose JSONL files live under the given project directory."""
+    dir_name = _project_dir_name(project_path)
+    project_dir = engine.projects_dir / dir_name
+    if not project_dir.is_dir():
+        return set()
+    return {f.stem for f in project_dir.glob("*.jsonl")}
+
+
+def _filter_versions(
+    versions: List[FileVersion],
+    project_sessions: Set[str] = frozenset(),
+    session: Optional[str] = None,
+    include_sessions: Set[str] = frozenset(),
+    exclude_sessions: Set[str] = frozenset(),
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+) -> List[FileVersion]:
+    """Filter FileVersion list by composable criteria. All filters are ANDed."""
+    result = versions
+    # --project: restrict to project's session IDs
+    if project_sessions:
+        result = [v for v in result if v.session_id in project_sessions]
+    # --session: prefix match (convenience, single value)
+    if session:
+        result = [v for v in result if v.session_id.startswith(session)]
+    # --include-sessions: keep only matching sessions (prefix match each)
+    if include_sessions:
+        result = [v for v in result if any(v.session_id.startswith(i) for i in include_sessions)]
+    # --exclude-sessions: remove matching sessions
+    if exclude_sessions:
+        result = [v for v in result if not any(v.session_id.startswith(i) for i in exclude_sessions)]
+    # --after / --before: filter by version timestamp
+    if after:
+        result = [v for v in result if v.timestamp and v.timestamp >= after[:len(v.timestamp)]]
+    if before:
+        result = [v for v in result if v.timestamp and v.timestamp <= before[:len(v.timestamp)]]
+    return result
+
+
+def _version_src_path(engine: SessionRecoveryEngine, v: FileVersion) -> Path:
+    """Return the on-disk path of a specific version file."""
+    return (
+        engine.recovery_dir
+        / f"session_all_versions_{v.session_id}"
+        / f"{v.filename}_v{v.version_num:06d}_line_{v.line_count}.txt"
+    )
+
+
+def _resolve_output_path(target: Path) -> Path:
+    """Return target path; if it already exists, append .recovered[_N] before the extension.
+
+    Examples: cli.py → cli.recovered.py → cli.recovered_1.py → cli.recovered_2.py → …
+    """
+    if not target.exists():
+        return target
+    stem, suffix = target.stem, target.suffix
+    candidate = target.parent / f"{stem}.recovered{suffix}"
+    counter = 1
+    while candidate.exists():
+        candidate = target.parent / f"{stem}.recovered_{counter}{suffix}"
+        counter += 1
+    return candidate
+
+
+def _do_extract(
+    engine: SessionRecoveryEngine,
+    name: str,
+    version: Optional[int] = None,
+    session: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    restore: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Extract a file version: stdout by default, or write with --restore/--output-dir."""
+    versions = engine.get_versions(name)
+
+    if session:
+        versions = [v for v in versions if v.session_id.startswith(session)]
+        if not versions:
+            err_console.print(f"[red]No versions of[/red] {name} [red]found in session[/red] {session}")
+            raise typer.Exit(code=1)
+
+    if not versions:
+        err_console.print(f"[red]File not found in session data:[/red] {name}")
+        raise typer.Exit(code=1)
+
+    if version is None:
+        v = max(versions, key=lambda x: x.version_num)
+    else:
+        v = next((x for x in versions if x.version_num == version), None)
+        if v is None:
+            max_v = max(x.version_num for x in versions)
+            err_console.print(f"[red]Version {version} not found.[/red] Available: 1\u2013{max_v}")
+            raise typer.Exit(code=1)
+
+    label = f"v{v.version_num}, {v.line_count} lines"
+    src = _version_src_path(engine, v)
+
+    if restore:
+        original = engine.get_original_path(name)
+        if original:
+            target = _resolve_output_path(Path(original))
+        else:
+            err_console.print(f"[red]No original path recorded in session data for:[/red] {name}")
+            raise typer.Exit(code=1)
+        err_console.print(f"Writing to: {target}  ({label})")
+        if dry_run:
+            err_console.print("[yellow][dry run] no files written[/yellow]")
+            return
+        if not src.exists():
+            err_console.print(f"[red]Version file not found on disk:[/red] {src}")
+            raise typer.Exit(code=1)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(src.read_text(errors="replace"))
+
+    elif output_dir:
+        target = Path(output_dir).expanduser() / name
+        err_console.print(f"Writing to: {target}  ({label})")
+        if dry_run:
+            err_console.print("[yellow][dry run] no files written[/yellow]")
+            return
+        if not src.exists():
+            err_console.print(f"[red]Version file not found on disk:[/red] {src}")
+            raise typer.Exit(code=1)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(src.read_text(errors="replace"))
+
+    else:
+        # Default: stdout
+        if dry_run:
+            err_console.print(f"[yellow][dry run] would print {v.line_count} lines to stdout[/yellow]")
+            return
+        err_console.print(f"Extracting: {name}  ({label})")
+        if src.exists():
+            sys.stdout.write(src.read_text(errors="replace"))
+        else:
+            err_console.print(f"[red]Version file not found on disk:[/red] {src}")
+            raise typer.Exit(code=1)
+
+
+def _do_history_display(engine: SessionRecoveryEngine, name: str, versions: Optional[List[FileVersion]] = None) -> None:
+    """Show version history table (read-only, no disk writes)."""
+    if versions is None:
+        versions = engine.get_versions(name)
+    if not versions:
+        console.print(f"[yellow]No versions found for:[/yellow] {name}")
+        return
+    from rich.table import Table
+    table = Table(title=f"Version history: {name}  ({len(versions)} versions)")
+    table.add_column("Version", style="cyan", justify="right")
+    table.add_column("Lines", justify="right", style="magenta")
+    table.add_column("\u0394Lines", justify="right")
+    table.add_column("Timestamp", style="dim")
+    table.add_column("Session", style="blue")
+    prev_lines = None
+    for v in versions:
+        if prev_lines is None:
+            delta = "\u2014"
+        elif v.line_count >= prev_lines:
+            delta = f"+{v.line_count - prev_lines}"
+        else:
+            delta = str(v.line_count - prev_lines)
+        short_session = v.session_id[:16] + "\u2026" if len(v.session_id) > 16 else v.session_id
+        table.add_row(f"v{v.version_num}", str(v.line_count), delta, v.timestamp or "\u2014", short_session)
+        prev_lines = v.line_count
+    console.print(table)
+
+
+def _do_history_export(
+    engine: SessionRecoveryEngine,
+    name: str,
+    export_dir: Optional[str] = None,
+    dry_run: bool = False,
+    versions: Optional[List[FileVersion]] = None,
+) -> None:
+    """Export all versions as named files: cli_v1.py, cli_v2.py, …"""
+    if versions is None:
+        versions = engine.get_versions(name)
+    if not versions:
+        console.print(f"[yellow]No versions found:[/yellow] {name}")
+        return
+
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+
+    # Resolve export dir
+    env_dir = os.getenv("AI_SESSION_TOOLS_OUTPUT")
+    if export_dir:
+        out_dir = Path(export_dir).expanduser()
+    elif env_dir:
+        out_dir = Path(env_dir).expanduser()
+    else:
+        original = engine.get_original_path(name)
+        out_dir = Path(original).parent / "versions" if original else Path("./recovered/versions")
+
+    # Always show what will be written before writing
+    console.print(f"[bold]Exporting {len(versions)} versions to:[/bold] {out_dir}")
+    for v in versions:
+        console.print(f"  {stem}_v{v.version_num}{suffix}  ({v.line_count} lines)")
+
+    if dry_run:
+        console.print("[yellow][dry run] no files written[/yellow]")
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for v in versions:
+        src = _version_src_path(engine, v)
+        if src.exists():
+            shutil.copy2(src, out_dir / f"{stem}_v{v.version_num}{suffix}")
+            written += 1
+
+    if written:
+        console.print(f"\n[green]Exported {written} files to:[/green] {out_dir}")
+    else:
+        console.print("[red]No version files found to export[/red]")
+        raise typer.Exit(code=1)
+
+
+def _do_history_stdout(engine: SessionRecoveryEngine, name: str, versions: Optional[List[FileVersion]] = None) -> None:
+    """Print all versions to stdout with === vN === headers."""
+    if versions is None:
+        versions = engine.get_versions(name)
+    if not versions:
+        err_console.print(f"[yellow]No versions found:[/yellow] {name}")
+        return
+    for v in versions:
+        src = _version_src_path(engine, v)
+        sys.stdout.write(f"=== {name} v{v.version_num} ({v.line_count} lines, session {v.session_id[:16]}) ===\n")
+        if src.exists():
+            sys.stdout.write(src.read_text(errors="ignore"))
+        sys.stdout.write("\n")
+
 
 def _do_files_search(
     engine: SessionRecoveryEngine,
@@ -126,79 +429,6 @@ def _do_messages_search(
     formatter = MessageFormatter(max_chars=max_chars)
     console.print(formatter.format_many(messages_list))
     console.print(f"\n[bold]Found {len(messages_list)} messages[/bold]")
-
-
-def _resolve_output_path(target: Path) -> Path:
-    """Return target path; if it already exists, append .recovered[_N] before the extension.
-
-    Examples: cli.py → cli.recovered.py → cli.recovered_1.py → cli.recovered_2.py → …
-    """
-    if not target.exists():
-        return target
-    stem, suffix = target.stem, target.suffix
-    candidate = target.parent / f"{stem}.recovered{suffix}"
-    counter = 1
-    while candidate.exists():
-        candidate = target.parent / f"{stem}.recovered_{counter}{suffix}"
-        counter += 1
-    return candidate
-
-
-def _do_extract(engine: SessionRecoveryEngine, name: str, output_dir: Optional[str]) -> None:
-    """Extract final version of a file, restoring to original path by default."""
-    if output_dir is None:
-        output_dir = os.getenv("AI_SESSION_TOOLS_OUTPUT")
-
-    if output_dir is None:
-        # Default: restore to the original path Claude wrote the file to.
-        original = engine.get_original_path(name)
-        if original:
-            target = _resolve_output_path(Path(original))
-            out_dir: Path = target.parent
-            out_name: str = target.name
-        else:
-            out_dir = Path("./recovered")
-            out_name = name
-    else:
-        out_dir = Path(output_dir).expanduser()
-        out_name = name
-
-    path = engine.extract_final(name, out_dir)
-    if path and out_name != name:
-        path = path.rename(out_dir / out_name)
-    if path:
-        console.print(f"[green]Extracted:[/green] {path}")
-    else:
-        console.print(f"[red]File not found:[/red] {name}")
-        raise typer.Exit(code=1)
-
-
-def _do_history(engine: SessionRecoveryEngine, name: str, output_dir: Optional[str]) -> None:
-    """Extract all versions of a file."""
-    versions = engine.get_versions(name)
-    if not versions:
-        console.print(f"[yellow]No versions found for: {name}[/yellow]")
-        return
-
-    if output_dir is None:
-        output_dir = os.getenv("AI_SESSION_TOOLS_OUTPUT")
-
-    if output_dir is None:
-        # Default: place versions/ subdirectory alongside the original file.
-        original = engine.get_original_path(name)
-        if original:
-            out_dir = Path(original).parent / "versions"
-        else:
-            out_dir = Path("./recovered")
-    else:
-        out_dir = Path(output_dir).expanduser()
-
-    paths = engine.extract_all(name, out_dir)
-    if paths:
-        console.print(f"[green]Extracted {len(paths)} versions to:[/green] {out_dir}")
-    else:
-        console.print(f"[red]Failed to extract:[/red] {name}")
-        raise typer.Exit(code=1)
 
 
 def _do_get(
@@ -268,52 +498,109 @@ def files_search(
 
 @files_app.command("extract")
 def files_extract(
-    name: str = typer.Option(..., "--name", "-n", help="Filename to save (e.g. cli.py). Use 'aise files search' to find available names."),
+    name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
+    version: Optional[int] = typer.Option(
+        None, "--version", "-v",
+        help="Version number to extract (default: latest). Run 'files history FILENAME' to see available versions.",
+    ),
+    session: Optional[str] = typer.Option(
+        None, "--session", "-s",
+        help=(
+            "Limit to versions from this session ID (prefix match). "
+            "Use 'files search FILENAME' or 'files history FILENAME' to find session IDs."
+        ),
+    ),
+    restore: bool = typer.Option(
+        False, "--restore",
+        help=(
+            "Write to the path Claude originally created/edited this file, "
+            "as recorded in session data. Adds .recovered suffix if the file already exists."
+        ),
+    ),
     output_dir: Optional[str] = typer.Option(
         None, "--output-dir", "-o",
         help=(
-            "Directory to write the extracted file. "
-            "Default: restore to original path recorded in session data "
-            "(adds .recovered suffix if file exists). "
-            "Set AI_SESSION_TOOLS_OUTPUT env var to override globally. "
-            "Example: --output-dir ./backup"
+            "Write to this directory instead of stdout. "
+            "Example: --output-dir ./backup  writes ./backup/cli.py"
         ),
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Show what would be extracted/written without producing any output or writing any files.",
+    ),
 ) -> None:
-    """Save the most recent version of a source file found in session data.
+    """Extract a source file (cli.py, engine.py, etc.) from Claude Code session data.
 
-    By default restores the file to its original path. Use 'aise files search' to find filenames.
+    This works on SOURCE FILES that Claude wrote or edited — NOT the session JSONL files.
+    By default prints the latest version to stdout (pipe-friendly).
+
+    Run 'files history FILENAME' to see all available versions, then --version N to get one.
+
+    Version:
+      (none)            Latest version [default]
+      --version N       Specific version number
+
+    Destination (mutually exclusive):
+      (none)            Print content to stdout [default]
+      --restore         Write to the path Claude originally created this file
+      --output-dir DIR  Write to DIR/filename
+
+    Use --dry-run with any destination to preview without writing.
 
     Examples:
-        aise files extract --name cli.py
-        aise files extract --name cli.py --output-dir ./backup
+        aise files history cli.py                        # see all versions first
+        aise files extract cli.py                        # latest → stdout
+        aise files extract cli.py --version 2            # v2 → stdout
+        aise files extract cli.py > cli.py               # redirect to file
+        aise files extract cli.py | pbcopy               # pipe to clipboard
+        aise files extract cli.py --restore              # restore to original path
+        aise files extract cli.py --restore --dry-run    # preview restore
+        aise files extract cli.py --output-dir ./backup  # write to ./backup/
     """
-    _do_extract(get_engine(), name, output_dir)
+    _do_extract(get_engine(), name, version=version, session=session, output_dir=output_dir, restore=restore, dry_run=dry_run)
 
 
 @files_app.command("history")
 def files_history(
-    name: str = typer.Option(..., "--name", "-n", help="Filename to extract all versions of (e.g. cli.py)"),
-    output_dir: Optional[str] = typer.Option(
-        None, "--output-dir", "-o",
-        help=(
-            "Directory to write version files. "
-            "Default: versions/ subdirectory alongside original file path. "
-            "Set AI_SESSION_TOOLS_OUTPUT env var to override globally. "
-            "Example: --output-dir ./versions"
-        ),
-    ),
+    name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
+    session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to versions from this session ID (prefix match)."),
+    export: bool = typer.Option(False, "--export", help="Write all versions to disk as cli_v1.py, cli_v2.py, etc."),
+    export_dir: Optional[str] = typer.Option(None, "--export-dir", help="Where to write exported files. Default: versions/ alongside original path."),
+    stdout_mode: bool = typer.Option(False, "--stdout", help="Print all versions to stdout with === v1 === headers (for scripting/AI)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With --export: show what would be written without writing."),
 ) -> None:
-    """Save every recorded version of a source file, showing its edit history.
+    """Show version history of a source file from Claude Code session data. Read-only by default.
 
-    Creates numbered files (e.g. v000001_line_42.txt, ...) in --output-dir.
-    Each version corresponds to one edit found across all sessions.
+    Displays a table of all recorded versions (version number, line count, Δlines, timestamp,
+    session ID). READ-ONLY — no files are written unless you use --export or --stdout.
+
+    SOURCE FILES ONLY: shows history of files Claude wrote/edited, not the session JSONL files.
 
     Examples:
-        aise files history --name cli.py
-        aise files history --name cli.py --output-dir ./versions
+        aise files history cli.py                           # show version table
+        aise files history cli.py --export                  # write cli_v1.py, cli_v2.py, ...
+        aise files history cli.py --export --dry-run        # preview export
+        aise files history cli.py --export --export-dir ./versions
+        aise files history cli.py --stdout                  # all versions to stdout
     """
-    _do_history(get_engine(), name, output_dir)
+    engine = get_engine()
+    versions = engine.get_versions(name)
+
+    if session:
+        versions = [v for v in versions if v.session_id.startswith(session)]
+
+    if not versions:
+        err_console.print(f"[red]No versions found for:[/red] {name}  (check filters)")
+        raise typer.Exit(code=1)
+
+    if stdout_mode:
+        _do_history_stdout(engine, name, versions=versions)
+    else:
+        _do_history_display(engine, name, versions=versions)
+        if export:
+            _do_history_export(engine, name, export_dir=export_dir, dry_run=dry_run, versions=versions)
+        elif dry_run:
+            console.print("[yellow]--dry-run has no effect without --export[/yellow]")
 
 
 # ── messages_app commands ─────────────────────────────────────────────────────
@@ -441,41 +728,68 @@ def search(
 
 @app.command()
 def extract(
-    name: str = typer.Option(..., "--name", "-n", help="Filename to save (e.g. cli.py). Use 'aise search' to find available names."),
+    name: str = typer.Argument(..., help="Filename to extract (e.g. cli.py). Use 'aise search' to find available names."),
+    version: Optional[int] = typer.Option(
+        None, "--version", "-v",
+        help="Version number to extract (default: latest). Run 'history FILENAME' to see available versions.",
+    ),
+    session: Optional[str] = typer.Option(
+        None, "--session", "-s",
+        help="Limit to versions from this session ID (prefix match).",
+    ),
+    restore: bool = typer.Option(
+        False, "--restore",
+        help="Write to the path Claude originally created/edited this file.",
+    ),
     output_dir: Optional[str] = typer.Option(
         None, "--output-dir", "-o",
-        help=(
-            "Directory to write the extracted file. "
-            "Default: restore to original path recorded in session data "
-            "(adds .recovered suffix if file exists). "
-            "Set AI_SESSION_TOOLS_OUTPUT env var to override globally."
-        ),
+        help="Write to this directory instead of stdout. Example: --output-dir ./backup",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Show what would be extracted/written without producing any output.",
     ),
 ) -> None:
-    """Save the most recent version of a source file found in session data.
+    """Extract a source file from Claude Code session data (stdout by default).
 
     Equivalent to 'aise files extract'. Use 'aise search' to find available filenames.
+    By default prints the latest version to stdout (pipe-friendly).
     """
-    _do_extract(get_engine(), name, output_dir)
+    _do_extract(get_engine(), name, version=version, session=session, output_dir=output_dir, restore=restore, dry_run=dry_run)
 
 
 @app.command()
 def history(
-    name: str = typer.Option(..., "--name", "-n", help="Filename to extract all versions of (e.g. cli.py)"),
-    output_dir: Optional[str] = typer.Option(
-        None, "--output-dir", "-o",
-        help=(
-            "Directory to write version files. "
-            "Default: versions/ alongside original file path. "
-            "Set AI_SESSION_TOOLS_OUTPUT env var to override globally."
-        ),
-    ),
+    name: str = typer.Argument(..., help="Filename to show history for (e.g. cli.py)."),
+    session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to versions from this session ID (prefix match)."),
+    export: bool = typer.Option(False, "--export", help="Write all versions to disk as cli_v1.py, cli_v2.py, etc."),
+    export_dir: Optional[str] = typer.Option(None, "--export-dir", help="Where to write exported files."),
+    stdout_mode: bool = typer.Option(False, "--stdout", help="Print all versions to stdout with === v1 === headers."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With --export: show what would be written without writing."),
 ) -> None:
-    """Save every recorded version of a source file, showing its edit history.
+    """Show version history of a source file (read-only by default).
 
-    Equivalent to 'aise files history'. Creates numbered files (e.g. v000001_line_42.txt).
+    Equivalent to 'aise files history'. Creates a table of all recorded versions.
+    READ-ONLY — no files are written unless you use --export or --stdout.
     """
-    _do_history(get_engine(), name, output_dir)
+    engine = get_engine()
+    versions = engine.get_versions(name)
+
+    if session:
+        versions = [v for v in versions if v.session_id.startswith(session)]
+
+    if not versions:
+        err_console.print(f"[red]No versions found for:[/red] {name}  (check filters)")
+        raise typer.Exit(code=1)
+
+    if stdout_mode:
+        _do_history_stdout(engine, name, versions=versions)
+    else:
+        _do_history_display(engine, name, versions=versions)
+        if export:
+            _do_history_export(engine, name, export_dir=export_dir, dry_run=dry_run, versions=versions)
+        elif dry_run:
+            console.print("[yellow]--dry-run has no effect without --export[/yellow]")
 
 
 @app.command()

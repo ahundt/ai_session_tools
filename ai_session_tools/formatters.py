@@ -66,14 +66,18 @@ class TableFormatter(ResultFormatter):
         table.add_column("Type", style="green")
         table.add_column("Last Modified", style="blue")
         table.add_column("Location", style="yellow")
+        table.add_column("Sessions", style="dim")
 
         for item in items:
-            table.add_row(item.name, str(item.edits), item.file_type, item.last_modified or "", item.location)
+            session_str = ", ".join(s[:8] + "\u2026" for s in item.sessions[:3])
+            if len(item.sessions) > 3:
+                session_str += f" (+{len(item.sessions) - 3})"
+            table.add_row(item.name, str(item.edits), item.file_type, item.last_modified or "", item.location, session_str)
 
         console = Console()
         with console.capture() as capture:
             console.print(table)
-        return capture.getvalue()
+        return capture.get()
 
 
 class JsonFormatter(ResultFormatter):
