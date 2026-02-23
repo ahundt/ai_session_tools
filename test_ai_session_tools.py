@@ -538,14 +538,13 @@ class TestCompletedStepInitExports:
         import ai_session_tools
         assert ai_session_tools.__author__ == "Andrew Hundt"
 
-    def test_pyproject_has_ais_alias(self):
-        """pyproject.toml should have ais script alias."""
+    def test_pyproject_has_aise_alias(self):
+        """pyproject.toml should have aise script alias."""
         import configparser
         from pathlib import Path
-        # Read pyproject.toml to verify ais entry
         pyproject = Path(__file__).parent / "pyproject.toml"
         content = pyproject.read_text()
-        assert 'ais = "ai_session_tools.cli:cli_main"' in content
+        assert 'aise = "ai_session_tools.cli:cli_main"' in content
 
 
 # ── TDD Tests: Step 2b — MessageFormatter max_chars ──────────────────────────

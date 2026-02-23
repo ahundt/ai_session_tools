@@ -45,7 +45,7 @@ dev = [
 
 [project.scripts]
 ai_session_tools = "ai_session_tools.cli:cli_main"
-ais = "ai_session_tools.cli:cli_main"
+aise = "ai_session_tools.cli:cli_main"
 
 [project.urls]
 Homepage = "https://github.com/anthropics/ai_session_tools"
