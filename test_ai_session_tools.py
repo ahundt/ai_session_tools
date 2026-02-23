@@ -1805,8 +1805,8 @@ class TestProjectDirName:
 
     def test_dot_becomes_dash(self):
         from ai_session_tools.cli import _project_dir_name
-        result = _project_dir_name("/Users/athundt/.claude/myproject")
-        assert result == "-Users-athundt--claude-myproject"
+        result = _project_dir_name("/Users/alice/.claude/myproject")
+        assert result == "-Users-alice--claude-myproject"
 
     def test_hyphen_preserved(self):
         from ai_session_tools.cli import _project_dir_name

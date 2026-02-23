@@ -8,12 +8,13 @@ Claude Code saves every conversation and every file it writes into session folde
 
 ## What this tool does
 
-`aise` indexes all your Claude Code sessions and gives you four capabilities:
+`aise` reads directly from your Claude Code session files and gives you five capabilities:
 
 | Capability | What it does | Example |
 |-----------|-------------|---------|
-| **Find source files** | List every `.py`, `.md`, `.rs`, etc. that Claude wrote or edited across all sessions | `aise search files --pattern "*.py"` |
-| **Recover source files** | Save the latest version — or every version — of a file to disk | `aise extract --name cli.py` |
+| **Find source files** | List every `.py`, `.md`, `.rs`, etc. that Claude wrote or edited across all sessions | `aise files search --pattern "*.py"` |
+| **Inspect file history** | Show all recorded versions of a file with line counts, timestamps, session IDs | `aise files history cli.py` |
+| **Extract file content** | Print a file to stdout or write it to disk | `aise files extract cli.py` |
 | **Search conversations** | Find which sessions discussed a topic by searching message text | `aise search messages --query "auth bug"` |
 | **Read conversations** | Print all user/assistant messages from a specific session | `aise get --session ab841016-...` |
 
@@ -30,7 +31,7 @@ git clone https://github.com/anthropics/ai_session_tools.git
 uv tool install ./ai_session_tools
 ```
 
-This gives you two equivalent commands: `aise` (short) and `ai_session_tools` (long).
+This gives two equivalent commands: `aise` (short) and `ai_session_tools` (long).
 
 To use as a library instead:
 
@@ -41,65 +42,125 @@ uv add ai-session-tools
 ## Quick start
 
 ```bash
-# 1. See what files exist across all your Claude Code sessions
-aise search
+# 1. See all files across all your Claude Code sessions
+aise files search
 
-# 2. Find a specific file you remember working on
-aise search files --pattern "*session*"
+# 2. Find a specific file (the table includes a sessions column)
+aise files search --pattern "*session*"
 
-# 3. Recover it to disk
-aise extract --name session_manager.py
-# → Saved to ./recovered/session_manager.py
+# 3. Check its version history (read-only table — no disk writes)
+aise files history session_manager.py
+
+# 4. Print the latest version to stdout
+aise files extract session_manager.py
+
+# 5. Redirect to a file
+aise files extract session_manager.py > session_manager.py
 ```
 
+All `aise files <cmd>` commands have root aliases: `aise search`, `aise history`, `aise extract`. Use whichever reads more naturally — see [Command ordering](#command-ordering).
+
 ## CLI reference
+
+### Disambiguation workflow
+
+When you're looking for a specific file version:
+
+```bash
+# Step 1 — find the file; table shows session IDs for each file
+aise files search --pattern "cli.py"
+
+# Step 2 — see all versions for one session
+aise files history cli.py --session ab841016
+
+# Step 3 — get the exact version you want
+aise files extract cli.py --session ab841016 --version 2
+```
 
 ### Find source files
 
 List and filter source files that Claude wrote or edited during sessions.
 
 ```bash
-# List all files across all sessions
-aise search
+# List all files across all sessions (table includes sessions column)
+aise files search
 
 # Only Python files
-aise search files --pattern "*.py"
+aise files search --pattern "*.py"
 
 # Files edited 5+ times (likely important project files, not one-off scripts)
-aise search files --min-edits 5
+aise files search --min-edits 5
 
 # Only Python and Markdown, modified after a specific date or datetime
-aise search files -i py,md --after 2026-01-15
-aise search files -i py,md --after 2026-01-15T14:30:00
+aise files search -i py,md --after 2026-01-15
+aise files search -i py,md --after 2026-01-15T14:30:00
 
 # Exclude compiled/temporary files
-aise search files -x pyc,tmp,o
+aise files search -x pyc,tmp,o
 
 # Only files from specific sessions
-aise search files --include-sessions ab841016,cd923f57
+aise files search --include-sessions ab841016,cd923f57
 
 # Output as JSON instead of a table
-aise search files --format json
+aise files search --format json
 ```
 
 **What "edits" means:** The number of times a file was written or modified across all sessions. A file with 20 edits is probably a core project file. A file with 1 edit is probably a one-off script.
 
-### Recover source files to disk
+### Inspect file version history
 
 ```bash
-# Save the most recent version of a file
-aise extract --name cli.py
-# → writes ./recovered/cli.py
+# Show a read-only version table (version#, lines, Δlines, timestamp, session)
+aise files history cli.py
 
-# Save to a specific directory
-aise extract --name cli.py --output-dir ./backup
+# Narrow to one session
+aise files history cli.py --session ab841016
 
-# Save EVERY version (shows the file's edit history)
-aise history --name cli.py
-# → writes ./recovered/cli_v1.py, cli_v2.py, cli_v3.py, ...
+# Export all versions to disk as cli_v1.py, cli_v2.py, ...
+aise files history cli.py --export
+
+# Preview what --export would write without touching disk
+aise files history cli.py --export --dry-run
+
+# Export to a specific directory
+aise files history cli.py --export --export-dir ./versions
+
+# Dump all versions to stdout with === v1 === headers (for piping to AI tools)
+aise files history cli.py --stdout
 ```
 
-Use `aise search` first to find the exact filename.
+`files history` is **read-only by default** — no disk writes unless you pass `--export`.
+
+### Extract file content
+
+```bash
+# Print latest version to stdout (pipe-friendly)
+aise files extract cli.py
+
+# Specific version
+aise files extract cli.py --version 2
+
+# Redirect to a file
+aise files extract cli.py > cli.py
+
+# Pipe to clipboard
+aise files extract cli.py | pbcopy
+
+# Limit to one session
+aise files extract cli.py --session ab841016
+
+# Write to the path Claude originally created the file (from session data)
+aise files extract cli.py --restore
+
+# Write to a specific directory
+aise files extract cli.py --output-dir ./backup
+
+# Preview what would happen without any I/O
+aise files extract cli.py --restore --dry-run
+aise files extract cli.py --output-dir ./backup --dry-run
+```
+
+**stdout vs stderr:** File content goes to stdout; status messages ("Extracting: cli.py  (v3, 85 lines)") go to stderr. This keeps piping and redirection clean.
 
 ### Search conversations
 
@@ -145,41 +206,61 @@ When you pass both `--pattern` and `--query`, it shows two result sections.
 
 ### Show summary statistics
 
-```bash
-aise stats
-# → Sessions: 42, Files: 318, Versions: 1205, Largest: engine.py (47 edits)
+```
+$ aise stats
+
+Recovery Statistics
+  Sessions:      42
+  Files:         318
+  Versions:      1205
+  Largest File:  engine.py (47 edits)
 ```
 
 ### Command ordering
 
-Both orderings are equivalent — use whichever reads more naturally to you:
+Both orderings are equivalent — use whichever reads more naturally:
 
 ```bash
 aise search files --pattern "*.py"     # "search" then narrow to "files"
 aise files search --pattern "*.py"     # start in "files" then "search"
 
+aise extract cli.py                    # root alias
+aise files extract cli.py             # domain group form
+
+aise history cli.py                    # root alias
+aise files history cli.py             # domain group form
+
 aise search messages --query "error"   # "search" then narrow to "messages"
 aise messages search --query "error"   # start in "messages" then "search"
 ```
 
-### Environment variables
+### Environment variables and --claude-dir
 
 Override where the tool looks for session data:
 
-| Variable | Default | What it controls |
-|----------|---------|------------------|
-| `AI_SESSION_TOOLS_PROJECTS` | `~/.claude/projects` | Where Claude Code stores session folders |
-| `AI_SESSION_TOOLS_RECOVERY` | `~/.claude/recovery` | Where `extract` and `history` write output |
+| Variable / Flag | Default | What it controls |
+|----------------|---------|-----------------|
+| `--claude-dir PATH` | `~/.claude` | Base Claude config directory (projects and recovery are resolved relative to this) |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Same as `--claude-dir`, read from environment |
+| `AI_SESSION_TOOLS_PROJECTS` | `~/.claude/projects` | Path to Claude Code session folders (overrides base dir) |
+| `AI_SESSION_TOOLS_RECOVERY` | `~/.claude/recovery` | Path for recovery output when writing files (overrides base dir) |
+
+Priority: `--claude-dir` > `CLAUDE_CONFIG_DIR` > `~/.claude`
+
+```bash
+# Use a different Claude config directory (e.g. external drive)
+aise --claude-dir /Volumes/External/.claude files search
+```
 
 ### All flags reference
 
-Run `aise --help`, `aise search --help`, `aise files search --help`, etc. for full flag documentation.
+Run `aise --help`, `aise files extract --help`, `aise files history --help`, etc. for full flag documentation.
 
 ## Python library usage
 
 ```python
 from pathlib import Path
-from ai_session_tools import SessionRecoveryEngine, FilterSpec, SearchFilter
+from ai_session_tools import SessionRecoveryEngine, FilterSpec
 
 # Point the engine at your Claude Code data
 engine = SessionRecoveryEngine(
@@ -190,16 +271,12 @@ engine = SessionRecoveryEngine(
 # List all files Claude ever wrote or edited
 all_files = engine.search("*")
 for f in all_files:
-    print(f"{f.name}  ({f.total_edits} edits, last modified {f.last_modified})")
+    print(f"{f.name}  ({f.edits} edits, last modified {f.last_modified})")
 
 # Filter to heavily-edited Python/Markdown files from 2026
 filters = FilterSpec(min_edits=5, after="2026-01-01T00:00:00")
 filters.with_extensions(include={"py", "md"})
 results = engine.search("*", filters)
-
-# Chain filters after search results
-search_filter = SearchFilter().by_edits(min_edits=3).by_extension("py")
-filtered = search_filter(all_files)
 
 # Search conversation text across all sessions
 matches = engine.search_messages("authentication")
@@ -210,9 +287,14 @@ for msg in matches:
 messages = engine.get_messages("ab841016-f07b-444c-bb18-22f6b373be52")
 user_only = engine.get_messages("ab841016", message_type="user")
 
-# Recover files to disk
-engine.extract_final("cli.py", Path("./recovered"))       # latest version
-engine.extract_all("cli.py", Path("./versions"))           # all versions
+# Get all recorded versions of a file
+versions = engine.get_versions("cli.py")
+for v in versions:
+    print(f"v{v.version_num}: {v.line_count} lines  {v.timestamp}  session {v.session_id[:16]}")
+
+# Write files to disk (library-level helpers)
+engine.extract_final("cli.py", Path("./recovered"))   # latest version
+engine.extract_all("cli.py", Path("./versions"))       # all versions
 
 # Summary statistics
 stats = engine.get_statistics()
@@ -226,8 +308,9 @@ print(f"{stats.total_sessions} sessions, {stats.total_files} files, {stats.total
 | `SessionRecoveryEngine` | Main entry point — search files, read messages, extract, get stats |
 | `FilterSpec` | Build filters for file search: edits, date range, extensions, sessions |
 | `SearchFilter` | Chain filters on search results: `.by_edits(5).by_extension("py")` |
-| `RecoveredFile` | One source file found in session data — has `.name`, `.total_edits`, `.last_modified` |
-| `SessionMessage` | One conversation message — has `.type` (user/assistant), `.content`, `.timestamp` |
+| `RecoveredFile` | One source file found in session data — `.name`, `.edits`, `.last_modified`, `.sessions` |
+| `FileVersion` | One recorded version — `.version_num`, `.line_count`, `.timestamp`, `.session_id` |
+| `SessionMessage` | One conversation message — `.type` (user/assistant), `.content`, `.timestamp` |
 | `RecoveryStatistics` | Counts: `.total_sessions`, `.total_files`, `.total_versions` |
 
 ## Project structure
@@ -236,9 +319,9 @@ print(f"{stats.total_sessions} sessions, {stats.total_files} files, {stats.total
 ai_session_tools/
 ├── __init__.py      # Public API — all exports listed here
 ├── engine.py        # SessionRecoveryEngine: search, extract, messages, stats
-├── models.py        # Data classes: RecoveredFile, SessionMessage, FilterSpec, etc.
+├── models.py        # Data classes: RecoveredFile, FileVersion, FilterSpec, etc.
 ├── filters.py       # SearchFilter chain and filter predicates
-├── formatters.py    # Output as table, JSON, CSV, or plain text
+├── formatters.py    # Output as table (with sessions column), JSON, CSV, or plain text
 ├── types.py         # Protocol interfaces (Searchable, Extractable, etc.)
 └── cli.py           # CLI commands (thin wrappers over the engine)
 ```
@@ -252,7 +335,7 @@ cd ai_session_tools
 # Install with dev dependencies
 uv sync --all-extras
 
-# Run tests (104 tests)
+# Run tests
 uv run pytest
 
 # Lint and format

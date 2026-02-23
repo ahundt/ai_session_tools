@@ -126,10 +126,10 @@ def _project_dir_name(path: str) -> str:
     Matches Claude Code's own encoding: replace /[^a-zA-Z0-9-]/g with '-'.
     Hyphens are preserved; slashes, dots, underscores, spaces all become '-'.
 
-    Source: ~/source/happy/packages/happy-cli/src/claude/utils/path.ts getProjectPath()
+    Source: Claude Code TypeScript source, getProjectPath() in utils/path.ts
 
     Examples:
-        /Users/athundt/.claude        → -Users-athundt--claude
+        /Users/alice/.claude          → -Users-alice--claude
         /Users/me/my_project          → -Users-me-my-project
         /var/www/my.site.com/public   → -var-www-my-site-com-public
     """
