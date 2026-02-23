@@ -19,7 +19,6 @@ from ai_session_tools import (
     SessionRecoveryEngine,
     FilterSpec,
     SearchFilter,
-    FileLocation,
     FileVersion,
     SessionMessage,
     MessageType,
@@ -178,16 +177,25 @@ class TestFilters:
 
 
 class TestFileLocation:
-    """Test file location enum"""
+    """Test file location field on RecoveredFile."""
 
-    def test_file_location_enum_exists(self):
-        """Test that FileLocation enum has expected values"""
-        assert hasattr(FileLocation, "CLAUTORUN_MAIN")
-        assert hasattr(FileLocation, "CLAUTORUN_WORKTREE")
+    def test_location_is_string(self):
+        """RecoveredFile.location is a plain string, not an enum."""
+        from ai_session_tools import RecoveredFile
+        r = RecoveredFile(name="a.py", path="/a.py", file_type="py")
+        assert isinstance(r.location, str)
 
-    def test_file_location_has_value(self):
-        """Test that FileLocation values are strings"""
-        assert isinstance(FileLocation.CLAUTORUN_MAIN.value, str)
+    def test_location_default_is_recovery(self):
+        """RecoveredFile.location defaults to 'recovery'."""
+        from ai_session_tools import RecoveredFile
+        r = RecoveredFile(name="a.py", path="/a.py", file_type="py")
+        assert r.location == "recovery"
+
+    def test_location_can_be_custom_string(self):
+        """RecoveredFile.location accepts any string."""
+        from ai_session_tools import RecoveredFile
+        r = RecoveredFile(name="a.py", path="/a.py", file_type="py", location="custom/path")
+        assert r.location == "custom/path"
 
 
 class TestIntegration:
@@ -468,10 +476,10 @@ class TestCompletedStepModels:
         assert spec.matches_session("xyz") is False
 
     def test_filter_spec_matches_location(self):
-        """FilterSpec.matches_location works."""
-        spec = FilterSpec(include_folders={"main"})
-        assert spec.matches_location("clautorun/main") is True
-        assert spec.matches_location("clautorun/worktree") is False
+        """FilterSpec.matches_location works with plain string location values."""
+        spec = FilterSpec(include_folders={"recovery"})
+        assert spec.matches_location("recovery") is True
+        assert spec.matches_location("other") is False
 
 
 class TestCompletedStepTypes:
@@ -1181,13 +1189,13 @@ class TestFilterSpecZeroMax:
 
     def test_search_filter_by_edits_zero_max(self):
         """SearchFilter.by_edits(max_edits=0) excludes files with edits."""
-        from ai_session_tools import RecoveredFile, FileLocation
+        from ai_session_tools import RecoveredFile
         f_with_edits = RecoveredFile(
-            name="a.py", path="/a.py", location=FileLocation.CLAUTORUN_MAIN,
+            name="a.py", path="/a.py",
             file_type="py", edits=5, size_bytes=100,
         )
         f_no_edits = RecoveredFile(
-            name="b.py", path="/b.py", location=FileLocation.CLAUTORUN_MAIN,
+            name="b.py", path="/b.py",
             file_type="py", edits=0, size_bytes=100,
         )
         sf = SearchFilter().by_edits(max_edits=0)
@@ -1351,11 +1359,10 @@ class TestCsvFormatterQuoting:
     """CsvFormatter produces RFC 4180-compliant output for special characters."""
 
     def _make_file(self, name: str) -> "RecoveredFile":
-        from ai_session_tools import RecoveredFile, FileLocation
+        from ai_session_tools import RecoveredFile
         return RecoveredFile(
             name=name,
             path=f"/{name}",
-            location=FileLocation.CLAUTORUN_MAIN,
             file_type="py",
             edits=1,
             size_bytes=100,
@@ -1406,11 +1413,11 @@ class TestChainedFilterExport:
 
     def test_chained_filter_combines_search_filters(self):
         """ChainedFilter applies multiple filters in sequence."""
-        from ai_session_tools import RecoveredFile, FileLocation
+        from ai_session_tools import RecoveredFile
         files = [
-            RecoveredFile("a.py", "/a.py", FileLocation.CLAUTORUN_MAIN, "py", edits=5, size_bytes=100),
-            RecoveredFile("b.py", "/b.py", FileLocation.CLAUTORUN_MAIN, "py", edits=1, size_bytes=100),
-            RecoveredFile("c.md", "/c.md", FileLocation.CLAUTORUN_MAIN, "md", edits=10, size_bytes=200),
+            RecoveredFile("a.py", "/a.py", file_type="py", edits=5, size_bytes=100),
+            RecoveredFile("b.py", "/b.py", file_type="py", edits=1, size_bytes=100),
+            RecoveredFile("c.md", "/c.md", file_type="md", edits=10, size_bytes=200),
         ]
         sf1 = SearchFilter().by_edits(min_edits=2)   # keeps a.py (5), c.md (10)
         sf2 = SearchFilter().by_extension("py")       # keeps only .py
@@ -1481,3 +1488,310 @@ class TestRecoveryStatisticsProperties:
     def test_no_avg_edits_per_file_duplicate(self):
         """avg_edits_per_file was removed as a duplicate of avg_versions_per_file."""
         assert not hasattr(RecoveryStatistics, "avg_edits_per_file")
+
+
+# ── Part B tests: performance-path ────────────────────────────────────────────
+
+class TestVersionDirsCaching:
+    """_version_dirs cached_property is scanned once per engine instance."""
+
+    def test_version_dirs_returns_list(self, tmp_path):
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        result = engine._version_dirs
+        assert isinstance(result, list)
+
+    def test_version_dirs_caches_same_object(self, tmp_path):
+        """Second access returns the same list object (cached_property guarantee)."""
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        first = engine._version_dirs
+        second = engine._version_dirs
+        assert first is second
+
+    def test_version_dirs_missing_recovery_returns_empty(self, tmp_path):
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "no_recovery")
+        assert engine._version_dirs == []
+
+
+class TestGetMessagesTargetedGlob:
+    """get_messages only opens JSONL files matching the session prefix."""
+
+    def test_messages_for_session_a_excludes_session_b(self, tmp_path):
+        """Two JSONL files with different session IDs; only session A's messages returned."""
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+
+        session_a = "aaaabbbb-0000-0000-0000-000000000001"
+        session_b = "ccccdddd-0000-0000-0000-000000000002"
+
+        (projects / f"{session_a}.jsonl").write_text(
+            json.dumps({
+                "sessionId": session_a, "type": "user", "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"content": "hello from A"},
+            })
+        )
+        (projects / f"{session_b}.jsonl").write_text(
+            json.dumps({
+                "sessionId": session_b, "type": "user", "timestamp": "2026-01-01T00:00:01Z",
+                "message": {"content": "hello from B"},
+            })
+        )
+
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        msgs = engine.get_messages(session_a)
+        assert all(m.session_id == session_a for m in msgs)
+        assert len(msgs) == 1
+        assert msgs[0].content == "hello from A"
+
+
+class TestSearchMessagesLiteralPreFilter:
+    """Literal query and equivalent regex return identical results (pre-filter has no false negatives)."""
+
+    def _make_engine(self, tmp_path: Path, content: str, session_id: str = "test-session") -> SessionRecoveryEngine:
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        (projects / f"{session_id}.jsonl").write_text(
+            json.dumps({
+                "sessionId": session_id, "type": "user", "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"content": content},
+            })
+        )
+        return SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+
+    def test_literal_matches_same_as_regex(self, tmp_path):
+        engine = self._make_engine(tmp_path, "the quick brown fox")
+        literal_results = engine.search_messages("quick")
+        regex_results = engine.search_messages("qu.ck")
+        assert len(literal_results) == len(regex_results) == 1
+        assert literal_results[0].content == regex_results[0].content
+
+    def test_literal_no_match_returns_empty(self, tmp_path):
+        engine = self._make_engine(tmp_path, "the quick brown fox")
+        assert engine.search_messages("elephant") == []
+
+    def test_literal_case_insensitive(self, tmp_path):
+        engine = self._make_engine(tmp_path, "The Quick Brown Fox")
+        # Literal pre-filter uses .lower() so case-insensitive match should work
+        results = engine.search_messages("quick")
+        assert len(results) == 1
+
+
+class TestLocationIsString:
+    """RecoveredFile.location is a plain str; engine search results have location == 'recovery'."""
+
+    def test_location_default_is_recovery(self):
+        from ai_session_tools import RecoveredFile
+        r = RecoveredFile(name="x.py", path="/x.py", file_type="py")
+        assert isinstance(r.location, str)
+        assert r.location == "recovery"
+
+    def test_engine_search_results_have_string_location(self, tmp_path):
+        recovery = _make_recovery_dir(tmp_path)
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        results = engine.search("*.py")
+        assert len(results) > 0
+        for r in results:
+            assert isinstance(r.location, str)
+            assert r.location == "recovery"
+
+    def test_file_location_not_in_public_api(self):
+        """FileLocation enum was removed; it is no longer accessible from the package."""
+        import ai_session_tools
+        assert not hasattr(ai_session_tools, "FileLocation")
+
+    def test_file_type_not_in_public_api(self):
+        """FileType enum was removed; it is no longer accessible from the package."""
+        import ai_session_tools
+        assert not hasattr(ai_session_tools, "FileType")
+
+
+# ── Part C tests: original-path extraction ────────────────────────────────────
+
+def _write_tool_call_jsonl(path: Path, session_id: str, filename: str, file_path: str, tool_name: str = "Write") -> None:
+    """Write a JSONL file containing an assistant tool_use record for filename."""
+    path.write_text(
+        json.dumps({
+            "sessionId": session_id,
+            "type": "assistant",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": tool_name,
+                        "input": {"file_path": file_path},
+                    }
+                ]
+            },
+        })
+    )
+
+
+class TestGetOriginalPath:
+    """get_original_path returns the path from Write/Edit tool_use records."""
+
+    def test_returns_path_from_write_tool_call(self, tmp_path):
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        session_id = "orig-path-session"
+        expected = "/home/user/myproject/cli.py"
+        _write_tool_call_jsonl(projects / f"{session_id}.jsonl", session_id, "cli.py", expected)
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        assert engine.get_original_path("cli.py") == expected
+
+    def test_returns_none_when_not_found(self, tmp_path):
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        session_id = "no-write-session"
+        (projects / f"{session_id}.jsonl").write_text(
+            json.dumps({"sessionId": session_id, "type": "user", "message": {"content": "hi"}})
+        )
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        assert engine.get_original_path("missing.py") is None
+
+    def test_returns_none_when_projects_dir_missing(self, tmp_path):
+        engine = SessionRecoveryEngine(tmp_path / "no_projects", tmp_path / "recovery")
+        assert engine.get_original_path("cli.py") is None
+
+    def test_edit_tool_also_found(self, tmp_path):
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        session_id = "edit-session"
+        expected = "/home/user/engine.py"
+        _write_tool_call_jsonl(projects / f"{session_id}.jsonl", session_id, "engine.py", expected, "Edit")
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        assert engine.get_original_path("engine.py") == expected
+
+    def test_notebook_edit_tool_also_found(self, tmp_path):
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        session_id = "nb-session"
+        expected = "/home/user/notebook.ipynb"
+        _write_tool_call_jsonl(projects / f"{session_id}.jsonl", session_id, "notebook.ipynb", expected, "NotebookEdit")
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        assert engine.get_original_path("notebook.ipynb") == expected
+
+
+class TestGetOriginalPathToolUseResult:
+    """get_original_path finds paths from toolUseResult.filePath (user confirmation records)."""
+
+    def test_tool_use_result_file_path(self, tmp_path):
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        session_id = "tur-session"
+        expected = "/home/user/output.py"
+        (projects / f"{session_id}.jsonl").write_text(
+            json.dumps({
+                "sessionId": session_id,
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "toolUseResult": {"filePath": expected},
+            })
+        )
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        assert engine.get_original_path("output.py") == expected
+
+
+class TestGetOriginalPathMultipleVersions:
+    """When multiple Write calls exist for the same filename, the last one wins."""
+
+    def test_last_write_wins(self, tmp_path):
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        session_id = "multi-write-session"
+        first_path = "/home/user/old/cli.py"
+        second_path = "/home/user/new/cli.py"
+        (projects / f"{session_id}.jsonl").write_text(
+            "\n".join([
+                json.dumps({
+                    "sessionId": session_id, "type": "assistant",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {"content": [{"type": "tool_use", "name": "Write", "input": {"file_path": first_path}}]},
+                }),
+                json.dumps({
+                    "sessionId": session_id, "type": "assistant",
+                    "timestamp": "2026-01-01T00:00:01Z",
+                    "message": {"content": [{"type": "tool_use", "name": "Write", "input": {"file_path": second_path}}]},
+                }),
+            ])
+        )
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        assert engine.get_original_path("cli.py") == second_path
+
+
+class TestResolveOutputPath:
+    """_resolve_output_path returns target unchanged when it doesn't exist; appends .recovered suffix otherwise."""
+
+    def test_nonexistent_target_returned_as_is(self, tmp_path):
+        from ai_session_tools.cli import _resolve_output_path
+        target = tmp_path / "newfile.py"
+        assert _resolve_output_path(target) == target
+
+    def test_existing_target_gets_recovered_suffix(self, tmp_path):
+        from ai_session_tools.cli import _resolve_output_path
+        target = tmp_path / "cli.py"
+        target.write_text("existing")
+        result = _resolve_output_path(target)
+        assert result == tmp_path / "cli.recovered.py"
+
+    def test_recovered_suffix_also_exists_gets_numbered(self, tmp_path):
+        from ai_session_tools.cli import _resolve_output_path
+        (tmp_path / "cli.py").write_text("original")
+        (tmp_path / "cli.recovered.py").write_text("first recovered")
+        result = _resolve_output_path(tmp_path / "cli.py")
+        assert result == tmp_path / "cli.recovered_1.py"
+
+    def test_multiple_conflicts_increment(self, tmp_path):
+        from ai_session_tools.cli import _resolve_output_path
+        (tmp_path / "cli.py").write_text("original")
+        (tmp_path / "cli.recovered.py").write_text("r0")
+        (tmp_path / "cli.recovered_1.py").write_text("r1")
+        result = _resolve_output_path(tmp_path / "cli.py")
+        assert result == tmp_path / "cli.recovered_2.py"
+
+
+class TestExtractToOriginalPath:
+    """_do_extract with output_dir=None restores to the original recorded path."""
+
+    def test_extract_restores_to_original_path(self, tmp_path):
+        from ai_session_tools.cli import _do_extract
+
+        # Set up recovery dir with hello.py
+        recovery = _make_recovery_dir(tmp_path)
+
+        # Set up projects dir with a Write tool_use record pointing to a custom path
+        projects = tmp_path / "projects" / "proj"
+        projects.mkdir(parents=True)
+        original_path = tmp_path / "workspace" / "hello.py"
+        _write_tool_call_jsonl(
+            projects / "session.jsonl",
+            "any-session", "hello.py", str(original_path)
+        )
+
+        engine = SessionRecoveryEngine(tmp_path / "projects", recovery)
+        try:
+            _do_extract(engine, "hello.py", None)
+        except SystemExit:
+            pass
+        # If original path dir was created, the file was restored there
+        assert original_path.exists()
+
+
+class TestExtractFallback:
+    """_do_extract falls back to ./recovered/ when no original path is recorded."""
+
+    def test_fallback_to_recovered_dir(self, tmp_path, monkeypatch):
+        from ai_session_tools.cli import _do_extract
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("AI_SESSION_TOOLS_OUTPUT", raising=False)
+
+        recovery = _make_recovery_dir(tmp_path)
+        # No projects dir — get_original_path will return None
+        engine = SessionRecoveryEngine(tmp_path / "empty_projects", recovery)
+        try:
+            _do_extract(engine, "hello.py", None)
+        except SystemExit:
+            pass
+        assert (tmp_path / "recovered" / "hello.py").exists()

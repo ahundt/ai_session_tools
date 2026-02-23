@@ -27,8 +27,6 @@ from .engine import SessionRecoveryEngine
 from .filters import ChainedFilter, LocationMatcher, MessageFilter, SearchFilter
 from .formatters import CsvFormatter, JsonFormatter, PlainFormatter, ResultFormatter, TableFormatter
 from .models import (
-    FileLocation,
-    FileType,
     FileVersion,
     FilterSpec,
     MessageType,
@@ -54,8 +52,6 @@ __all__ = [
     "ComposableSearch",
     "CsvFormatter",
     "Extractable",
-    "FileLocation",
-    "FileType",
     "FileVersion",
     "Filterable",
     "FilterSpec",

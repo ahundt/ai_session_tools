@@ -46,7 +46,7 @@ class SearchFilter:
         """Filter by location."""
 
         def predicate(f: RecoveredFile) -> bool:
-            return location.lower() in f.location.value.lower()
+            return location.lower() in f.location.lower()
 
         self._predicates.append(predicate)
         return self
@@ -179,7 +179,7 @@ class LocationMatcher:
 
     def filter_files(self, files: List[RecoveredFile]) -> List[RecoveredFile]:
         """Filter files by location."""
-        return [f for f in files if self.matches(f.location.value)]
+        return [f for f in files if self.matches(f.location)]
 
     def __call__(self, location: str) -> bool:
         """Support callable interface."""

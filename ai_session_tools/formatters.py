@@ -49,7 +49,7 @@ class TableFormatter(ResultFormatter):
         """Format single file."""
         lines = [
             f"Name:          {data.name}",
-            f"Location:      {data.location.value}",
+            f"Location:      {data.location}",
             f"Type:          {data.file_type}",
             f"Edits:         {data.edits}",
             f"Sessions:      {len(data.sessions)}",
@@ -68,7 +68,7 @@ class TableFormatter(ResultFormatter):
         table.add_column("Location", style="yellow")
 
         for item in items:
-            table.add_row(item.name, str(item.edits), item.file_type, item.last_modified or "", item.location.value)
+            table.add_row(item.name, str(item.edits), item.file_type, item.last_modified or "", item.location)
 
         console = Console()
         with console.capture() as capture:
@@ -82,7 +82,7 @@ class JsonFormatter(ResultFormatter):
     def _file_dict(self, data: RecoveredFile) -> dict:
         return {
             "name": data.name,
-            "location": data.location.value,
+            "location": data.location,
             "type": data.file_type,
             "edits": data.edits,
             "sessions": data.sessions,
@@ -106,7 +106,7 @@ _CSV_HEADER = ["name", "location", "type", "edits", "sessions", "size_bytes", "l
 def _file_to_csv_row(data: RecoveredFile) -> list:
     return [
         data.name,
-        data.location.value,
+        data.location,
         data.file_type,
         data.edits,
         len(data.sessions),
@@ -168,7 +168,7 @@ class PlainFormatter(ResultFormatter):
     def format(self, data: Any) -> str:
         """Format single item."""
         if isinstance(data, RecoveredFile):
-            return f"{data.name} ({data.edits} edits) - {data.location.value}"
+            return f"{data.name} ({data.edits} edits) - {data.location}"
         elif isinstance(data, SessionMessage):
             return f"[{data.type.value}] {data.preview()}"
         return str(data)

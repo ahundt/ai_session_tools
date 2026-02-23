@@ -7,15 +7,21 @@ Licensed under the Apache License, Version 2.0
 
 import datetime
 import fnmatch
+import functools
 import json
+import os
 import re
 import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import ClassVar, Dict, List, Optional, Set
 
+try:
+    from orjson import loads as _json_loads
+except ImportError:
+    from json import loads as _json_loads  # type: ignore[assignment]
+
 from .models import (
-    FileLocation,
     FileVersion,
     FilterSpec,
     MessageType,
@@ -42,6 +48,16 @@ class SessionRecoveryEngine:
         self.recovery_dir = Path(recovery_dir)
         self._file_cache: Dict[str, RecoveredFile] = {}
         self._version_cache: Dict[str, List[FileVersion]] = {}
+
+    @functools.cached_property
+    def _version_dirs(self) -> List[Path]:
+        """Session all-versions dirs — scanned once per engine instance."""
+        if not self.recovery_dir.exists():
+            return []
+        return [
+            d for d in self.recovery_dir.iterdir()
+            if d.is_dir() and d.name.startswith("session_all_versions_")
+        ]
 
     @staticmethod
     def _compile_pattern(pattern: str) -> re.Pattern:
@@ -88,7 +104,7 @@ class SessionRecoveryEngine:
                 self._file_cache[file_path.name] = RecoveredFile(
                     name=file_path.name,
                     path=str(file_path.resolve()),
-                    location=FileLocation.CLAUTORUN_MAIN,
+                    location="recovery",
                     file_type=file_path.suffix[1:] or "unknown",
                     sessions=[v.session_id for v in versions],
                     edits=len(versions),
@@ -101,26 +117,30 @@ class SessionRecoveryEngine:
         return self._file_cache.get(file_path.name)
 
     def _apply_all_filters(self, file_info: RecoveredFile, filters: FilterSpec) -> bool:
-        """Check if file passes all filters. Returns True if file should be included."""
+        """Check if file passes all filters. Returns True if file should be included.
+
+        Order: cheapest checks first (extension, size, datetime) before expensive ones
+        (sessions iterates a list; edits unavoidable; location always passes after pre-check).
+        """
+        if not filters.matches_extension(file_info.file_type):
+            return False
+
+        if not filters.matches_size(file_info.size_bytes):
+            return False
+
+        if not filters.matches_datetime(file_info.last_modified):
+            return False
+
         if file_info.sessions:
             if not any(filters.matches_session(s) for s in file_info.sessions):
                 return False
         elif filters.include_sessions:
             return False
 
-        if not filters.matches_location(file_info.location.value):
-            return False
-
         if not filters.matches_edits(file_info.edits):
             return False
 
-        if not filters.matches_extension(file_info.file_type):
-            return False
-
-        if not filters.matches_datetime(file_info.last_modified):
-            return False
-
-        if not filters.matches_size(file_info.size_bytes):
+        if not filters.matches_location(file_info.location):
             return False
 
         return True
@@ -151,26 +171,64 @@ class SessionRecoveryEngine:
 
         if not self.recovery_dir.exists():
             return []
+
+        # location is always "recovery"; short-circuit if include_folders excludes it.
+        if filters.include_folders and not filters.matches_location("recovery"):
+            return []
+
         results: List[RecoveredFile] = []
         seen_names: Set[str] = set()
 
-        for session_dir in self.recovery_dir.glob("session_*"):
-            if not session_dir.is_dir() or "all_versions" in session_dir.name:
-                continue
-
-            for file_path in session_dir.glob("*"):
-                if not file_path.is_file() or not pattern_re.search(file_path.name):
+        with os.scandir(self.recovery_dir) as it:
+            for entry in it:
+                if not entry.is_dir():
                     continue
-                if file_path.name in seen_names:
+                name = entry.name
+                if not name.startswith("session_") or "all_versions" in name:
                     continue
 
-                file_info = self._get_or_create_file_info(file_path)
-                if file_info is None:
+                # Session dir-level pre-filter: skip entire dir before iterating files.
+                session_id_str = name[len("session_"):]
+                if filters.include_sessions and session_id_str not in filters.include_sessions:
+                    continue
+                if filters.exclude_sessions and session_id_str in filters.exclude_sessions:
                     continue
 
-                if self._apply_all_filters(file_info, filters):
-                    results.append(file_info)
-                    seen_names.add(file_path.name)
+                session_dir = Path(entry.path)
+
+                with os.scandir(session_dir) as it2:
+                    for entry2 in it2:
+                        if not entry2.is_file() or not pattern_re.search(entry2.name):
+                            continue
+                        if entry2.name in seen_names:
+                            continue
+
+                        file_path = Path(entry2.path)
+
+                        # Extension pre-filter: skip stat+get_versions for wrong extensions.
+                        ext = file_path.suffix.lstrip(".")
+                        if not filters.matches_extension(ext):
+                            continue
+
+                        # Stat pre-filter: check date/size before expensive get_versions.
+                        if filters.after or filters.before or filters.min_size or (filters.max_size is not None):
+                            try:
+                                s = file_path.stat()
+                                mtime = datetime.datetime.fromtimestamp(
+                                    s.st_mtime, tz=datetime.timezone.utc
+                                ).strftime("%Y-%m-%dT%H:%M:%S")
+                                if not filters.matches_datetime(mtime) or not filters.matches_size(s.st_size):
+                                    continue
+                            except OSError:
+                                continue
+
+                        file_info = self._get_or_create_file_info(file_path)
+                        if file_info is None:
+                            continue
+
+                        if self._apply_all_filters(file_info, filters):
+                            results.append(file_info)
+                            seen_names.add(file_path.name)
 
         return sorted(results, key=lambda f: f.edits, reverse=True)
 
@@ -189,26 +247,22 @@ class SessionRecoveryEngine:
         versions = []
         version_pattern = r"_v(\d+)_line_(\d+)\.txt$"
 
-        if self.recovery_dir.exists():
-            for session_dir in self.recovery_dir.glob("session_all_versions_*"):
-                if not session_dir.is_dir():
-                    continue
-
-                # Use raw filename in glob: glob treats '.' as a literal character,
-                # not as a special meta-character, so re.escape() must NOT be used here.
-                for version_file in session_dir.glob(f"{filename}_v*_line_*.txt"):
-                    match = re.search(version_pattern, version_file.name)
-                    if match:
-                        version_num = int(match.group(1))
-                        line_count = int(match.group(2))
-                        versions.append(
-                            FileVersion(
-                                filename=filename,
-                                version_num=version_num,
-                                line_count=line_count,
-                                session_id=session_dir.name.replace("session_all_versions_", ""),
-                            )
+        for session_dir in self._version_dirs:
+            # Use raw filename in glob: glob treats '.' as a literal character,
+            # not as a special meta-character, so re.escape() must NOT be used here.
+            for version_file in session_dir.glob(f"{filename}_v*_line_*.txt"):
+                match = re.search(version_pattern, version_file.name)
+                if match:
+                    version_num = int(match.group(1))
+                    line_count = int(match.group(2))
+                    versions.append(
+                        FileVersion(
+                            filename=filename,
+                            version_num=version_num,
+                            line_count=line_count,
+                            session_id=session_dir.name.replace("session_all_versions_", ""),
                         )
+                    )
 
         versions.sort()
         self._version_cache[filename] = versions
@@ -309,7 +363,10 @@ class SessionRecoveryEngine:
         Supports prefix matching: session_id 'ab841016' matches 'ab841016-f07b-...'.
         """
         try:
-            data = json.loads(line)
+            # Fast pre-filter: session_id must appear in the raw line (no false negatives).
+            if session_id not in line:
+                return None
+            data = _json_loads(line)
             msg_session = data.get("sessionId", "")
             # Prefix match: allow short IDs (e.g. 'ab841016') to match full UUIDs
             if msg_session != session_id and not msg_session.startswith(session_id):
@@ -351,7 +408,7 @@ class SessionRecoveryEngine:
             if not project_dir.is_dir():
                 continue
 
-            for jsonl_file in project_dir.glob("*.jsonl"):
+            for jsonl_file in project_dir.glob(f"{session_id}*.jsonl"):
                 try:
                     with open(jsonl_file, encoding="utf-8", errors="replace") as f:
                         for line in f:
@@ -379,6 +436,13 @@ class SessionRecoveryEngine:
         # Compile first: raise ValueError on bad patterns before any I/O.
         pattern = self._compile_pattern(query)
 
+        # Pre-compute literal pre-filter: only safe when query has no regex metacharacters.
+        # re.escape(query) == query iff every char is literal (no . + * ? [ ] ^ $ | etc.)
+        is_literal = re.escape(query) == query
+        query_lower = query.lower() if is_literal else None
+        # Heuristic: message_type value must appear in the raw JSON line (no false negatives).
+        msg_type_hint = f'"{message_type}"' if message_type else None
+
         messages: List[SessionMessage] = []
 
         if not self.projects_dir.exists():
@@ -393,7 +457,12 @@ class SessionRecoveryEngine:
                     with open(jsonl_file, encoding="utf-8", errors="replace") as f:
                         for line in f:
                             try:
-                                data = json.loads(line)
+                                # Raw line pre-filters: skip json.loads when possible.
+                                if query_lower and query_lower not in line.lower():
+                                    continue
+                                if msg_type_hint and msg_type_hint not in line:
+                                    continue
+                                data = _json_loads(line)
                                 msg_type = data.get("type", "").lower()
 
                                 if message_type and msg_type != message_type.lower():
@@ -441,10 +510,7 @@ class SessionRecoveryEngine:
 
         # Count versions globally (accumulate across all sessions before comparing)
         file_version_totals: Dict[str, int] = defaultdict(int)
-        for session_dir in self.recovery_dir.glob("session_all_versions_*"):
-            if not session_dir.is_dir():
-                continue
-
+        for session_dir in self._version_dirs:
             version_files = list(session_dir.glob("*_v*_line_*.txt"))
             total_versions += len(version_files)
 
@@ -499,3 +565,59 @@ class SessionRecoveryEngine:
             return msg
 
         return ""
+
+    def get_original_path(self, filename: str) -> Optional[str]:
+        """Find the most recent original path where Claude wrote or edited this filename.
+
+        Searches project JSONL files for Write/Edit/NotebookEdit tool calls and
+        toolUseResult confirmation messages.  Returns the last recorded absolute path,
+        or None if not found.
+
+        Args:
+            filename: Exact filename to look up (e.g. 'cli.py')
+
+        Returns:
+            Most recently recorded absolute path string, or None.
+        """
+        if not self.projects_dir.exists():
+            return None
+
+        last_path: Optional[str] = None
+
+        for project_dir in self.projects_dir.iterdir():
+            if not project_dir.is_dir():
+                continue
+            for jsonl_file in project_dir.glob("*.jsonl"):
+                try:
+                    with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            # Fast pre-filter: filename must appear in the raw line.
+                            if filename not in line:
+                                continue
+                            try:
+                                data = _json_loads(line)
+                                # Path 1: toolUseResult.filePath (user confirmation message)
+                                tool_result = data.get("toolUseResult") or {}
+                                if isinstance(tool_result, dict):
+                                    fp = tool_result.get("filePath", "")
+                                    if fp and Path(fp).name == filename:
+                                        last_path = fp
+                                        continue
+                                # Path 2: message.content[].input.file_path (assistant tool_use)
+                                msg = data.get("message") or {}
+                                if isinstance(msg, dict):
+                                    for item in msg.get("content") or []:
+                                        if (
+                                            isinstance(item, dict)
+                                            and item.get("type") == "tool_use"
+                                            and item.get("name") in ("Write", "Edit", "NotebookEdit")
+                                        ):
+                                            fp = (item.get("input") or {}).get("file_path", "")
+                                            if fp and Path(fp).name == filename:
+                                                last_path = fp
+                            except (json.JSONDecodeError, KeyError, ValueError):
+                                continue
+                except OSError:
+                    continue
+
+        return last_path

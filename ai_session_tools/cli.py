@@ -128,9 +128,44 @@ def _do_messages_search(
     console.print(f"\n[bold]Found {len(messages_list)} messages[/bold]")
 
 
-def _do_extract(engine: SessionRecoveryEngine, name: str, output_dir: str) -> None:
-    """Extract final version of a file."""
-    path = engine.extract_final(name, Path(output_dir).expanduser())
+def _resolve_output_path(target: Path) -> Path:
+    """Return target path; if it already exists, append .recovered[_N] before the extension.
+
+    Examples: cli.py → cli.recovered.py → cli.recovered_1.py → cli.recovered_2.py → …
+    """
+    if not target.exists():
+        return target
+    stem, suffix = target.stem, target.suffix
+    candidate = target.parent / f"{stem}.recovered{suffix}"
+    counter = 1
+    while candidate.exists():
+        candidate = target.parent / f"{stem}.recovered_{counter}{suffix}"
+        counter += 1
+    return candidate
+
+
+def _do_extract(engine: SessionRecoveryEngine, name: str, output_dir: Optional[str]) -> None:
+    """Extract final version of a file, restoring to original path by default."""
+    if output_dir is None:
+        output_dir = os.getenv("AI_SESSION_TOOLS_OUTPUT")
+
+    if output_dir is None:
+        # Default: restore to the original path Claude wrote the file to.
+        original = engine.get_original_path(name)
+        if original:
+            target = _resolve_output_path(Path(original))
+            out_dir: Path = target.parent
+            out_name: str = target.name
+        else:
+            out_dir = Path("./recovered")
+            out_name = name
+    else:
+        out_dir = Path(output_dir).expanduser()
+        out_name = name
+
+    path = engine.extract_final(name, out_dir)
+    if path and out_name != name:
+        path = path.rename(out_dir / out_name)
     if path:
         console.print(f"[green]Extracted:[/green] {path}")
     else:
@@ -138,16 +173,29 @@ def _do_extract(engine: SessionRecoveryEngine, name: str, output_dir: str) -> No
         raise typer.Exit(code=1)
 
 
-def _do_history(engine: SessionRecoveryEngine, name: str, output_dir: str) -> None:
+def _do_history(engine: SessionRecoveryEngine, name: str, output_dir: Optional[str]) -> None:
     """Extract all versions of a file."""
     versions = engine.get_versions(name)
     if not versions:
         console.print(f"[yellow]No versions found for: {name}[/yellow]")
         return
 
-    paths = engine.extract_all(name, Path(output_dir).expanduser())
+    if output_dir is None:
+        output_dir = os.getenv("AI_SESSION_TOOLS_OUTPUT")
+
+    if output_dir is None:
+        # Default: place versions/ subdirectory alongside the original file.
+        original = engine.get_original_path(name)
+        if original:
+            out_dir = Path(original).parent / "versions"
+        else:
+            out_dir = Path("./recovered")
+    else:
+        out_dir = Path(output_dir).expanduser()
+
+    paths = engine.extract_all(name, out_dir)
     if paths:
-        console.print(f"[green]Extracted {len(paths)} versions to:[/green] {output_dir}")
+        console.print(f"[green]Extracted {len(paths)} versions to:[/green] {out_dir}")
     else:
         console.print(f"[red]Failed to extract:[/red] {name}")
         raise typer.Exit(code=1)
@@ -221,11 +269,20 @@ def files_search(
 @files_app.command("extract")
 def files_extract(
     name: str = typer.Option(..., "--name", "-n", help="Filename to save (e.g. cli.py). Use 'aise files search' to find available names."),
-    output_dir: str = typer.Option("./recovered", "--output-dir", "-o", help="Directory to write the file to. Default: ./recovered"),
+    output_dir: Optional[str] = typer.Option(
+        None, "--output-dir", "-o",
+        help=(
+            "Directory to write the extracted file. "
+            "Default: restore to original path recorded in session data "
+            "(adds .recovered suffix if file exists). "
+            "Set AI_SESSION_TOOLS_OUTPUT env var to override globally. "
+            "Example: --output-dir ./backup"
+        ),
+    ),
 ) -> None:
     """Save the most recent version of a source file found in session data.
 
-    Writes the file to --output-dir. Use 'aise files search' to find available filenames.
+    By default restores the file to its original path. Use 'aise files search' to find filenames.
 
     Examples:
         aise files extract --name cli.py
@@ -237,11 +294,19 @@ def files_extract(
 @files_app.command("history")
 def files_history(
     name: str = typer.Option(..., "--name", "-n", help="Filename to extract all versions of (e.g. cli.py)"),
-    output_dir: str = typer.Option("./recovered", "--output-dir", "-o", help="Output directory. Default: ./recovered"),
+    output_dir: Optional[str] = typer.Option(
+        None, "--output-dir", "-o",
+        help=(
+            "Directory to write version files. "
+            "Default: versions/ subdirectory alongside original file path. "
+            "Set AI_SESSION_TOOLS_OUTPUT env var to override globally. "
+            "Example: --output-dir ./versions"
+        ),
+    ),
 ) -> None:
     """Save every recorded version of a source file, showing its edit history.
 
-    Creates numbered files (e.g. cli_v1.py, cli_v2.py, ...) in --output-dir.
+    Creates numbered files (e.g. v000001_line_42.txt, ...) in --output-dir.
     Each version corresponds to one edit found across all sessions.
 
     Examples:
@@ -377,7 +442,15 @@ def search(
 @app.command()
 def extract(
     name: str = typer.Option(..., "--name", "-n", help="Filename to save (e.g. cli.py). Use 'aise search' to find available names."),
-    output_dir: str = typer.Option("./recovered", "--output-dir", "-o", help="Directory to write the file to. Default: ./recovered"),
+    output_dir: Optional[str] = typer.Option(
+        None, "--output-dir", "-o",
+        help=(
+            "Directory to write the extracted file. "
+            "Default: restore to original path recorded in session data "
+            "(adds .recovered suffix if file exists). "
+            "Set AI_SESSION_TOOLS_OUTPUT env var to override globally."
+        ),
+    ),
 ) -> None:
     """Save the most recent version of a source file found in session data.
 
@@ -389,11 +462,18 @@ def extract(
 @app.command()
 def history(
     name: str = typer.Option(..., "--name", "-n", help="Filename to extract all versions of (e.g. cli.py)"),
-    output_dir: str = typer.Option("./recovered", "--output-dir", "-o", help="Directory to write version files to. Default: ./recovered"),
+    output_dir: Optional[str] = typer.Option(
+        None, "--output-dir", "-o",
+        help=(
+            "Directory to write version files. "
+            "Default: versions/ alongside original file path. "
+            "Set AI_SESSION_TOOLS_OUTPUT env var to override globally."
+        ),
+    ),
 ) -> None:
     """Save every recorded version of a source file, showing its edit history.
 
-    Equivalent to 'aise files history'. Creates numbered files (e.g. cli_v1.py, cli_v2.py).
+    Equivalent to 'aise files history'. Creates numbered files (e.g. v000001_line_42.txt).
     """
     _do_history(get_engine(), name, output_dir)
 

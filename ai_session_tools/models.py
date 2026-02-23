@@ -12,29 +12,6 @@ from enum import Enum
 from typing import List, Optional, Set
 
 
-class FileLocation(str, Enum):
-    """File location categories."""
-
-    CLAUTORUN_MAIN = "clautorun/main"
-    CLAUTORUN_WORKTREE = "clautorun/worktree"
-    CLAUTORUN_PLANEXPORT = "clautorun/plan-export"
-    AUTORUN = "autorun"
-    EXTERNAL = "external"
-    ALL = "all"
-
-
-class FileType(str, Enum):
-    """Supported file types."""
-
-    PYTHON = "python"
-    MARKDOWN = "markdown"
-    JSON = "json"
-    TYPESCRIPT = "typescript"
-    JAVASCRIPT = "javascript"
-    SHELL = "shell"
-    ALL = "all"
-
-
 class MessageType(str, Enum):
     """Session message types."""
 
@@ -79,8 +56,8 @@ class RecoveredFile:
 
     name: str
     path: str
-    location: FileLocation
-    file_type: str
+    location: str = "recovery"
+    file_type: str = "unknown"
     sessions: List[str] = field(default_factory=list)
     edits: int = 0
     created_date: Optional[str] = None
