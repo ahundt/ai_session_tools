@@ -2213,6 +2213,7 @@ def stats(ctx: typer.Context) -> None:
 
 def _get_config_file_path() -> Path:
     """Return the resolved config file path based on current priority chain."""
+    from ai_session_tools.config import _g_config_path
     if _g_config_path:
         return Path(_g_config_path).expanduser()
     env_val = os.getenv("AI_SESSION_TOOLS_CONFIG")

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Unit tests for AI Session Tools
 
@@ -3241,9 +3242,9 @@ class TestLoadConfig:
     """Tests for load_config(): reads JSON, falls back gracefully, respects env var."""
 
     def _reset_cache(self):
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
-        cli_mod._g_config_path = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
+        cfg_mod._g_config_path = None
 
     def test_missing_file_returns_empty_dict(self, tmp_path):
         self._reset_cache()
@@ -3254,7 +3255,7 @@ class TestLoadConfig:
         from ai_session_tools.cli import load_config
         self._reset_cache()
         import ai_session_tools.cli as cli_mod
-        cli_mod._g_config_path = str(tmp_path / "nonexistent.json")
+        cfg_mod._g_config_path = str(tmp_path / "nonexistent.json")
         assert load_config() == {}
 
     def test_valid_config_loaded(self, tmp_path):
@@ -3264,7 +3265,7 @@ class TestLoadConfig:
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps(cfg))
         import ai_session_tools.cli as cli_mod
-        cli_mod._g_config_path = str(config_file)
+        cfg_mod._g_config_path = str(config_file)
         result = load_config()
         assert result == cfg
         self._reset_cache()
@@ -3274,7 +3275,7 @@ class TestLoadConfig:
         config_file = tmp_path / "config.json"
         config_file.write_text("{ bad json !!!")
         import ai_session_tools.cli as cli_mod
-        cli_mod._g_config_path = str(config_file)
+        cfg_mod._g_config_path = str(config_file)
         from ai_session_tools.cli import load_config
         result = load_config()
         assert result == {}
@@ -3285,7 +3286,7 @@ class TestLoadConfig:
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({"planning_commands": ["/x"]}))
         import ai_session_tools.cli as cli_mod
-        cli_mod._g_config_path = str(config_file)
+        cfg_mod._g_config_path = str(config_file)
         from ai_session_tools.cli import load_config
         r1 = load_config()
         r2 = load_config()
@@ -3301,8 +3302,8 @@ class TestConfigFileCorrectionsIntegration:
 
     def test_config_patterns_used_when_no_cli_flag(self, tmp_path):
         """Config file correction_patterns override built-in defaults."""
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
         config_file = tmp_path / "config.json"
         # Pattern that matches "you forgot" (present in fixture session)
         config_file.write_text(json.dumps({
@@ -3313,15 +3314,15 @@ class TestConfigFileCorrectionsIntegration:
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert any(d["category"] == "config_cat" for d in data)
 
     def test_cli_pattern_overrides_config(self, tmp_path):
         """--pattern flag takes priority over config file."""
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({
             "correction_patterns": ["config_cat:NOMATCH_UNIQUE_XYZ"]
@@ -3334,7 +3335,7 @@ class TestConfigFileCorrectionsIntegration:
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         # CLI pattern wins — category is "cli_cat", not "config_cat"
@@ -3350,8 +3351,8 @@ class TestConfigFilePlanningIntegration:
 
     def test_config_commands_used_when_no_cli_flag(self, tmp_path):
         """Config file planning_commands override built-in defaults."""
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
         config_file = tmp_path / "config.json"
         # "/ar:plannew" appears in the fixture session
         config_file.write_text(json.dumps({
@@ -3362,15 +3363,15 @@ class TestConfigFilePlanningIntegration:
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert any("/ar:plannew" in d["command"] for d in data)
 
     def test_cli_commands_override_config(self, tmp_path):
         """--commands flag takes priority over config file."""
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({
             "planning_commands": [r"/NOMATCH_UNIQUE_XYZ\b"]
@@ -3383,7 +3384,7 @@ class TestConfigFilePlanningIntegration:
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         # CLI commands win
@@ -3659,41 +3660,41 @@ class TestConfigShow:
 
     def test_config_show_no_file(self, tmp_path):
         """When no config file exists, shows a helpful message."""
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
         result = runner.invoke(app, ["config", "show"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
             "AI_SESSION_TOOLS_CONFIG": str(tmp_path / "nonexistent.json"),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0
         assert "does not exist" in result.output or "init" in result.output.lower()
 
     def test_config_show_with_file(self, tmp_path):
         """With a config file, shows its contents."""
-        import ai_session_tools.cli as cli_mod
+        import ai_session_tools.config as cfg_mod
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"planning_commands": ["/mycommand"]}))
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         result = runner.invoke(app, ["config", "show"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
             "AI_SESSION_TOOLS_CONFIG": str(cfg),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0
         assert "planning_commands" in result.output or "/mycommand" in result.output
 
     def test_config_show_json_format(self, tmp_path):
         """--format json returns valid JSON with config_file and exists keys."""
-        import ai_session_tools.cli as cli_mod
+        import ai_session_tools.config as cfg_mod
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"planning_commands": ["/mycommand"]}))
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         result = runner.invoke(app, ["config", "show", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
             "AI_SESSION_TOOLS_CONFIG": str(cfg),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "config_file" in data
@@ -4057,27 +4058,27 @@ class TestMessagesSearchContext:
 class TestMessagesAnalyze:
     def test_analyze_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "analyze", "aaaa0001"],
+        result = runner.invoke(app, ["--source", "claude", "messages", "inspect", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_analyze_shows_tool_name(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "analyze", "aaaa0001"],
+        result = runner.invoke(app, ["--source", "claude", "messages", "inspect", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "Write" in result.output
 
     def test_analyze_shows_file_path(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "analyze", "aaaa0001"],
+        result = runner.invoke(app, ["--source", "claude", "messages", "inspect", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "login.py" in result.output
 
     def test_analyze_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "analyze", "aaaa0001", "--format", "json"],
+        result = runner.invoke(app, ["--source", "claude", "messages", "inspect", "aaaa0001", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -4088,7 +4089,7 @@ class TestMessagesAnalyze:
 
     def test_analyze_missing_session_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "analyze", "nonexistent-session"],
+        result = runner.invoke(app, ["--source", "claude", "messages", "inspect", "nonexistent-session"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code != 0
 
@@ -4098,13 +4099,13 @@ class TestMessagesAnalyze:
 class TestMessagesTimeline:
     def test_timeline_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "timeline", "aaaa0001"],
+        result = runner.invoke(app, ["--source", "claude", "messages", "timeline", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_timeline_shows_event_types(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "timeline", "aaaa0001"],
+        result = runner.invoke(app, ["--source", "claude", "messages", "timeline", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "user" in result.output
@@ -4112,7 +4113,7 @@ class TestMessagesTimeline:
 
     def test_timeline_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "timeline", "aaaa0001", "--format", "json"],
+        result = runner.invoke(app, ["--source", "claude", "messages", "timeline", "aaaa0001", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -4485,7 +4486,7 @@ class TestMessagesExtractCLI:
     def test_extract_pbcopy_exit0(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["messages", "extract", "dddd0001", "pbcopy"],
+            app, ["--source", "claude", "messages", "extract", "dddd0001", "pbcopy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -4493,7 +4494,7 @@ class TestMessagesExtractCLI:
     def test_extract_pbcopy_shows_content(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["messages", "extract", "dddd0001", "pbcopy"],
+            app, ["--source", "claude", "messages", "extract", "dddd0001", "pbcopy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "clipboard" in result.output
@@ -4501,7 +4502,7 @@ class TestMessagesExtractCLI:
     def test_extract_pbcopy_json_format(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["messages", "extract", "dddd0001", "pbcopy", "--format", "json"],
+            app, ["--source", "claude", "messages", "extract", "dddd0001", "pbcopy", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -4512,7 +4513,7 @@ class TestMessagesExtractCLI:
     def test_extract_missing_session_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["messages", "extract", "zzzz", "pbcopy"],
+            app, ["--source", "claude", "messages", "extract", "zzzz", "pbcopy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -4520,7 +4521,7 @@ class TestMessagesExtractCLI:
     def test_extract_invalid_type_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["messages", "extract", "dddd0001", "invalid-type"],
+            app, ["--source", "claude", "messages", "extract", "dddd0001", "invalid-type"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -5325,9 +5326,14 @@ class TestSessionBackendDegradation:
 class TestSourceAutoDiscovery:
     """Test _discover_sources() and _detect_default_source() (Phase C C1)."""
 
-    def test_detect_default_source_returns_claude_when_no_aistudio_configured(self):
-        """_detect_default_source returns 'claude' when no non-Claude sources configured."""
-        from ai_session_tools.engine import _detect_default_source
+    def test_detect_default_source_returns_claude_when_no_aistudio_configured(self, monkeypatch):
+        """_detect_default_source returns 'claude' when no non-Claude sources configured or auto-discovered."""
+        from ai_session_tools.engine import _detect_default_source, _discover_sources
+        # Mock _discover_sources to return empty (prevents auto-discovery from finding real sources)
+        monkeypatch.setattr(
+            "ai_session_tools.engine._discover_sources",
+            lambda cfg: {"source_dirs": cfg.get("source_dirs", {})}
+        )
         result = _detect_default_source({"source_dirs": {}})
         assert result == "claude"
 
