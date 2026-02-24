@@ -724,7 +724,7 @@ class TestMessagesSearchToolFlag:
     def test_tool_flag_returns_write_call(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "search", "*", "--tool", "Write"],
+            app, ["--source", "claude", "messages", "search", "*", "--tool", "Write"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -733,7 +733,7 @@ class TestMessagesSearchToolFlag:
     def test_no_tool_unchanged(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "search", "start the feature"],
+            app, ["--source", "claude", "messages", "search", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
