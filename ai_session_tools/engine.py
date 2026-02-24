@@ -1434,13 +1434,13 @@ class MultiSourceEngine:
     def __init__(self, sources: list) -> None:
         self._sources = sources
 
-    def search_messages(self, pattern: str, filters=None) -> list:
-        """Aggregate search across ALL sources."""
+    def search_messages(self, query: str, message_type: str | None = None) -> list:
+        """Aggregate search across ALL sources. Unified signature with SessionRecoveryEngine."""
         import contextlib
         results = []
         for source in self._sources:
             with contextlib.suppress(Exception):
-                results.extend(source.search_messages(pattern, filters))
+                results.extend(source.search_messages(query, message_type))
         return sorted(results, key=lambda m: m.timestamp or "", reverse=True)
 
     def list_sessions(self) -> list:
@@ -1494,3 +1494,312 @@ def get_multi_engine(config: dict | None = None):
         sources.append(GeminiCliSource(_Path(gc)))
 
     return MultiSourceEngine(sources)
+
+
+def _discover_sources(config: dict) -> dict:
+    """Scan standard install locations and merge discovered sources into config.
+
+    Priority: explicit config > auto-discovered.
+    Claude Code is always included via SessionRecoveryEngine (not in source_dirs).
+    Returns effective config dict with discovered paths added.
+
+    Standard auto-discovery locations:
+    - ~/.claude/projects/                                  (Claude Code — always)
+    - ~/.gemini/tmp/                                      (Gemini CLI if exists + non-empty)
+    - ~/Downloads/Google AI Studio/                       (AI Studio if exists)
+    - ~/Downloads/drive-download-*/Google AI Studio/      (AI Studio glob match)
+    - ~/Downloads/aistudio_sessions/Google AI Studio/     (AI Studio if exists)
+    """
+    import contextlib
+    home = Path.home()
+    effective = dict(config)
+    sd = dict(effective.get("source_dirs", {}))
+
+    # Gemini CLI: standard install at ~/.gemini/tmp/
+    if not sd.get("gemini_cli"):
+        gemini_tmp = home / ".gemini" / "tmp"
+        with contextlib.suppress(OSError):
+            if gemini_tmp.exists() and any(gemini_tmp.iterdir()):
+                sd["gemini_cli"] = str(gemini_tmp)
+
+    # AI Studio: scan ~/Downloads for standard export patterns
+    if not sd.get("aistudio"):
+        downloads = home / "Downloads"
+        found: list[str] = []
+        with contextlib.suppress(OSError):
+            # Pattern 1: ~/Downloads/Google AI Studio/
+            p1 = downloads / "Google AI Studio"
+            if p1.exists():
+                found.append(str(p1))
+            # Pattern 2: ~/Downloads/drive-download-*/Google AI Studio/
+            for d in sorted(downloads.glob("drive-download-*/Google AI Studio")):
+                found.append(str(d))
+            # Pattern 3: ~/Downloads/aistudio_sessions/Google AI Studio/
+            p3 = downloads / "aistudio_sessions" / "Google AI Studio"
+            if p3.exists():
+                found.append(str(p3))
+        if found:
+            sd["aistudio"] = found  # list of all found dirs
+
+    effective["source_dirs"] = sd
+    return effective
+
+
+def _detect_default_source(cfg: dict) -> str:
+    """Return 'all' if any non-Claude sources configured or discovered, else 'claude'."""
+    effective_cfg = _discover_sources(cfg)
+    sd = effective_cfg.get("source_dirs", {})
+    if sd.get("aistudio") or sd.get("gemini_cli"):
+        return "all"
+    return "claude"
+
+
+class SessionBackend:
+    """Uniform interface for all session backends. All CLI commands use this exclusively.
+
+    Wraps SessionRecoveryEngine (Claude single-source) or MultiSourceEngine (multiple sources).
+    Claude-specific operations return graceful empty results with clear messages
+    when called on non-Claude backends — no crashes, no silent failures.
+
+    Composition Root: constructed ONCE in app_callback → ctx.obj["engine"].
+    All commands read ctx.obj["engine"]; no globals, no hidden ordering.
+    """
+
+    def __init__(self, backend: "SessionRecoveryEngine | MultiSourceEngine",
+                 source: str) -> None:
+        self._backend = backend
+        self._source = source
+
+    @property
+    def source(self) -> str:
+        return self._source
+
+    @property
+    def _is_claude(self) -> bool:
+        return isinstance(self._backend, SessionRecoveryEngine)
+
+    def _warn_claude_only(self, feature: str) -> None:
+        """Print graceful warning for Claude-only feature on non-Claude backend."""
+        from rich.console import Console
+        Console(stderr=True).print(
+            f"[yellow]{feature} requires --source claude (Claude Code sessions only)[/yellow]"
+        )
+
+    # ── Cross-backend operations (work for all sources) ──────────────────────
+
+    def search_messages(self, query: str, message_type: str | None = None,
+                        tool: str | None = None) -> list:
+        """Unified search. Unifies SRE(query, type, tool) and MSE(query, type)."""
+        if self._is_claude:
+            return self._backend.search_messages(query, message_type, tool)
+        if tool:
+            from rich.console import Console
+            Console(stderr=True).print(
+                "[yellow]--tool filter not supported for non-Claude sources[/yellow]"
+            )
+        return self._backend.search_messages(query, message_type)
+
+    def search_messages_with_context(self, query: str, context: int = 3,
+                                     message_type: str | None = None,
+                                     tool: str | None = None) -> list:
+        if self._is_claude:
+            return self._backend.search_messages_with_context(
+                query, context, message_type, tool
+            )
+        return self.search_messages(query, message_type)  # no context for non-Claude
+
+    def get_sessions(self, project_filter: str | None = None,
+                     after: str | None = None, before: str | None = None) -> list:
+        """List sessions. Maps SRE.get_sessions() / MSE.list_sessions()."""
+        if self._is_claude:
+            return self._backend.get_sessions(project_filter, after, before)
+        return self._backend.list_sessions()
+
+    def get_messages(self, session_id: str,
+                     message_type: str | None = None) -> list:
+        """Get messages by session ID (substring match for non-Claude backends).
+
+        Uses MultiSourceEngine.list_sessions() + read_session() public API — no private attribute access.
+        """
+        if self._is_claude:
+            return self._backend.get_messages(session_id, message_type)
+        import contextlib
+        found: list = []
+        # Use public list_sessions() + read_session() — do NOT access _sources directly
+        for si in self._backend.list_sessions():
+            if session_id.lower() in si.session_id.lower():
+                with contextlib.suppress(Exception):
+                    msgs = self._backend.read_session(si)
+                    if message_type:
+                        msgs = [m for m in msgs if m.type.value == message_type]
+                    found.extend(msgs)
+                    break
+        return found
+
+    def get_statistics(self) -> dict:
+        """Get stats as a normalized dict (consistent return type for all backends).
+
+        Returns keys: total_sessions, total_files, total_versions.
+        Avoids RecoveryStatistics | dict union type — callers never need isinstance checks.
+        """
+        if self._is_claude:
+            s = self._backend.get_statistics()
+            return {k: getattr(s, k, 0) for k in
+                    ("total_sessions", "total_files", "total_versions")}
+        return self._backend.stats()
+
+    # Alias for backward compat with display helpers that called get_stats()
+    get_stats = get_statistics
+
+    # ── Claude-only operations — graceful degradation ────────────────────────
+
+    def search(self, pattern: str, filters=None) -> list:
+        if self._is_claude:
+            return self._backend.search(pattern, filters)
+        self._warn_claude_only("File search")
+        return []
+
+    def get_versions(self, filename: str) -> list:
+        if self._is_claude:
+            return self._backend.get_versions(filename)
+        self._warn_claude_only("File version history")
+        return []
+
+    def extract_final(self, filename: str, output_dir) -> object:
+        if self._is_claude:
+            return self._backend.extract_final(filename, output_dir)
+        self._warn_claude_only("File extraction")
+        return None
+
+    def extract_all(self, filename: str, output_dir) -> list:
+        if self._is_claude:
+            return self._backend.extract_all(filename, output_dir)
+        self._warn_claude_only("File extraction")
+        return []
+
+    def find_corrections(self, **kwargs) -> list:
+        if self._is_claude:
+            return self._backend.find_corrections(**kwargs)
+        self._warn_claude_only("Correction analysis")
+        return []
+
+    def analyze_planning_usage(self, **kwargs) -> list:
+        if self._is_claude:
+            return self._backend.analyze_planning_usage(**kwargs)
+        self._warn_claude_only("Planning command analysis")
+        return []
+
+    def cross_reference_session(self, *args, **kwargs) -> list:
+        if self._is_claude:
+            return self._backend.cross_reference_session(*args, **kwargs)
+        self._warn_claude_only("Cross-reference")
+        return []
+
+    def export_session_markdown(self, session_id: str) -> str:
+        if self._is_claude:
+            return self._backend.export_session_markdown(session_id)
+        self._warn_claude_only("Session export")
+        return ""
+
+    def get_clipboard_content(self, session_id: str) -> list:
+        if self._is_claude:
+            return self._backend.get_clipboard_content(session_id)
+        self._warn_claude_only("Clipboard content")
+        return []
+
+    def analyze_session(self, session_id: str) -> object:
+        if self._is_claude:
+            return self._backend.analyze_session(session_id)
+        self._warn_claude_only("Session analysis")
+        return None
+
+    def inspect_session(self, session_id: str) -> object:
+        """Deep analysis of one session (messages inspect command). Claude only."""
+        return self.analyze_session(session_id)
+
+    def timeline_session(self, session_id: str, preview_chars: int = 150) -> list:
+        if self._is_claude:
+            return self._backend.timeline_session(session_id, preview_chars)
+        self._warn_claude_only("Session timeline")
+        return []
+
+    def get_original_path(self, filename: str) -> str | None:
+        if self._is_claude:
+            return self._backend.get_original_path(filename)
+        return None
+
+
+def get_session_backend(
+    source: str | None = None,
+    claude_dir: str | None = None,
+    config: dict | None = None,
+) -> SessionBackend:
+    """Build SessionBackend. Auto-discovers sources if source is None.
+
+    Args:
+        source: "claude", "aistudio", "gemini", "all", or None (auto-detect)
+        claude_dir: Override Claude config dir (default: ~/.claude)
+        config: Config dict (default: load from config.json)
+
+    Returns:
+        SessionBackend wrapping either SessionRecoveryEngine or MultiSourceEngine.
+
+    Strategy:
+        source=None      → auto: 'all' if any non-Claude sources discovered, else 'claude'
+        source="claude"  → Claude Code only (SessionRecoveryEngine)
+        source="aistudio"→ AI Studio only
+        source="gemini"  → Gemini CLI only
+        source="all"     → all discovered/configured sources via MultiSourceEngine
+    """
+    import contextlib
+    from ai_session_tools.config import load_config
+    from ai_session_tools.sources.aistudio import AiStudioSource
+    from ai_session_tools.sources.gemini_cli import GeminiCliSource
+
+    if config is None:
+        config = load_config()
+
+    # Merge auto-discovered sources into config (explicit config takes priority)
+    effective_cfg = _discover_sources(config)
+    effective_source = source if source is not None else _detect_default_source(config)
+
+    if effective_source == "claude":
+        base: Path
+        if claude_dir:
+            base = Path(claude_dir).expanduser()
+        elif env_d := os.getenv("CLAUDE_CONFIG_DIR"):
+            base = Path(env_d).expanduser()
+        else:
+            base = Path.home() / ".claude"
+        projects = Path(os.getenv(
+            "AI_SESSION_TOOLS_PROJECTS", str(base / "projects")
+        )).expanduser()
+        recovery = Path(os.getenv(
+            "AI_SESSION_TOOLS_RECOVERY", str(base / "recovery")
+        )).expanduser()
+        backend = SessionRecoveryEngine(projects, recovery)
+        return SessionBackend(backend, "claude")
+
+    # Non-Claude: build MultiSourceEngine with requested sources
+    sources: list = []
+    sd = effective_cfg.get("source_dirs", {})
+
+    if effective_source in ("aistudio", "all"):
+        with contextlib.suppress(Exception):
+            ai = sd.get("aistudio")
+            if ai:
+                dirs = [ai] if isinstance(ai, str) else ai
+                sources.append(AiStudioSource([Path(p) for p in dirs]))
+
+    if effective_source in ("gemini", "all"):
+        with contextlib.suppress(Exception):
+            gc = sd.get("gemini_cli")
+            if gc:
+                sources.append(GeminiCliSource(Path(gc)))
+
+    if not sources:
+        # Nothing configured/discovered — fall back to Claude
+        return get_session_backend("claude", claude_dir, config)
+
+    backend = MultiSourceEngine(sources)
+    return SessionBackend(backend, effective_source)
