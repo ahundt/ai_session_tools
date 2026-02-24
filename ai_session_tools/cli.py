@@ -123,14 +123,13 @@ class _CommandsFirstGroup(TyperGroup):
 app = typer.Typer(
     cls=_CommandsFirstGroup,
     help=(
-        "Search, analyze, and organize AI sessions from Claude Code, AI Studio, and Gemini CLI.\n\n"
-        "Sources are auto-detected from standard locations. Run 'aise source list' to see what's active.\n\n"
-        "⚠️  --source must precede the subcommand:\n"
-        "  aise --source aistudio list  ✓   aise list --source aistudio  ✗"
+        "Search and analyze AI sessions and conversations from Claude Code, AI Studio, and Gemini CLI.\n\n"
+        "Sources auto-detected from standard locations. Run 'aise source list' to see what's active.\n"
+        "Common commands accept --source directly: 'aise list --source aistudio' ✓"
     ),
 )
 files_app = typer.Typer(
-    help="Search, extract, and track source files that Claude wrote or edited across sessions.",
+    help="Search, extract, and track files that Claude wrote or edited across sessions.",
 )
 messages_app = typer.Typer(
     help="Search and read user/assistant conversation messages.",
@@ -549,9 +548,10 @@ def app_callback(
     source: Optional[str] = typer.Option(
         None, "--source",
         help=(
-            "Backend: claude | aistudio | gemini | all. "
-            "Default: auto-detected (claude only, or all when other sources are present). "
-            "Must precede subcommand: 'aise --source aistudio list' ✓"
+            "Sessions from: claude | aistudio | gemini | all. "
+            "Default: all auto-detected sources. "
+            "Note: as a global flag this must precede the subcommand "
+            "('aise --source aistudio list'). Most commands also accept --source directly."
         ),
     ),
 ) -> None:
@@ -582,6 +582,14 @@ def app_callback(
 
 
 # ── Engine factory ────────────────────────────────────────────────────────────
+
+def _resolve_engine(ctx: typer.Context, source: Optional[str] = None) -> "SessionBackend":
+    """Return engine from ctx.obj, rebuilding with a different source if --source given per-command."""
+    if source:
+        cfg = load_config()
+        return get_session_backend(source=source, config=cfg, claude_dir=_g_claude_dir)
+    return ctx.obj.get("engine") if ctx.obj else None
+
 
 def get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] = None) -> SessionRecoveryEngine:
     """
@@ -2072,6 +2080,7 @@ _register_alias(tools_app, _tools_search_cmd, "search", "find")
 @app.command("list")
 def list_sessions(
     ctx: typer.Context,
+    source: Optional[str] = typer.Option(None, "--source", help="Sessions from: claude | aistudio | gemini | all. Overrides global --source."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
     after: Optional[str] = typer.Option(None, "--after", help="Only sessions after this date (e.g. 2026-01-15)."),
     before: Optional[str] = typer.Option(None, "--before", help="Only sessions before this date."),
@@ -2080,20 +2089,14 @@ def list_sessions(
 ) -> None:
     """List sessions with metadata.
 
-    Use --source to switch backends:
-        aise list                              # Claude Code sessions (default)
-        aise --source aistudio list            # AI Studio sessions
-        aise --source gemini list              # Gemini CLI sessions
-        aise --source all list                 # All configured sources
-
     Examples:
-        aise list                              # all Claude Code sessions
+        aise list                              # all configured sessions
+        aise list --source aistudio            # AI Studio sessions only
         aise list --project myproject          # filter by project
         aise list --after 2026-01-01           # sessions since Jan 1
         aise list --format json                # JSON output
     """
-    # Get backend from composition root (ctx.obj injected by app_callback)
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, source)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2120,20 +2123,20 @@ def _root_search_cmd(
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
     tool: Optional[str] = typer.Option(None, "--tool",
         help="[messages/tools] Filter for tool call invocations (e.g. Bash, Edit, Write). Auto-routes to messages domain."),
+    source: Optional[str] = typer.Option(None, "--source", help="Sessions from: claude | aistudio | gemini | all. Overrides global --source."),
 ) -> None:
     """Search messages, files, and tool calls across all sources.
 
     Accessible as both 'search' and 'find' at the root level (aliases).
 
     Examples:
-        aise search                                          # list all source files
-        aise search files --pattern "*.py"                   # Python files only
-        aise search messages --query "error"                 # messages with "error"
+        aise search messages --query "error"                 # messages containing "error"
+        aise search messages --query "error" --source claude # Claude sessions only
+        aise search files --pattern "*.py"                   # Python files edited by Claude
         aise search tools --tool Write --query "login"       # Write calls with "login"
         aise search --tool Bash --query "git commit"         # auto-routes to messages
-        aise find files --pattern "*.py"                     # find is an alias
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, source)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2231,6 +2234,7 @@ def get(
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
     max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = show full message. Default: 0"),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    source: Optional[str] = typer.Option(None, "--source", help="Sessions from: claude | aistudio | gemini | all. Overrides global --source."),
 ) -> None:
     """Read messages from one specific session.
 
@@ -2240,7 +2244,7 @@ def get(
         aise get ab841016
         aise get ab841016 --type user --limit 50
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, source)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2249,17 +2253,18 @@ def get(
 
 
 @app.command()
-def stats(ctx: typer.Context) -> None:
+def stats(
+    ctx: typer.Context,
+    source: Optional[str] = typer.Option(None, "--source", help="Sessions from: claude | aistudio | gemini | all. Overrides global --source."),
+) -> None:
     """Show session, file, and version counts per source.
 
-    Use --source to switch backends:
-        aise stats                   # Claude Code sessions (default)
-        aise --source aistudio stats # AI Studio session count
-        aise --source gemini stats   # Gemini CLI session count
-        aise --source all stats      # All configured sources
+    Examples:
+        aise stats                        # all configured sources
+        aise stats --source aistudio      # AI Studio only
+        aise stats --source claude        # Claude Code only
     """
-    # Get backend from composition root (ctx.obj injected by app_callback)
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, source)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
