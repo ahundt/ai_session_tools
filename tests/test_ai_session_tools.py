@@ -665,7 +665,7 @@ class TestMessagesCorrections:
     def test_corrections_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "corrections"],
+            app, ["--source", "claude", "messages", "corrections"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -673,7 +673,7 @@ class TestMessagesCorrections:
     def test_corrections_has_category(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "corrections"],
+            app, ["--source", "claude", "messages", "corrections"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "skip_step" in result.output or "you forgot" in result.output
@@ -681,7 +681,7 @@ class TestMessagesCorrections:
     def test_corrections_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "corrections", "--format", "json"],
+            app, ["--source", "claude", "messages", "corrections", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -692,7 +692,7 @@ class TestMessagesCorrections:
         projects = _make_projects_with_sessions(tmp_path)
         # Custom pattern that matches "start the feature" (not a default correction)
         result = runner.invoke(
-            app, ["messages", "corrections", "--pattern", "custom:start the feature"],
+            app, ["--source", "claude", "messages", "corrections", "--pattern", "custom:start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -702,7 +702,7 @@ class TestMessagesCorrections:
         projects = _make_projects_with_sessions(tmp_path)
         # Pattern that won't match anything — built-in "you forgot" should NOT appear
         result = runner.invoke(
-            app, ["messages", "corrections", "--pattern", "custom:xyzzy_nomatch_xyzzy"],
+            app, ["--source", "claude", "messages", "corrections", "--pattern", "custom:xyzzy_nomatch_xyzzy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -712,7 +712,7 @@ class TestMessagesCorrections:
     def test_corrections_bad_pattern_format_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "corrections", "--pattern", "no-colon-here"],
+            app, ["--source", "claude", "messages", "corrections", "--pattern", "no-colon-here"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -746,7 +746,7 @@ class TestMessagesPlanning:
     def test_planning_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "planning"],
+            app, ["--source", "claude", "messages", "planning"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -755,7 +755,7 @@ class TestMessagesPlanning:
     def test_planning_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "planning", "--format", "json"],
+            app, ["--source", "claude", "messages", "planning", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -767,7 +767,7 @@ class TestMessagesPlanning:
         empty_projects = tmp_path / "empty_projects"
         empty_projects.mkdir()
         result = runner.invoke(
-            app, ["messages", "planning"],
+            app, ["--source", "claude", "messages", "planning"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(empty_projects)},
         )
         assert result.exit_code == 0
@@ -777,7 +777,7 @@ class TestMessagesPlanning:
         projects = _make_projects_with_sessions(tmp_path)
         # /ar:plannew is in session 1; /custom is not — result should have only /ar:plannew
         result = runner.invoke(
-            app, ["messages", "planning", "--commands", "/ar:plannew"],
+            app, ["--source", "claude", "messages", "planning", "--commands", "/ar:plannew"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -788,7 +788,7 @@ class TestMessagesPlanning:
     def test_planning_custom_commands_no_match(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "planning", "--commands", "/xyzzy_nomatch"],
+            app, ["--source", "claude", "messages", "planning", "--commands", "/xyzzy_nomatch"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -798,7 +798,7 @@ class TestMessagesPlanning:
         projects = _make_projects_with_sessions(tmp_path)
         # Both /ar:plannew (s1) and /ar:pn (s2) are in fixture
         result = runner.invoke(
-            app, ["messages", "planning", "--commands", "/ar:plannew,/ar:pn"],
+            app, ["--source", "claude", "messages", "planning", "--commands", "/ar:plannew,/ar:pn"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
