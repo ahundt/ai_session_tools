@@ -1653,7 +1653,11 @@ class SessionBackend:
             s = self._backend.get_statistics()
             return {k: getattr(s, k, 0) for k in
                     ("total_sessions", "total_files", "total_versions")}
-        return self._backend.stats()
+        raw = self._backend.stats()
+        # MultiSourceEngine.stats() returns source-specific keys (e.g. aistudio_sessions=1167).
+        # Normalize to total_sessions for display helpers that expect that key.
+        total = sum(v for v in raw.values() if isinstance(v, int))
+        return {"total_sessions": total, "total_files": 0, "total_versions": 0, **raw}
 
     # Alias for backward compat with display helpers that called get_stats()
     get_stats = get_statistics

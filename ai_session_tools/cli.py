@@ -1507,16 +1507,28 @@ def _do_get(
     console.print(f"\n[bold]Found {len(messages_list)} messages[/bold]")
 
 
-def _do_stats(engine: SessionRecoveryEngine) -> None:
-    """Show recovery statistics."""
+def _do_stats(engine) -> None:
+    """Show recovery statistics. Accepts SessionBackend (dict) or SessionRecoveryEngine (dataclass)."""
     stats_data = engine.get_statistics()
+    if isinstance(stats_data, dict):
+        sessions = stats_data.get("total_sessions", 0)
+        files = stats_data.get("total_files", 0)
+        versions = stats_data.get("total_versions", 0)
+        largest = stats_data.get("largest_file", "—")
+        largest_edits = stats_data.get("largest_file_edits", 0)
+    else:
+        sessions = stats_data.total_sessions
+        files = stats_data.total_files
+        versions = stats_data.total_versions
+        largest = stats_data.largest_file
+        largest_edits = stats_data.largest_file_edits
     console.print(
         f"""
 [bold cyan]Recovery Statistics[/bold cyan]
-  Sessions:      {stats_data.total_sessions}
-  Files:         {stats_data.total_files}
-  Versions:      {stats_data.total_versions}
-  Largest File:  {stats_data.largest_file} ({stats_data.largest_file_edits} edits)
+  Sessions:      {sessions}
+  Files:         {files}
+  Versions:      {versions}
+  Largest File:  {largest} ({largest_edits} edits)
 """
     )
 
