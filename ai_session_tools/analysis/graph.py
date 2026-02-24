@@ -57,28 +57,34 @@ class AiStudioFilenameStrategy:
     """Detects 'Branch of X', 'Copy of X', 'Name vN' patterns. Confidence: HIGH."""
 
     def detect(self, nodes: list[GraphNode]) -> list[GraphEdge]:
-        name_idx = {n.id.lower(): n for n in nodes}
+        # Build title-to-nodes index (titles not unique across source dirs — use list)
+        name_idx: dict[str, list[GraphNode]] = defaultdict(list)
+        for n in nodes:
+            name_idx[n.title.lower()].append(n)
         edges = []
         for node in nodes:
-            parent_id, edge_type = self._find_parent(node.id, name_idx)
+            parent_id, edge_type = self._find_parent(node.title, name_idx)
             if parent_id:
                 edges.append(GraphEdge(parent_id, node.id, edge_type, 0.95, "filename_pattern"))
         return edges
 
-    def _find_parent(self, name: str, idx: dict) -> tuple[str | None, str]:
+    def _find_parent(self, name: str, idx: dict[str, list]) -> tuple[str | None, str]:
         lower = name.lower()
         if m := re.match(r"branch of (.+)", lower):
-            parent = m.group(1).strip()
-            return (idx[parent].id if parent in idx else None), "branch"
+            parent_title = m.group(1).strip()
+            matches = idx.get(parent_title, [])
+            return (matches[0].id if len(matches) == 1 else None), "branch"
         if m := re.match(r"copy of (.+)", lower):
-            parent = m.group(1).strip()
-            return (idx[parent].id if parent in idx else None), "copy"
+            parent_title = m.group(1).strip()
+            matches = idx.get(parent_title, [])
+            return (matches[0].id if len(matches) == 1 else None), "copy"
         if m := re.search(r"^(.*?)\s+v(\d+)$", name, re.I):
             base, v = m.group(1).strip().lower(), int(m.group(2))
             if v > 1:
-                for candidate in (f"{base} v{v-1}", base):
-                    if candidate in idx:
-                        return idx[candidate].id, "version"
+                for candidate_title in (f"{base} v{v-1}", base):
+                    matches = idx.get(candidate_title, [])
+                    if len(matches) == 1:
+                        return matches[0].id, "version"
         return None, ""
 
 
@@ -164,7 +170,7 @@ def build_graph(records: list[dict], strategies: list | None = None, config: dic
     now = datetime.now(timezone.utc).isoformat()
     nodes = [
         GraphNode(
-            id=r["name"],
+            id=str(Path(r.get("filepath", r["name"])).expanduser()),
             source_format=r.get("source_format", "aistudio_json"),
             title=r["name"],
             project_hash=r.get("project_hash", ""),

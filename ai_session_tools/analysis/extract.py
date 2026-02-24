@@ -10,7 +10,6 @@ Licensed under the Apache License, Version 2.0
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 
@@ -100,7 +99,9 @@ def extract_history(session_file: str | Path, output_file: str | Path) -> int:
         context = get_context_note(i)
         lines.append(f"## {i}. Instruction\n\n")
         lines.append(f"*Context: {context}*\n\n")
-        lines.append(f"> {clean}\n\n---\n\n")
+        quoted_lines = "\n".join(f"> {ln}" if ln.strip() else ">" for ln in clean.splitlines())
+        quoted = quoted_lines if quoted_lines.strip() else "> (empty)"
+        lines.append(f"{quoted}\n\n---\n\n")
 
     output_path.write_text("".join(lines), encoding="utf-8")
     print(f"Written {len(user_messages)} entries to: {output_path}")
@@ -118,7 +119,7 @@ def main() -> None:
     if not session_file or not Path(session_file).exists():
         # Auto-discover: find most recent session-2026-02-23 file
         gemini_tmp = Path(cfg.get("source_dirs", {}).get("gemini_cli", str(Path.home() / ".gemini/tmp")))
-        candidates = sorted(gemini_tmp.glob("*/chats/session-2026-02-23*.json"))
+        candidates = sorted(gemini_tmp.glob("*/chats/session-*.json"))
         if candidates:
             session_file = str(candidates[-1])
         else:

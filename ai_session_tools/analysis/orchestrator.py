@@ -92,8 +92,11 @@ def build_symlinks(
     created = 0
 
     for rec in records:
-        filepath = rec.get("filepath", "")
-        if not filepath or not Path(filepath).exists():
+        raw_fp = rec.get("filepath", "")
+        if not raw_fp:
+            continue
+        filepath = str(Path(raw_fp).expanduser())
+        if not Path(filepath).exists():
             continue
         name = rec["name"]
         assignments = assign_taxonomy(rec, project_map, workflow_map)

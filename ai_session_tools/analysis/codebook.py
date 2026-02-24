@@ -62,17 +62,20 @@ def load_keyword_maps(org_dir: Path) -> dict[str, dict[str, list[str]]]:
     return maps
 
 
-def compile_codes(codes: dict[str, list[str]]) -> dict[str, re.Pattern[str]]:
-    """Pre-compile codebook markers to regex patterns.
+def compile_codes(codes: dict[str, list[str]], min_marker_len: int = 5) -> dict[str, re.Pattern[str]]:
+    """Pre-compile codebook markers to regex patterns with word boundaries.
 
-    Complexity: O(K*M) once at startup, then O(K*T) per session (not O(K*M*T)).
-    Call once and reuse across all sessions.
+    Complexity: O(K*M) once at startup, then O(K*T) per session.
+    min_marker_len: skip markers shorter than this to avoid false positives.
+    Word boundaries (\b) prevent partial-word matches.
     """
-    return {
-        code: re.compile("|".join(re.escape(m) for m in markers), re.IGNORECASE)
-        for code, markers in codes.items()
-        if markers
-    }
+    patterns = {}
+    for code, markers in codes.items():
+        valid = [m for m in markers if len(m.strip()) >= min_marker_len]
+        if valid:
+            pattern_str = "|".join(r"\b" + re.escape(m) for m in valid)
+            patterns[code] = re.compile(pattern_str, re.IGNORECASE)
+    return patterns
 
 
 def get_ngrams(text: str, n: int) -> list[str]:

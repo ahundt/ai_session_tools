@@ -64,9 +64,14 @@ class SessionRecord:
         return self.user_text[:max_chars]
 
     def to_db_dict(self) -> dict:
-        """Serialize for session_db.json — excludes user_text."""
+        """Serialize for session_db.json — excludes user_text. Stores ~/... paths (no PII)."""
         d = asdict(self)
         d.pop("user_text", None)
+        home = str(Path.home())
+        for key in ("source_dir", "filepath"):
+            val = d.get(key, "")
+            if val and val.startswith(home):
+                d[key] = "~" + val[len(home):]
         return d
 
 
@@ -203,6 +208,7 @@ def run_analysis(marker_window: int | None = None) -> list[SessionRecord]:
     db_file = org_dir / "session_db.json"
     vocab_output = org_dir / cfg.get("vocab_output_filename", "VOCABULARY_ANALYSIS.md")
     mw = marker_window or cfg.get("marker_window", 25_000)
+    md_mw = cfg.get("md_marker_window", 2_000)  # .md files include model responses; limit window
 
     # Load scoring weights
     scoring_weights: dict[str, int] = {
@@ -252,12 +258,48 @@ def run_analysis(marker_window: int | None = None) -> list[SessionRecord]:
                 has_transcript="transcript" in lower_sample,
             )
 
-            apply_codes(rec, tech_patterns, role_patterns, keyword_maps, scoring_weights, marker_window=mw)
+            effective_mw = md_mw if source_format == "markdown" else mw
+            apply_codes(rec, tech_patterns, role_patterns, keyword_maps, scoring_weights, marker_window=effective_mw)
             records.append(rec)
 
             # Vocabulary: full text, no limit
             tri.update(get_ngrams(user_text, 3))
             quad.update(get_ngrams(user_text, 4))
+
+    # Also process Gemini CLI sessions if configured (Gap 2 fix)
+    gemini_cli_dir_cfg = cfg.get("source_dirs", {}).get("gemini_cli", "")
+    if gemini_cli_dir_cfg:
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        gemini_source = GeminiCliSource(Path(gemini_cli_dir_cfg))
+        for session_info in gemini_source.stream_sessions():
+            with contextlib.suppress(Exception):
+                messages = gemini_source.read_session(session_info)
+                if not messages:
+                    continue
+                user_text = " ".join(m.content for m in messages if m.type.value == "user")
+                if not user_text.strip():
+                    continue
+                name = session_info.session_id
+                era = _detect_era(name, user_text)
+                lower_sample = user_text[:5000].lower()
+                rec = SessionRecord(
+                    name=name,
+                    source_dir=gemini_cli_dir_cfg,
+                    filepath=str(Path(gemini_cli_dir_cfg) / name),
+                    source_format="gemini_cli",
+                    user_text=user_text,
+                    chunk_count=len(messages),
+                    user_chunk_count=sum(1 for m in messages if m.type.value == "user"),
+                    era=era,
+                    has_srt="srt" in lower_sample,
+                    has_transcript="transcript" in lower_sample,
+                    project_hash=getattr(session_info, "project_hash", ""),
+                )
+                apply_codes(rec, tech_patterns, role_patterns, keyword_maps, scoring_weights, marker_window=mw)
+                records.append(rec)
+                tri.update(get_ngrams(user_text, 3))
+                quad.update(get_ngrams(user_text, 4))
+    print(f"Total after all sources: {len(records)} sessions")
 
     compute_descendant_boost(records, scoring_weights.get("descendant_boost", 15))
 
