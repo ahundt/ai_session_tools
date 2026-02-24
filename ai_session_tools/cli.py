@@ -124,47 +124,22 @@ app = typer.Typer(
     cls=_CommandsFirstGroup,
     help=(
         "Search, analyze, and organize AI sessions from Claude Code, AI Studio, and Gemini CLI.\n\n"
-        "Sources are auto-detected from standard install locations. Use --source to narrow to one backend.\n\n"
-        "⚠️  IMPORTANT: Global --source flag MUST precede subcommand:\n"
-        "  ✓ aise --source aistudio list     (correct)\n"
-        "  ✗ aise list --source aistudio     (incorrect — flag silently ignored)\n\n"
-        "Standard source locations (auto-discovered):\n"
-        "  Claude Code: ~/.claude/projects/                              (always included)\n"
-        "  Gemini CLI:  ~/.gemini/tmp/                                   (if exists and non-empty)\n"
-        "  AI Studio:   ~/Downloads/Google AI Studio/                    (if exists)\n"
-        "               ~/Downloads/drive-download-*/Google AI Studio/   (glob, if matched)\n"
-        "               ~/Downloads/aistudio_sessions/Google AI Studio/  (if exists)\n"
-        "  Explicit:    config.json source_dirs.aistudio[] (takes priority over auto-discovery)\n\n"
-        "Override defaults with environment variables:\n\n"
-        "  CLAUDE_CONFIG_DIR          Path to Claude config dir (default: ~/.claude)\n"
-        "  AI_SESSION_TOOLS_PROJECTS  Path to Claude projects dir (default: ~/.claude/projects)\n"
-        "  AI_SESSION_TOOLS_RECOVERY  Path to recovery output dir (default: ~/.claude/recovery)\n"
-        "  AI_SESSION_TOOLS_CONFIG    Path to config JSON (default: OS app config dir)"
+        "Sources are auto-detected from standard locations. Run 'aise source list' to see what's active.\n\n"
+        "⚠️  --source must precede the subcommand:\n"
+        "  aise --source aistudio list  ✓   aise list --source aistudio  ✗"
     ),
 )
 files_app = typer.Typer(
-    help=(
-        "Search, extract, and inspect source files (*.py, *.md, *.rs, etc.) found in Claude Code session data.\n\n"
-        "These are files that Claude wrote or edited during sessions — not the JSONL session files themselves."
-    ),
+    help="Search, extract, and track source files that Claude wrote or edited across sessions.",
 )
 messages_app = typer.Typer(
-    help=(
-        "Search and read user/assistant conversation messages stored in Claude Code session JSONL files.\n\n"
-        "Each session contains timestamped messages with a type (user or assistant) and text content."
-    ),
+    help="Search and read user/assistant conversation messages.",
 )
 export_app = typer.Typer(
-    help=(
-        "Export Claude Code session messages to markdown.\n\n"
-        "Use 'export session' for a single session, 'export recent' for bulk export."
-    ),
+    help="Export session messages to markdown. Use 'session' for one session, 'recent' for bulk.",
 )
 tools_app = typer.Typer(
-    help=(
-        "Search tool invocations (Bash, Edit, Write, Read, etc.) from Claude Code sessions.\n\n"
-        "Tool calls are stored inside assistant messages in session JSONL files."
-    ),
+    help="Search tool invocations (Bash, Edit, Write, Read, etc.) from Claude Code sessions.",
 )
 
 config_app = typer.Typer(
@@ -179,10 +154,7 @@ config_app = typer.Typer(
 )
 
 source_app = typer.Typer(
-    help=(
-        "Manage session source directories. Sources are auto-detected from standard\n"
-        "locations on startup; use these commands to view or override detection."
-    ),
+    help="Add, remove, or list session source directories.",
 )
 
 app.add_typer(files_app, name="files", rich_help_panel="Domain Groups")
@@ -566,34 +538,20 @@ def app_callback(
     ctx: typer.Context,
     claude_dir: Optional[str] = typer.Option(
         None, "--claude-dir",
-        help=(
-            "Path to the Claude configuration directory. "
-            "Default: $CLAUDE_CONFIG_DIR if set, otherwise ~/.claude. "
-            "Example: --claude-dir /Volumes/External/.claude"
-        ),
+        help="Path to Claude config dir. Default: ~/.claude.",
         envvar="CLAUDE_CONFIG_DIR",
     ),
     config: Optional[str] = typer.Option(
         None, "--config",
-        help=(
-            "Path to the ai_session_tools config JSON file. "
-            "Default: OS config dir / ai_session_tools / config.json "
-            "(macOS: ~/Library/Application Support/ai_session_tools/config.json, "
-            "Linux: ~/.config/ai_session_tools/config.json). "
-            "Also overridable via AI_SESSION_TOOLS_CONFIG env var."
-        ),
+        help="Path to config JSON. Default: OS app config dir (macOS: ~/Library/Application Support/ai_session_tools/config.json).",
         envvar="AI_SESSION_TOOLS_CONFIG",
     ),
     source: Optional[str] = typer.Option(
         None, "--source",
         help=(
-            "Narrow to one session backend: claude, aistudio, gemini, or all. "
-            "Default: auto-detected (claude if no other sources found; all if Gemini or AI Studio sources are present). "
-            "⚠️  MUST PRECEDE SUBCOMMAND: 'aise --source aistudio list' (not 'aise list --source aistudio'). "
-            "claude: Claude Code JSONL sessions in ~/.claude/projects/. "
-            "aistudio: Google AI Studio JSON/md sessions (paths from config or auto-discovered). "
-            "gemini: Gemini CLI JSON sessions in ~/.gemini/tmp/. "
-            "all: all configured sources combined."
+            "Backend: claude | aistudio | gemini | all. "
+            "Default: auto-detected (claude only, or all when other sources are present). "
+            "Must precede subcommand: 'aise --source aistudio list' ✓"
         ),
     ),
 ) -> None:
@@ -2163,7 +2121,7 @@ def _root_search_cmd(
     tool: Optional[str] = typer.Option(None, "--tool",
         help="[messages/tools] Filter for tool call invocations (e.g. Bash, Edit, Write). Auto-routes to messages domain."),
 ) -> None:
-    """Search or find source files and/or conversation messages.
+    """Search messages, files, and tool calls across all sources.
 
     Accessible as both 'search' and 'find' at the root level (aliases).
 
@@ -2214,7 +2172,7 @@ def extract(
         help="Show what would be extracted/written without producing any output.",
     ),
 ) -> None:
-    """Extract a source file from Claude Code session data (stdout by default).
+    """Extract the latest (or a specific) version of a file from session history.
 
     Equivalent to 'aise files extract'. Use 'aise search' to find available filenames.
     By default prints the latest version to stdout (pipe-friendly).
@@ -2236,7 +2194,7 @@ def history(
     stdout_mode: bool = typer.Option(False, "--stdout", help="Print all versions to stdout with === v1 === headers."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --export: show what would be written without writing."),
 ) -> None:
-    """Show version history of a source file (read-only by default).
+    """Show all recorded versions of a file across sessions.
 
     Equivalent to 'aise files history'. Creates a table of all recorded versions.
     READ-ONLY — no files are written unless you use --export or --stdout.
@@ -2274,10 +2232,9 @@ def get(
     max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = show full message. Default: 0"),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ) -> None:
-    """Read messages from one specific Claude Code session.
+    """Read messages from one specific session.
 
-    Equivalent to 'aise messages get'. Session IDs are UUIDs found in ~/.claude/projects/
-    or in output from 'aise list'.
+    Equivalent to 'aise messages get'. Find session IDs with 'aise list'.
 
     Examples:
         aise get ab841016
@@ -2293,7 +2250,7 @@ def get(
 
 @app.command()
 def stats(ctx: typer.Context) -> None:
-    """Show counts of sessions, files, versions, and the most-edited file.
+    """Show session, file, and version counts per source.
 
     Use --source to switch backends:
         aise stats                   # Claude Code sessions (default)
@@ -2560,7 +2517,7 @@ def cmd_analyze(
         help="Override config.org_dir for this run."
     ),
 ) -> None:
-    """Analyze and organize all configured AI sessions.
+    """Run the full analysis pipeline: qualitative coding → graph → taxonomy symlinks.
 
     Runs the full pipeline automatically. Stages are skipped when inputs
     have not changed since the last run (idempotent).
