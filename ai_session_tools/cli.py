@@ -2167,6 +2167,7 @@ _register_alias(tools_app, _tools_search_cmd, "search", "find")
 
 @app.command("list")
 def list_sessions(
+    ctx: typer.Context,
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
     after: Optional[str] = typer.Option(None, "--after", help="Only sessions after this date (e.g. 2026-01-15)."),
     before: Optional[str] = typer.Option(None, "--before", help="Only sessions before this date."),
@@ -2187,10 +2188,12 @@ def list_sessions(
         aise list --after 2026-01-01           # sessions since Jan 1
         aise list --format json                # JSON output
     """
-    if _g_source != "claude":
-        _do_multi_list(_g_source, limit, fmt)
-    else:
-        _do_list_sessions(get_engine(), project, after, before, limit, fmt)
+    # Get backend from composition root (ctx.obj injected by app_callback)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_list_sessions(engine, project, after, before, limit, fmt)
 
 
 def _root_search_cmd(
@@ -2324,7 +2327,7 @@ def get(
 
 
 @app.command()
-def stats() -> None:
+def stats(ctx: typer.Context) -> None:
     """Show counts of sessions, files, versions, and the most-edited file.
 
     Use --source to switch backends:
@@ -2333,10 +2336,12 @@ def stats() -> None:
         aise --source gemini stats   # Gemini CLI session count
         aise --source all stats      # All configured sources
     """
-    if _g_source != "claude":
-        _do_multi_stats(_g_source)
-    else:
-        _do_stats(get_engine())
+    # Get backend from composition root (ctx.obj injected by app_callback)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_stats(engine)
 
 
 # ── Config app ───────────────────────────────────────────────────────────────
