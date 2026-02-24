@@ -7,7 +7,7 @@ name = "ai_session_tools"
 version = "0.2.0"
 description = "Modern Python library for analyzing Claude Code session data"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "Andrew Hundt", email = "ATHundt@gmail.com"}
@@ -19,13 +19,8 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries",
     "Topic :: Utilities",
 ]
@@ -93,7 +88,7 @@ exclude_lines = [
 
 [tool.ruff]
 line-length = 160
-target-version = "py38"
+target-version = "py312"
 exclude = [
     ".git",
     "__pycache__",
@@ -124,7 +119,7 @@ ignore = [
 known-first-party = ["ai_session_tools"]
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

@@ -37,7 +37,7 @@ from ai_session_tools import (
 )
 from ai_session_tools.cli import app
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 @pytest.fixture
@@ -4785,3 +4785,473 @@ class TestTimelineNoSessionError:
         )
         # More precise: after fix, error should mention events/content, not "session not found"
         # We test that the CLI exits non-zero (always true) — the message test is in the impl
+
+
+# ─── Tests for new multi-source extensions ────────────────────────────────────
+
+
+class TestAiStudioSource:
+    """Unit tests for AiStudioSource (chunkedPrompt JSON + legacy .md)."""
+
+    def _make_aistudio_json(self, tmp_path: Path, name: str, chunks: list) -> Path:
+        data = {"chunkedPrompt": {"chunks": chunks}}
+        f = tmp_path / name
+        f.write_text(json.dumps(data), encoding="utf-8")
+        return f
+
+    def test_stream_sessions_yields_session_info(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        self._make_aistudio_json(tmp_path, "test_session", [
+            {"role": "user", "text": "hello", "tokenCount": 1},
+        ])
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 1
+        assert sessions[0].session_id == "test_session"
+        assert sessions[0].project_dir == str(tmp_path)
+
+    def test_read_session_parses_chunks(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        self._make_aistudio_json(tmp_path, "mysession", [
+            {"role": "user", "text": "hello world", "tokenCount": 2},
+            {"role": "model", "text": "hi there", "tokenCount": 2},
+        ])
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = list(src.stream_sessions())
+        msgs = src.read_session(sessions[0])
+        assert len(msgs) == 2
+        assert msgs[0].type.value == "user"
+        assert msgs[0].content == "hello world"
+        assert msgs[1].type.value == "assistant"
+
+    def test_read_session_legacy_md(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        md_file = tmp_path / "old_session.md"
+        md_file.write_text("# Old session\n\nSome content", encoding="utf-8")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 1
+        msgs = src.read_session(sessions[0])
+        assert len(msgs) == 1
+        assert "Old session" in msgs[0].content
+
+    def test_skips_binary_extensions(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        (tmp_path / "image.png").write_bytes(b"\x89PNG")
+        (tmp_path / "doc.pdf").write_bytes(b"%PDF")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 0
+
+    def test_search_messages_finds_matches(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        self._make_aistudio_json(tmp_path, "session1", [
+            {"role": "user", "text": "transcription SRT file", "tokenCount": 3},
+        ])
+        self._make_aistudio_json(tmp_path, "session2", [
+            {"role": "user", "text": "unrelated content", "tokenCount": 2},
+        ])
+        src = AiStudioSource(source_dirs=[tmp_path])
+        results = src.search_messages("SRT")
+        assert len(results) == 1
+        assert "transcription" in results[0].content
+
+    def test_stats_returns_count(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        self._make_aistudio_json(tmp_path, "s1", [{"role": "user", "text": "a"}])
+        self._make_aistudio_json(tmp_path, "s2", [{"role": "user", "text": "b"}])
+        src = AiStudioSource(source_dirs=[tmp_path])
+        s = src.stats()
+        assert s.get("aistudio_sessions", 0) == 2
+
+    def test_multiple_source_dirs(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        dir1 = tmp_path / "dir1"
+        dir2 = tmp_path / "dir2"
+        dir1.mkdir()
+        dir2.mkdir()
+        self._make_aistudio_json(dir1, "s1", [{"role": "user", "text": "a"}])
+        self._make_aistudio_json(dir2, "s2", [{"role": "user", "text": "b"}])
+        src = AiStudioSource(source_dirs=[dir1, dir2])
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 2
+
+    def test_missing_dir_does_not_raise(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        missing = tmp_path / "does_not_exist"
+        src = AiStudioSource(source_dirs=[missing])
+        sessions = list(src.stream_sessions())  # should not raise
+        assert len(sessions) == 0
+
+
+class TestGeminiCliSource:
+    """Unit tests for GeminiCliSource (Gemini CLI session JSON)."""
+
+    def _make_gemini_session(self, tmp_path: Path, session_name: str, messages: list) -> Path:
+        chats_dir = tmp_path / "abc123hash" / "chats"
+        chats_dir.mkdir(parents=True, exist_ok=True)
+        f = chats_dir / session_name
+        data = {
+            "sessionId": "test-session-id",
+            "projectHash": "abc123hash",
+            "startTime": "2026-02-23T04:07:00Z",
+            "lastUpdated": "2026-02-23T05:00:00Z",
+            "messages": messages,
+        }
+        f.write_text(json.dumps(data), encoding="utf-8")
+        return f
+
+    def test_stream_sessions_discovers_chats(self, tmp_path):
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        self._make_gemini_session(tmp_path, "session-2026-02-23T04-07-abc.json", [
+            {"id": "1", "type": "user", "content": "hello", "timestamp": "2026-02-23T04:07:00Z"},
+        ])
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 1
+
+    def test_read_session_parses_user_messages(self, tmp_path):
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        self._make_gemini_session(tmp_path, "session-2026-02-23T04-07-abc.json", [
+            {"id": "1", "type": "user", "content": "hello gemini", "timestamp": "2026-02-23T04:07:00Z"},
+            {"id": "2", "type": "gemini", "content": "hello user", "timestamp": "2026-02-23T04:07:01Z"},
+            {"id": "3", "type": "info", "content": "system note", "timestamp": "2026-02-23T04:07:02Z"},
+        ])
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = list(src.stream_sessions())
+        msgs = src.read_session(sessions[0])
+        # Should parse user + gemini, skip info
+        assert len(msgs) == 2
+        assert msgs[0].type.value == "user"
+        assert msgs[0].content == "hello gemini"
+        assert msgs[1].type.value == "assistant"
+
+    def test_content_as_list_of_parts(self, tmp_path):
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        self._make_gemini_session(tmp_path, "session-2026-02-23T04-07-abc.json", [
+            {"id": "1", "type": "user", "content": [{"text": "part one"}, {"text": "part two"}], "timestamp": ""},
+        ])
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = list(src.stream_sessions())
+        msgs = src.read_session(sessions[0])
+        assert "part one" in msgs[0].content
+        assert "part two" in msgs[0].content
+
+    def test_strips_embedded_file_blocks(self, tmp_path):
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        content = "my question\n--- Content from referenced files ---\nsome file content\n--- End of content ---\nrest of message"
+        self._make_gemini_session(tmp_path, "session-2026-02-23T04-07-abc.json", [
+            {"id": "1", "type": "user", "content": content, "timestamp": ""},
+        ])
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = list(src.stream_sessions())
+        msgs = src.read_session(sessions[0])
+        assert "Content from referenced files" not in msgs[0].content
+        assert "my question" in msgs[0].content
+
+    def test_missing_gemini_dir_does_not_raise(self, tmp_path):
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path / "nonexistent")
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 0
+
+
+class TestCodebookUtils:
+    """Unit tests for ai_session_tools.analysis.codebook utilities."""
+
+    def test_get_ngrams_trigrams(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        result = get_ngrams("the quick brown fox", 3)
+        assert "quick brown fox" in result
+
+    def test_get_ngrams_empty(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        assert get_ngrams("", 3) == []
+
+    def test_is_meaningful_filters_stopword_start(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        assert not is_meaningful("the quick fox")
+        assert not is_meaningful("and also too")
+
+    def test_is_meaningful_passes_content_phrase(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        assert is_meaningful("critique and improve")
+        assert is_meaningful("tenured professor persona")
+
+    def test_compile_codes_creates_patterns(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        codes = {"chain_of_thought": ["think step by step", "chain of thought"]}
+        patterns = compile_codes(codes)
+        assert "chain_of_thought" in patterns
+        assert patterns["chain_of_thought"].search("Please think step by step here")
+
+    def test_load_codebook_empty_dir(self, tmp_path):
+        from ai_session_tools.analysis.codebook import load_codebook
+        tech, role = load_codebook(tmp_path)
+        assert isinstance(tech, dict)
+        assert isinstance(role, dict)
+
+    def test_load_keyword_maps_empty_dir(self, tmp_path):
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        maps = load_keyword_maps(tmp_path)
+        assert isinstance(maps, dict)
+
+
+class TestExtractHistory:
+    """Unit tests for ai_session_tools.analysis.extract."""
+
+    def _make_gemini_session_file(self, tmp_path: Path, messages: list) -> Path:
+        f = tmp_path / "session-test.json"
+        f.write_text(json.dumps({"messages": messages}), encoding="utf-8")
+        return f
+
+    def test_strip_embedded_files_removes_block(self):
+        from ai_session_tools.analysis.extract import strip_embedded_files
+        text = "question\n--- Content from referenced files ---\nfile data\n--- End of content ---\nanswer"
+        result = strip_embedded_files(text)
+        assert "Content from referenced files" not in result
+        assert "question" in result
+        assert "answer" in result
+
+    def test_extract_text_from_str(self):
+        from ai_session_tools.analysis.extract import extract_text
+        assert extract_text("hello") == "hello"
+
+    def test_extract_text_from_list(self):
+        from ai_session_tools.analysis.extract import extract_text
+        result = extract_text([{"text": "part a"}, {"text": "part b"}])
+        assert "part a" in result
+        assert "part b" in result
+
+    def test_extract_history_writes_file(self, tmp_path):
+        from ai_session_tools.analysis.extract import extract_history
+        session_file = self._make_gemini_session_file(tmp_path, [
+            {"type": "user", "content": "first instruction", "timestamp": ""},
+            {"type": "gemini", "content": "response", "timestamp": ""},
+            {"type": "user", "content": "second instruction", "timestamp": ""},
+        ])
+        output_file = tmp_path / "output.md"
+        count = extract_history(session_file, output_file)
+        assert count == 2
+        text = output_file.read_text()
+        assert "first instruction" in text
+        assert "second instruction" in text
+
+    def test_extract_history_missing_session_raises(self, tmp_path):
+        from ai_session_tools.analysis.extract import extract_history
+        import pytest
+        with pytest.raises(FileNotFoundError):
+            extract_history(tmp_path / "nonexistent.json", tmp_path / "out.md")
+
+
+class TestGraphBuilder:
+    """Unit tests for ai_session_tools.analysis.graph."""
+
+    def _make_records(self, names: list[str]) -> list[dict]:
+        return [{"name": n, "source_format": "aistudio_json", "utility": 10,
+                 "era": "2025-2026", "techniques": [], "roles": [], "filepath": ""} for n in names]
+
+    def test_filename_strategy_detects_branch(self):
+        from ai_session_tools.analysis.graph import AiStudioFilenameStrategy, GraphNode
+        nodes = [
+            GraphNode(id="Session Alpha", source_format="aistudio_json", title="Session Alpha"),
+            GraphNode(id="Branch of Session Alpha", source_format="aistudio_json", title="Branch of Session Alpha"),
+        ]
+        strat = AiStudioFilenameStrategy()
+        edges = strat.detect(nodes)
+        assert len(edges) == 1
+        assert edges[0].edge_type == "branch"
+        assert edges[0].source == "Session Alpha"
+        assert edges[0].target == "Branch of Session Alpha"
+
+    def test_filename_strategy_detects_copy(self):
+        from ai_session_tools.analysis.graph import AiStudioFilenameStrategy, GraphNode
+        nodes = [
+            GraphNode(id="Session Beta", source_format="aistudio_json", title="Session Beta"),
+            GraphNode(id="Copy of Session Beta", source_format="aistudio_json", title="Copy of Session Beta"),
+        ]
+        strat = AiStudioFilenameStrategy()
+        edges = strat.detect(nodes)
+        assert len(edges) == 1
+        assert edges[0].edge_type == "copy"
+
+    def test_filename_strategy_detects_version_chain(self):
+        from ai_session_tools.analysis.graph import AiStudioFilenameStrategy, GraphNode
+        nodes = [
+            GraphNode(id="Harbor Native v1", source_format="aistudio_json", title="Harbor Native v1"),
+            GraphNode(id="Harbor Native v2", source_format="aistudio_json", title="Harbor Native v2"),
+            GraphNode(id="Harbor Native v3", source_format="aistudio_json", title="Harbor Native v3"),
+        ]
+        strat = AiStudioFilenameStrategy()
+        edges = strat.detect(nodes)
+        assert len(edges) == 2
+        types = {e.edge_type for e in edges}
+        assert "version" in types
+
+    def test_build_graph_returns_structure(self):
+        from ai_session_tools.analysis.graph import build_graph
+        records = self._make_records(["Session A", "Branch of Session A", "Session B"])
+        result = build_graph(records)
+        assert result["node_count"] == 3
+        assert "nodes" in result
+        assert "edges" in result
+        assert result["edge_count"] >= 1  # at least the Branch edge
+
+    def test_build_graph_bitemporal_fields(self):
+        from ai_session_tools.analysis.graph import build_graph
+        records = self._make_records(["Session X"])
+        result = build_graph(records)
+        node = result["nodes"][0]
+        assert "event_time" in node
+        assert "ingest_time" in node
+        assert node["ingest_time"]  # not empty
+
+    def test_tfidf_strategy_no_self_loops(self):
+        from ai_session_tools.analysis.graph import TfIdfSimilarityStrategy, GraphNode
+        nodes = [
+            GraphNode(id="transcription analysis review", source_format="aistudio_json", title="transcription analysis review"),
+            GraphNode(id="transcription analysis session", source_format="aistudio_json", title="transcription analysis session"),
+            GraphNode(id="unrelated topic completely", source_format="aistudio_json", title="unrelated topic completely"),
+        ]
+        strat = TfIdfSimilarityStrategy(threshold=0.1)
+        edges = strat.detect(nodes)
+        # No self-loops: source != target for all edges
+        for e in edges:
+            assert e.source != e.target
+
+
+class TestSessionRecord:
+    """Unit tests for SessionRecord and apply_codes in analyzer."""
+
+    def test_to_db_dict_excludes_user_text(self):
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="test", source_dir="/tmp", filepath="/tmp/test",
+            source_format="aistudio_json", user_text="very long user text",
+            chunk_count=5, user_chunk_count=3,
+        )
+        d = rec.to_db_dict()
+        assert "user_text" not in d
+        assert d["name"] == "test"
+        assert d["chunk_count"] == 5
+
+    def test_apply_codes_version_detection(self):
+        from ai_session_tools.analysis.analyzer import SessionRecord, apply_codes
+        rec = SessionRecord(
+            name="Harbor Native v3", source_dir="/tmp", filepath="/tmp/x",
+            source_format="aistudio_json", user_text="some content",
+            chunk_count=1, user_chunk_count=1,
+        )
+        apply_codes(rec, {}, {}, {}, {"version_multiplier": 10})
+        assert rec.version_num == 3
+        assert rec.rigor_score >= 30  # 3 * 10
+
+    def test_apply_codes_branch_detection(self):
+        from ai_session_tools.analysis.analyzer import SessionRecord, apply_codes
+        rec = SessionRecord(
+            name="Branch of Session Alpha", source_dir="/tmp", filepath="/tmp/x",
+            source_format="aistudio_json", user_text="content",
+            chunk_count=1, user_chunk_count=1,
+        )
+        apply_codes(rec, {}, {}, {}, {})
+        assert rec.is_branch
+        assert rec.graph_parent == "Session Alpha"
+
+    def test_apply_codes_copy_detection(self):
+        from ai_session_tools.analysis.analyzer import SessionRecord, apply_codes
+        rec = SessionRecord(
+            name="Copy of Session Beta", source_dir="/tmp", filepath="/tmp/x",
+            source_format="aistudio_json", user_text="content",
+            chunk_count=1, user_chunk_count=1,
+        )
+        apply_codes(rec, {}, {}, {}, {})
+        assert rec.is_copy
+        assert rec.graph_parent == "Session Beta"
+
+    def test_compute_descendant_boost(self):
+        from ai_session_tools.analysis.analyzer import SessionRecord, compute_descendant_boost
+        parent = SessionRecord(
+            name="Root Session", source_dir="/tmp", filepath="/tmp/r",
+            source_format="aistudio_json", user_text="", chunk_count=1, user_chunk_count=1,
+            utility=50,
+        )
+        child = SessionRecord(
+            name="Branch of Root Session", source_dir="/tmp", filepath="/tmp/c",
+            source_format="aistudio_json", user_text="", chunk_count=1, user_chunk_count=1,
+            graph_parent="Root Session",
+        )
+        compute_descendant_boost([parent, child], boost_per_descendant=15)
+        assert parent.utility == 65  # 50 + 15
+
+
+class TestMultiSourceEngine:
+    """Unit tests for MultiSourceEngine."""
+
+    def _make_mock_source(self, session_ids: list[str], content: str = "test content"):
+        """Create a minimal mock source with predictable sessions."""
+        from ai_session_tools.models import MessageType, SessionInfo, SessionMessage
+
+        class MockSource:
+            def list_sessions(self):
+                return [SessionInfo(
+                    session_id=sid, project_dir="/tmp", cwd="", git_branch="",
+                    timestamp_first="", timestamp_last="", message_count=1,
+                    has_compact_summary=False,
+                ) for sid in session_ids]
+
+            def search_messages(self, pattern, filters=None):
+                import re
+                results = []
+                for sid in session_ids:
+                    if re.search(pattern, content, re.IGNORECASE):
+                        results.append(SessionMessage(
+                            type=MessageType.USER, timestamp="",
+                            content=content, session_id=sid,
+                        ))
+                return results
+
+            def stats(self):
+                return {"mock_sessions": len(session_ids)}
+
+        return MockSource()
+
+    def test_list_sessions_aggregates_all_sources(self):
+        from ai_session_tools.engine import MultiSourceEngine
+        src1 = self._make_mock_source(["s1", "s2"])
+        src2 = self._make_mock_source(["s3"])
+        engine = MultiSourceEngine([src1, src2])
+        sessions = engine.list_sessions()
+        assert len(sessions) == 3
+
+    def test_search_messages_aggregates_results(self):
+        from ai_session_tools.engine import MultiSourceEngine
+        src1 = self._make_mock_source(["s1"], "transcription SRT content")
+        src2 = self._make_mock_source(["s2"], "transcription SRT content")
+        engine = MultiSourceEngine([src1, src2])
+        results = engine.search_messages("SRT")
+        assert len(results) == 2
+
+    def test_stats_merges_counts(self):
+        from ai_session_tools.engine import MultiSourceEngine
+        src1 = self._make_mock_source(["s1", "s2"])
+        src2 = self._make_mock_source(["s3"])
+        engine = MultiSourceEngine([src1, src2])
+        stats = engine.stats()
+        assert stats.get("mock_sessions", 0) == 3  # 2 + 1
+
+    def test_failed_source_does_not_crash_engine(self):
+        from ai_session_tools.engine import MultiSourceEngine
+
+        class BrokenSource:
+            def list_sessions(self):
+                raise RuntimeError("I am broken")
+            def stats(self):
+                raise RuntimeError("also broken")
+
+        src_good = self._make_mock_source(["s1"])
+        engine = MultiSourceEngine([BrokenSource(), src_good])
+        # Should not raise — broken source is suppressed
+        sessions = engine.list_sessions()
+        assert len(sessions) == 1
+        stats = engine.stats()
+        assert stats.get("mock_sessions", 0) == 1
