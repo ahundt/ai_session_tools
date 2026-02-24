@@ -901,7 +901,7 @@ class TestToolsSearch:
     def test_tools_search_write_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["tools", "search", "Write"],
+            app, ["--source", "claude", "tools", "search", "Write"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -909,7 +909,7 @@ class TestToolsSearch:
     def test_tools_search_with_query(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["tools", "search", "Write", "login"],
+            app, ["--source", "claude", "tools", "search", "Write", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -918,7 +918,7 @@ class TestToolsSearch:
     def test_tools_search_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["tools", "search", "Write", "--format", "json"],
+            app, ["--source", "claude", "tools", "search", "Write", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -928,7 +928,7 @@ class TestToolsSearch:
     def test_tools_find_alias(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["tools", "find", "Write"],
+            app, ["--source", "claude", "tools", "find", "Write"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -940,7 +940,7 @@ class TestMessagesSearchPositional:
     def test_positional_query(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "search", "start the feature"],
+            app, ["--source", "claude", "messages", "search", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -948,7 +948,7 @@ class TestMessagesSearchPositional:
     def test_query_flag_still_works(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "search", "--query", "start the feature"],
+            app, ["--source", "claude", "messages", "search", "--query", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -960,7 +960,7 @@ class TestMessagesGetPositional:
     def test_positional_session_id(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "get", "aaaa0001"],
+            app, ["--source", "claude", "messages", "get", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -968,7 +968,7 @@ class TestMessagesGetPositional:
     def test_session_flag_still_works(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "get", "--session", "aaaa0001"],
+            app, ["--source", "claude", "messages", "get", "--session", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -978,7 +978,7 @@ class TestRootGetPositional:
     def test_root_get_positional(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["get", "aaaa0001"],
+            app, ["--source", "claude", "get", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -990,7 +990,7 @@ class TestRootSearchToolFlag:
     def test_root_search_tool_flag(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["search", "--tool", "Write", "--query", "login"],
+            app, ["--source", "claude", "search", "--tool", "Write", "--query", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -998,7 +998,7 @@ class TestRootSearchToolFlag:
     def test_root_search_tools_domain(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["search", "tools", "--tool", "Write", "--query", "login"],
+            app, ["--source", "claude", "search", "tools", "--tool", "Write", "--query", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -1006,7 +1006,7 @@ class TestRootSearchToolFlag:
     def test_root_search_tools_domain_requires_tool(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["search", "tools"],
+            app, ["--source", "claude", "search", "tools"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -1016,7 +1016,7 @@ class TestRootFindAlias:
     def test_find_alias_messages(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["find", "messages", "--query", "start the feature"],
+            app, ["--source", "claude", "find", "messages", "--query", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -1024,7 +1024,7 @@ class TestRootFindAlias:
     def test_find_alias_tool(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["find", "--tool", "Write", "--query", "login"],
+            app, ["--source", "claude", "find", "--tool", "Write", "--query", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -1034,7 +1034,7 @@ class TestFilesFindAlias:
     def test_files_find_alias(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["files", "find", "--pattern", "*.py"],
+            app, ["--source", "claude", "files", "find", "--pattern", "*.py"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         # Should exit 0 (even if no files found in recovery dir)
@@ -1045,7 +1045,7 @@ class TestMessagesFindAlias:
     def test_messages_find_positional(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "find", "start the feature"],
+            app, ["--source", "claude", "messages", "find", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -3250,11 +3250,11 @@ class TestLoadConfig:
         self._reset_cache()
         import os
         env = {"AI_SESSION_TOOLS_CONFIG": str(tmp_path / "nonexistent.json")}
-        result = runner.invoke(app, ["list"], env=env)
+        result = runner.invoke(app, ["--source", "claude", "list"], env=env)
         # No crash; config loading returns empty dict silently
         from ai_session_tools.cli import load_config
         self._reset_cache()
-        import ai_session_tools.cli as cli_mod
+        import ai_session_tools.config as cfg_mod
         cfg_mod._g_config_path = str(tmp_path / "nonexistent.json")
         assert load_config() == {}
 
@@ -3264,7 +3264,7 @@ class TestLoadConfig:
         cfg = {"planning_commands": ["/mycommand", "/mc"]}
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps(cfg))
-        import ai_session_tools.cli as cli_mod
+        import ai_session_tools.config as cfg_mod
         cfg_mod._g_config_path = str(config_file)
         result = load_config()
         assert result == cfg
@@ -3274,7 +3274,7 @@ class TestLoadConfig:
         self._reset_cache()
         config_file = tmp_path / "config.json"
         config_file.write_text("{ bad json !!!")
-        import ai_session_tools.cli as cli_mod
+        import ai_session_tools.config as cfg_mod
         cfg_mod._g_config_path = str(config_file)
         from ai_session_tools.cli import load_config
         result = load_config()
@@ -3285,7 +3285,7 @@ class TestLoadConfig:
         self._reset_cache()
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({"planning_commands": ["/x"]}))
-        import ai_session_tools.cli as cli_mod
+        import ai_session_tools.config as cfg_mod
         cfg_mod._g_config_path = str(config_file)
         from ai_session_tools.cli import load_config
         r1 = load_config()
@@ -3310,7 +3310,7 @@ class TestConfigFileCorrectionsIntegration:
             "correction_patterns": ["config_cat:you forgot"]
         }))
         projects = self._projects(tmp_path)
-        result = runner.invoke(app, ["messages", "corrections", "--format", "json"], env={
+        result = runner.invoke(app, ["--source", "claude", "messages", "corrections", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
@@ -3329,7 +3329,7 @@ class TestConfigFileCorrectionsIntegration:
         }))
         projects = self._projects(tmp_path)
         result = runner.invoke(app, [
-            "messages", "corrections", "--format", "json",
+            "--source", "claude", "messages", "corrections", "--format", "json",
             "--pattern", "cli_cat:you forgot",
         ], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
@@ -3359,7 +3359,7 @@ class TestConfigFilePlanningIntegration:
             "planning_commands": [r"/ar:plannew\b"]
         }))
         projects = self._projects(tmp_path)
-        result = runner.invoke(app, ["messages", "planning", "--format", "json"], env={
+        result = runner.invoke(app, ["--source", "claude", "messages", "planning", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
@@ -3378,7 +3378,7 @@ class TestConfigFilePlanningIntegration:
         }))
         projects = self._projects(tmp_path)
         result = runner.invoke(app, [
-            "messages", "planning", "--format", "json",
+            "--source", "claude", "messages", "planning", "--format", "json",
             "--commands", r"/ar:plannew\b",
         ], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
