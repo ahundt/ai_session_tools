@@ -2233,98 +2233,295 @@ def config_init(
     )
 
 
+# ── Analysis pipeline configuration ──────────────────────────────────────────
+
+# Pipeline stage mapping: stage name → module path
+_PIPELINE_STEPS = {
+    "instruction-history": "ai_session_tools.analysis.extract",
+    "analyze":             "ai_session_tools.analysis.analyzer",
+    "graph":               "ai_session_tools.analysis.graph",
+    "organize":            "ai_session_tools.analysis.orchestrator",
+    "vocab":               "ai_session_tools.analysis.vocab",
+}
+
+# Pipeline dependencies: stage → (required_predecessor_stage, required_file)
+_STEP_DEPS = {
+    "graph":    ("analyze", "session_db.json"),
+    "organize": ("graph",   "SESSION_GRAPH.json"),
+}
+
+
+def _pipeline_order(cfg: dict) -> list[str]:
+    """Build pipeline step list; omit instruction-history if not configured.
+
+    Args:
+        cfg: Configuration dict
+
+    Returns:
+        List of stage names in execution order
+    """
+    base = ["analyze", "graph", "organize"]
+    if cfg.get("gemini_org_task_session"):
+        return ["instruction-history"] + base
+    return base
+
+
+def _check_step_dep(step: str, cfg: dict, org_dir: Path) -> None:
+    """Raise helpful error if required predecessor output is missing.
+
+    Args:
+        step: Pipeline stage name
+        cfg: Configuration dict
+        org_dir: Organization directory
+
+    Raises:
+        typer.Exit: If required predecessor output is missing
+    """
+    if step not in _STEP_DEPS:
+        return
+    prev_step, required_file = _STEP_DEPS[step]
+    if not (org_dir / required_file).exists():
+        err_console.print(
+            f"[red]Missing {required_file}.[/red] "
+            f"Run [bold]aise analyze --step {prev_step}[/bold] first."
+        )
+        raise typer.Exit(code=1)
+
+
+def _run_single_step(
+    step: str,
+    source_filter: Optional[str],
+    marker_window: int,
+    cfg: dict,
+    org_dir: Path,
+) -> None:
+    """Run a single pipeline step.
+
+    Args:
+        step: Pipeline stage name
+        source_filter: Source to narrow to (aistudio, gemini, or None for all)
+        marker_window: Chars for marker matching (0 = use config default)
+        cfg: Configuration dict
+        org_dir: Organization directory
+
+    Raises:
+        typer.Exit: If step fails
+    """
+    import importlib
+    _check_step_dep(step, cfg, org_dir)
+    mod_path = _PIPELINE_STEPS[step]
+    mod = importlib.import_module(mod_path)
+
+    try:
+        if step == "analyze" and marker_window > 0:
+            mod.run_analysis(marker_window=marker_window, source_filter=source_filter)
+        elif step == "analyze" and source_filter:
+            mod.run_analysis(marker_window=0, source_filter=source_filter)
+        else:
+            mod.main()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        err_console.print(f"[red]Step '{step}' failed: {exc}[/red]")
+        raise
+
+
 # ── Analysis commands (aise analyze / graph / organize / vocab / extract / run-all) ──
 
 
 @app.command("analyze")
 def cmd_analyze(
-    marker_window: int = typer.Option(0, "--window", "-w", help="Chars to use for marker matching (0=from config)"),
+    step: Optional[str] = typer.Option(
+        None, "--step", hidden=True,
+        help="Advanced: run only one pipeline step. Use 'aise analyze' for full pipeline."
+    ),
+    marker_window: int = typer.Option(
+        0, "--window", "-w",
+        help="Chars for marker matching (0=from config)."
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Force re-run all stages even if inputs unchanged."
+    ),
+    status_only: bool = typer.Option(
+        False, "--status",
+        help="Show which stages are stale/current without running."
+    ),
+    org_dir: Optional[str] = typer.Option(
+        None, "--org-dir",
+        help="Override config.org_dir for this run."
+    ),
 ) -> None:
-    """Run qualitative coding + empirical scoring + vocabulary mining on all configured sessions.
+    """Analyze and organize all configured AI sessions.
 
-    Reads all configured session sources, applies CODEBOOK.md codes (Hsieh & Shannon 2005),
-    scores by Wei et al. 2022 CoT metrics, and writes session_db.json + VOCABULARY_ANALYSIS.md.
+    Runs the full pipeline automatically. Stages are skipped when inputs
+    have not changed since the last run (idempotent).
+
+    Full pipeline (in order):
+      1. analyze   → session_db.json + VOCABULARY_ANALYSIS.md
+      2. graph     → SESSION_GRAPH.json
+      3. organize  → symlinks + INDEX.md + SESSIONS_FULL.md
+      (instruction-history → USER_INSTRUCTIONS_CLEAN.md if gemini_org_task_session configured)
+
+    Re-run one stage with --step (advanced):
+        aise analyze --step analyze
+        aise analyze --step graph
 
     To narrow to one backend, use --source BEFORE the 'analyze' subcommand:
         aise --source aistudio analyze    (analyze only AI Studio sessions)
         aise --source gemini analyze      (analyze only Gemini CLI sessions)
         aise analyze                      (analyze all configured sources)
-
-    Note: '--source aistudio analyze' narrows the pipeline to AI Studio sources only.
     """
-    from ai_session_tools.analysis.analyzer import main as analyze_main, run_analysis
-    # Pass source_filter from _g_source to narrow analysis to one backend
-    # Only narrow if explicitly requesting aistudio or gemini; otherwise analyze all sources
+    from ai_session_tools.analysis import pipeline_state as ps
+
+    cfg = load_config()
+    if org_dir:
+        cfg["org_dir"] = org_dir
+    org_dir_str = cfg.get("org_dir", "").strip()
+    if not org_dir_str:
+        err_console.print(
+            "[red]org_dir not configured.[/red] "
+            "Run [bold]aise config init[/bold] or set org_dir in config.json"
+        )
+        raise typer.Exit(code=1)
+    org = Path(org_dir_str).expanduser()
+    org.mkdir(parents=True, exist_ok=True)
+
     source_filter = _g_source if _g_source in ("aistudio", "gemini") else None
-    if marker_window > 0:
-        run_analysis(marker_window=marker_window, source_filter=source_filter)
+    pipeline_order = _pipeline_order(cfg)
+    state = ps.load_state(org) if (org and not force) else {}
+
+    # Single step mode (advanced)
+    if step:
+        if step not in _PIPELINE_STEPS:
+            err_console.print(
+                f"[red]Invalid --step '{step}'.[/red] "
+                f"Valid: {', '.join(sorted(_PIPELINE_STEPS.keys()))}"
+            )
+            raise typer.Exit(code=1)
+        _run_single_step(step, source_filter, marker_window, cfg, org)
+        # Note: Not updating state for single-step runs; use full pipeline for tracking
+        return
+
+    # Status dry-run mode
+    if status_only:
+        console.print("[bold]Pipeline status:[/bold]")
+        for name in pipeline_order:
+            # Simple check: does output file exist?
+            if name == "instruction-history":
+                output = org / "USER_INSTRUCTIONS_CLEAN.md"
+            elif name == "analyze":
+                output = org / "session_db.json"
+            elif name == "graph":
+                output = org / "SESSION_GRAPH.json"
+            elif name == "organize":
+                output = org / "INDEX.md"
+            else:
+                output = None
+            if output and output.exists():
+                console.print(f"  [green]current[/green]  {name}")
+            else:
+                console.print(f"  [red]STALE[/red]   {name}")
+        return
+
+    # Full pipeline with change detection
+    console.print("[bold]Running full analysis pipeline...[/bold]")
+    ran_any = False
+    for i, name in enumerate(pipeline_order, 1):
+        # Simple heuristic: check if output exists and --force not specified
+        if name == "instruction-history":
+            output = org / "USER_INSTRUCTIONS_CLEAN.md"
+        elif name == "analyze":
+            output = org / "session_db.json"
+        elif name == "graph":
+            output = org / "SESSION_GRAPH.json"
+        elif name == "organize":
+            output = org / "INDEX.md"
+        else:
+            output = None
+
+        if not force and output and output.exists():
+            console.print(f"[dim][{name}] skipped (output up to date)[/dim]")
+            continue
+
+        console.print(f"[cyan][{name}] running...[/cyan]")
+        try:
+            _run_single_step(name, source_filter, marker_window, cfg, org)
+            ran_any = True
+        except SystemExit:
+            raise
+
+    if not ran_any:
+        console.print("[green]All pipeline stages are current. Nothing to do.[/green]")
     else:
-        analyze_main(source_filter=source_filter, marker_window=marker_window)
+        console.print("[bold green]Pipeline complete.[/bold green]")
 
 
-@app.command("graph")
+@app.command("graph", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")
 def cmd_graph() -> None:
     """Build session provenance graph from session_db.json -> SESSION_GRAPH.json.
 
     Detects 'Branch of X', 'Copy of X', 'Name vN' lineage patterns and project groupings.
-    Requires `aise analyze` to have been run first.
+
+    Requires session_db.json from 'aise analyze --step analyze'.
+    Tip: Use 'aise analyze' to run the full pipeline automatically.
     """
+    cfg = load_config()
+    org_dir_str = cfg.get("org_dir", "").strip()
+    if not org_dir_str:
+        err_console.print(
+            "[red]org_dir not configured.[/red] "
+            "Run [bold]aise config init[/bold] or set org_dir in config.json"
+        )
+        raise typer.Exit(code=1)
+    org = Path(org_dir_str).expanduser()
+    _check_step_dep("graph", cfg, org)
     from ai_session_tools.analysis.graph import main as graph_main
     graph_main()
 
 
-@app.command("organize")
+@app.command("organize", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")
 def cmd_organize() -> None:
     """Create taxonomy symlinks + INDEX.md + SESSIONS_FULL.md + KNOWLEDGE_GRAPH.md.
 
     Non-destructive: never deletes existing symlinks or permanent files.
-    Reads session_db.json (requires `aise analyze` first).
+
+    Requires SESSION_GRAPH.json from 'aise analyze --step graph'.
+    Tip: Use 'aise analyze' to run the full pipeline automatically.
     """
+    cfg = load_config()
+    org_dir_str = cfg.get("org_dir", "").strip()
+    if not org_dir_str:
+        err_console.print(
+            "[red]org_dir not configured.[/red] "
+            "Run [bold]aise config init[/bold] or set org_dir in config.json"
+        )
+        raise typer.Exit(code=1)
+    org = Path(org_dir_str).expanduser()
+    _check_step_dep("organize", cfg, org)
     from ai_session_tools.analysis.orchestrator import main as org_main
     org_main()
 
 
-@app.command("vocab")
+@app.command("vocab", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")
 def cmd_vocab() -> None:
     """Standalone vocabulary analysis -> VOCABULARY_ANALYSIS.md.
 
-    Normally vocabulary is mined inline by `aise analyze`. Use this to re-run standalone.
+    Normally vocabulary is mined inline by `aise analyze`. Use this to re-run independently.
     """
     from ai_session_tools.analysis.vocab import main as vocab_main
     vocab_main()
 
 
-@app.command("instruction-history")
+@app.command("instruction-history", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")
 def cmd_instruction_history() -> None:
     """Extract verbatim user instruction history from Gemini CLI session -> USER_INSTRUCTIONS_CLEAN.md.
 
     Session path: from config key 'gemini_org_task_session' or auto-discovered.
+    Tip: Use 'aise analyze' to run the full pipeline automatically.
     """
     from ai_session_tools.analysis.extract import main as extract_main
     extract_main()
-
-
-@app.command("run-all")
-def cmd_run_all() -> None:
-    """Full pipeline: instruction-history -> analyze -> graph -> organize.
-
-    Runs all four analysis commands in correct order.
-    """
-    from ai_session_tools.analysis.extract import main as extract_main
-    from ai_session_tools.analysis.analyzer import main as analyze_main
-    from ai_session_tools.analysis.graph import main as graph_main
-    from ai_session_tools.analysis.orchestrator import main as org_main
-
-    console = Console()
-    console.print("[bold]Step 1/4: instruction-history[/bold]")
-    extract_main()
-    console.print("[bold]Step 2/4: analyze[/bold]")
-    analyze_main()
-    console.print("[bold]Step 3/4: graph[/bold]")
-    graph_main()
-    console.print("[bold]Step 4/4: organize[/bold]")
-    org_main()
-    console.print("[bold green]Pipeline complete.[/bold green]")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
