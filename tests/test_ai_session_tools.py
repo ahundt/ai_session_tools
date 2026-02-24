@@ -814,7 +814,7 @@ class TestFilesCrossRef:
         test_file = tmp_path / "login.py"
         test_file.write_text("def login():\n    pass\n")
         result = runner.invoke(
-            app, ["files", "cross-ref", str(test_file)],
+            app, ["--source", "claude", "files", "cross-ref", str(test_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -824,7 +824,7 @@ class TestFilesCrossRef:
         test_file = tmp_path / "login.py"
         test_file.write_text("def login():\n    pass\n")
         result = runner.invoke(
-            app, ["files", "cross-ref", str(test_file)],
+            app, ["--source", "claude", "files", "cross-ref", str(test_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "\u2713" in result.output or "✓" in result.output or "1/1" in result.output
@@ -834,7 +834,7 @@ class TestFilesCrossRef:
         test_file = tmp_path / "login.py"
         test_file.write_text("completely different content")
         result = runner.invoke(
-            app, ["files", "cross-ref", str(test_file)],
+            app, ["--source", "claude", "files", "cross-ref", str(test_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "✗" in result.output or "0/1" in result.output
