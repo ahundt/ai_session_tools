@@ -129,10 +129,12 @@ app = typer.Typer(
         "  ✓ aise --source aistudio list     (correct)\n"
         "  ✗ aise list --source aistudio     (incorrect — flag silently ignored)\n\n"
         "Standard source locations (auto-discovered):\n"
-        "  Claude Code: ~/.claude/projects/ (always included)\n"
-        "  Gemini CLI:  ~/.gemini/tmp/      (if exists and non-empty)\n"
-        "  AI Studio:   ~/Downloads/Google AI Studio/ and ~/Downloads/drive-download-*/ (if exist)\n"
-        "  Explicit:    config.json source_dirs.aistudio[] (takes priority)\n\n"
+        "  Claude Code: ~/.claude/projects/                              (always included)\n"
+        "  Gemini CLI:  ~/.gemini/tmp/                                   (if exists and non-empty)\n"
+        "  AI Studio:   ~/Downloads/Google AI Studio/                    (if exists)\n"
+        "               ~/Downloads/drive-download-*/Google AI Studio/   (glob, if matched)\n"
+        "               ~/Downloads/aistudio_sessions/Google AI Studio/  (if exists)\n"
+        "  Explicit:    config.json source_dirs.aistudio[] (takes priority over auto-discovery)\n\n"
         "Override defaults with environment variables:\n\n"
         "  CLAUDE_CONFIG_DIR          Path to Claude config dir (default: ~/.claude)\n"
         "  AI_SESSION_TOOLS_PROJECTS  Path to Claude projects dir (default: ~/.claude/projects)\n"
@@ -585,12 +587,13 @@ def app_callback(
     source: Optional[str] = typer.Option(
         None, "--source",
         help=(
-            "Session source backend: claude (default), aistudio, gemini, or all. "
+            "Narrow to one session backend: claude, aistudio, gemini, or all. "
+            "Default: auto-detected (claude if no other sources found; all if Gemini or AI Studio sources are present). "
             "⚠️  MUST PRECEDE SUBCOMMAND: 'aise --source aistudio list' (not 'aise list --source aistudio'). "
             "claude: Claude Code JSONL sessions in ~/.claude/projects/. "
-            "aistudio: Google AI Studio JSON/md sessions (paths from config). "
+            "aistudio: Google AI Studio JSON/md sessions (paths from config or auto-discovered). "
             "gemini: Gemini CLI JSON sessions in ~/.gemini/tmp/. "
-            "all: aggregate stats/list across all configured sources."
+            "all: all configured sources combined."
         ),
     ),
 ) -> None:
