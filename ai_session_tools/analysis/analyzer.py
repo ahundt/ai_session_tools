@@ -76,10 +76,36 @@ class SessionRecord:
 
 
 def _detect_era(name: str, user_text: str) -> str:
-    """Detect era from session filename date prefix."""
-    m = re.match(r"(\d{4})", name)
-    if m and m.group(1) in ("2023", "2024"):
-        return m.group(1)
+    """Detect era from session filename or content year signals.
+
+    Strategy (priority order):
+    1. 4-digit year at start of name (e.g. "2024-03-meeting")
+    2. Standalone year anywhere in name (e.g. "Meeting Notes 2024")
+    3. Year in first 2000 chars of user_text context (e.g. "as of 2024")
+    4. Default: 2025-2026
+    """
+    # Priority 1: year prefix in name
+    m = re.match(r"(202[3-6])", name)
+    if m:
+        yr = m.group(1)
+        if yr in ("2023", "2024"):
+            return yr
+        return "2025-2026"
+
+    # Priority 2: standalone year anywhere in name
+    m2 = re.search(r"\b(202[3-6])\b", name)
+    if m2:
+        yr = m2.group(1)
+        if yr in ("2023", "2024"):
+            return yr
+        return "2025-2026"
+
+    # Priority 3: year in early content
+    sample = user_text[:2000]
+    for yr in ("2024", "2023"):
+        if re.search(r"\b" + yr + r"\b", sample):
+            return yr
+
     return "2025-2026"
 
 

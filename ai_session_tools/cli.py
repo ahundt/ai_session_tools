@@ -480,6 +480,117 @@ def _do_multi_list(source: str, limit: Optional[int], fmt: str) -> None:
     console.print(table)
 
 
+def _do_multi_messages_search(
+    source: str, query: str,
+    message_type: Optional[str] = None,
+    limit: int = 10, max_chars: int = 0, fmt: str = "table",
+) -> None:
+    """Search messages across non-Claude source backends.
+
+    Delegates to AiStudioSource/GeminiCliSource search_messages() and renders
+    results using the same table format as _do_messages_search(). Context
+    (--context) and --tool are not supported for multi-source backends.
+    """
+    import contextlib
+    from ai_session_tools.sources.aistudio import AiStudioSource
+    from ai_session_tools.sources.gemini_cli import GeminiCliSource
+    cfg = load_config()
+    sd = cfg.get("source_dirs", {})
+    results = []
+
+    if source in ("aistudio", "all"):
+        ai_dirs = sd.get("aistudio", [])
+        if isinstance(ai_dirs, str):
+            ai_dirs = [ai_dirs]
+        with contextlib.suppress(Exception):
+            ai_src = AiStudioSource([Path(p) for p in ai_dirs])
+            results.extend(ai_src.search_messages(query, message_type))
+
+    if source in ("gemini", "all"):
+        gc_dir = sd.get("gemini_cli", "")
+        if gc_dir:
+            with contextlib.suppress(Exception):
+                gc_src = GeminiCliSource(Path(gc_dir))
+                results.extend(gc_src.search_messages(query, message_type))
+
+    results = results[:limit]
+    if not results:
+        console.print("[yellow]No messages match query[/yellow]")
+        return
+
+    truncate = max_chars if max_chars > 0 else None
+    if fmt == "json":
+        import sys as _sys
+        _sys.stdout.write(json.dumps([r.to_dict() for r in results], indent=2) + "\n")
+        return
+
+    spec = TableSpec(
+        title_template=f"Messages ({{n}} found) [source: {source}]",
+        columns=[
+            ColumnSpec("Timestamp", style="dim", no_wrap=True),
+            ColumnSpec("Type", style="cyan"),
+            ColumnSpec("Session", style="blue"),
+            ColumnSpec("Content"),
+        ],
+        row_fn=lambda d: [
+            d.get("timestamp", "")[:19],
+            d.get("type", ""),
+            (d.get("session_id", "")[:30] + "\u2026"),
+            d.get("content", "")[:truncate],
+        ],
+        summary_template="Found {n} messages",
+    )
+    _render_output(results, fmt, spec)
+
+
+def _do_multi_messages_get(
+    source: str, session_id: str,
+    message_type: Optional[str] = None,
+    limit: int = 10, max_chars: int = 0, fmt: str = "table",
+) -> None:
+    """Get messages from a specific session in non-Claude source backends.
+
+    Searches for session by name/ID substring match across configured sources.
+    """
+    import contextlib
+    from ai_session_tools.sources.aistudio import AiStudioSource
+    from ai_session_tools.sources.gemini_cli import GeminiCliSource
+    cfg = load_config()
+    sd = cfg.get("source_dirs", {})
+    found_messages = []
+
+    def _collect(src, sid: str) -> None:
+        for si in src.stream_sessions():
+            if sid.lower() in si.session_id.lower():
+                msgs = src.read_session(si)
+                if message_type:
+                    msgs = [m for m in msgs if m.type.value == message_type]
+                found_messages.extend(msgs[:limit])
+                if len(found_messages) >= limit:
+                    return
+
+    if source in ("aistudio", "all"):
+        ai_dirs = sd.get("aistudio", [])
+        if isinstance(ai_dirs, str):
+            ai_dirs = [ai_dirs]
+        with contextlib.suppress(Exception):
+            _collect(AiStudioSource([Path(p) for p in ai_dirs]), session_id)
+
+    if source in ("gemini", "all") and len(found_messages) < limit:
+        gc_dir = sd.get("gemini_cli", "")
+        if gc_dir:
+            with contextlib.suppress(Exception):
+                _collect(GeminiCliSource(Path(gc_dir)), session_id)
+
+    if not found_messages:
+        console.print(f"[yellow]No messages found for session '{session_id}'[/yellow]")
+        return
+
+    formatter = MessageFormatter(max_chars=max_chars)
+    console.print(formatter.format_many(found_messages[:limit]))
+    console.print(f"\n[bold]Found {len(found_messages[:limit])} messages[/bold]")
+
+
 # ── Shared helper functions ───────────────────────────────────────────────────
 
 def _parse_session_set(s: Optional[str]) -> Set[str]:
@@ -1617,8 +1728,11 @@ def _messages_search_cmd(
         aise messages search "error" --context 3       # show 3 surrounding messages
     """
     q = query or query_opt
-    _do_messages_search(get_engine(), q or "", message_type, limit, max_chars, fmt,
-                        tool=tool, context=context)
+    if _g_source != "claude":
+        _do_multi_messages_search(_g_source, q or "", message_type, limit, max_chars, fmt)
+    else:
+        _do_messages_search(get_engine(), q or "", message_type, limit, max_chars, fmt,
+                            tool=tool, context=context)
 
 
 _register_alias(messages_app, _messages_search_cmd, "search", "find")
@@ -1641,7 +1755,13 @@ def messages_get(
         aise messages get ab841016 --type user
     """
     sid = session_id or session_opt
-    _do_get(get_engine(), sid, message_type, limit, max_chars, fmt)
+    if _g_source != "claude":
+        if not sid:
+            err_console.print("[red]Session ID is required.[/red] Use 'aise list --source aistudio' to find session IDs.")
+            raise typer.Exit(code=1)
+        _do_multi_messages_get(_g_source, sid, message_type, limit, max_chars, fmt)
+    else:
+        _do_get(get_engine(), sid, message_type, limit, max_chars, fmt)
 
 
 @messages_app.command("corrections")
@@ -2220,8 +2340,8 @@ def cmd_vocab() -> None:
     vocab_main()
 
 
-@app.command("extract")
-def cmd_extract() -> None:
+@app.command("instruction-history")
+def cmd_instruction_history() -> None:
     """Extract verbatim user instruction history from Gemini CLI session -> USER_INSTRUCTIONS_CLEAN.md.
 
     Session path: from config key 'gemini_org_task_session' or auto-discovered.
@@ -2232,7 +2352,7 @@ def cmd_extract() -> None:
 
 @app.command("run-all")
 def cmd_run_all() -> None:
-    """Full pipeline: extract -> analyze -> graph -> organize.
+    """Full pipeline: instruction-history -> analyze -> graph -> organize.
 
     Runs all four analysis commands in correct order.
     """
@@ -2242,7 +2362,7 @@ def cmd_run_all() -> None:
     from ai_session_tools.analysis.orchestrator import main as org_main
 
     console = Console()
-    console.print("[bold]Step 1/4: extract[/bold]")
+    console.print("[bold]Step 1/4: instruction-history[/bold]")
     extract_main()
     console.print("[bold]Step 2/4: analyze[/bold]")
     analyze_main()
