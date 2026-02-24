@@ -4133,7 +4133,7 @@ class TestMessagesTimeline:
 
     def test_timeline_preview_chars_option(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "timeline", "aaaa0001",
+        result = runner.invoke(app, ["--source", "claude", "messages", "timeline", "aaaa0001",
                                      "--preview-chars", "10", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
