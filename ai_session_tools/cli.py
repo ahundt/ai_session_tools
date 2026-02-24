@@ -26,14 +26,21 @@ from .models import FileVersion, FilterSpec
 
 app = typer.Typer(
     help=(
-        "Analyze and extract data from Claude Code sessions stored in ~/.claude/projects/.\n\n"
-        "Claude Code stores each conversation as a session — a folder of JSONL files containing "
-        "user/assistant messages and source code snapshots. This tool searches those sessions to "
-        "find source files that were written or edited, and to search conversation messages.\n\n"
-        "Override default paths with environment variables:\n\n"
-        "  CLAUDE_CONFIG_DIR          Path to Claude config dir (default: ~/.claude)\n\n"
-        "  AI_SESSION_TOOLS_PROJECTS  Path to Claude projects dir (default: ~/.claude/projects)\n\n"
-        "  AI_SESSION_TOOLS_RECOVERY  Path to recovery output dir (default: ~/.claude/recovery)"
+        "Search, analyze, and organize AI sessions from Claude Code, AI Studio, and Gemini CLI.\n\n"
+        "Sources are auto-detected from standard install locations. Use --source to narrow to one backend.\n\n"
+        "⚠️  IMPORTANT: Global --source flag MUST precede subcommand:\n"
+        "  ✓ aise --source aistudio list     (correct)\n"
+        "  ✗ aise list --source aistudio     (incorrect — flag silently ignored)\n\n"
+        "Standard source locations (auto-discovered):\n"
+        "  Claude Code: ~/.claude/projects/ (always included)\n"
+        "  Gemini CLI:  ~/.gemini/tmp/      (if exists and non-empty)\n"
+        "  AI Studio:   ~/Downloads/Google AI Studio/ and ~/Downloads/drive-download-*/ (if exist)\n"
+        "  Explicit:    config.json source_dirs.aistudio[] (takes priority)\n\n"
+        "Override defaults with environment variables:\n\n"
+        "  CLAUDE_CONFIG_DIR          Path to Claude config dir (default: ~/.claude)\n"
+        "  AI_SESSION_TOOLS_PROJECTS  Path to Claude projects dir (default: ~/.claude/projects)\n"
+        "  AI_SESSION_TOOLS_RECOVERY  Path to recovery output dir (default: ~/.claude/recovery)\n"
+        "  AI_SESSION_TOOLS_CONFIG    Path to config JSON (default: OS app config dir)"
     ),
 )
 files_app = typer.Typer(
@@ -263,6 +270,7 @@ def app_callback(
         None, "--source",
         help=(
             "Session source backend: claude (default), aistudio, gemini, or all. "
+            "⚠️  MUST PRECEDE SUBCOMMAND: 'aise --source aistudio list' (not 'aise list --source aistudio'). "
             "claude: Claude Code JSONL sessions in ~/.claude/projects/. "
             "aistudio: Google AI Studio JSON/md sessions (paths from config). "
             "gemini: Gemini CLI JSON sessions in ~/.gemini/tmp/. "
@@ -2232,10 +2240,17 @@ def config_init(
 def cmd_analyze(
     marker_window: int = typer.Option(0, "--window", "-w", help="Chars to use for marker matching (0=from config)"),
 ) -> None:
-    """Run qualitative coding + empirical scoring + vocabulary mining on all AI Studio sessions.
+    """Run qualitative coding + empirical scoring + vocabulary mining on all configured sessions.
 
-    Reads all three source directories, applies CODEBOOK.md codes (Hsieh & Shannon 2005),
+    Reads all configured session sources, applies CODEBOOK.md codes (Hsieh & Shannon 2005),
     scores by Wei et al. 2022 CoT metrics, and writes session_db.json + VOCABULARY_ANALYSIS.md.
+
+    To narrow to one backend, use --source BEFORE the 'analyze' subcommand:
+        aise --source aistudio analyze    (analyze only AI Studio sessions)
+        aise --source gemini analyze      (analyze only Gemini CLI sessions)
+        aise analyze                      (analyze all configured sources)
+
+    Note: '--source aistudio analyze' narrows the pipeline to AI Studio sources only.
     """
     from ai_session_tools.analysis.analyzer import main as analyze_main, run_analysis
     # Pass source_filter from _g_source to narrow analysis to one backend
