@@ -125,7 +125,7 @@ app = typer.Typer(
     help=(
         "Search and analyze AI sessions and conversations from Claude Code, AI Studio, and Gemini CLI.\n\n"
         "Sources auto-detected from standard locations. Run 'aise source list' to see what's active.\n"
-        "Common commands accept --source directly: 'aise list --source aistudio' ✓"
+        "Use --provider to filter: 'aise list --provider claude'  'aise stats --provider aistudio'"
     ),
 )
 files_app = typer.Typer(
@@ -545,13 +545,11 @@ def app_callback(
         help="Path to config JSON. Default: OS app config dir (macOS: ~/Library/Application Support/ai_session_tools/config.json).",
         envvar="AI_SESSION_TOOLS_CONFIG",
     ),
-    source: Optional[str] = typer.Option(
-        None, "--source",
+    provider: str = typer.Option(
+        "all", "--provider",
         help=(
-            "Sessions from: claude | aistudio | gemini | all. "
-            "Default: all auto-detected sources. "
-            "Note: as a global flag this must precede the subcommand "
-            "('aise --source aistudio list'). Most commands also accept --source directly."
+            "Sessions from: claude | aistudio | gemini | all. Default: all. "
+            "Most commands also accept --provider directly: 'aise list --provider claude'."
         ),
     ),
 ) -> None:
@@ -573,8 +571,8 @@ def app_callback(
     # ctx.obj is inherited by all child contexts (sub-apps, sub-commands)
     ctx.ensure_object(dict)
     cfg = load_config()  # already handles _g_config_path / env var priority
-    ctx.obj["engine"] = get_session_backend(source=source, claude_dir=claude_dir, config=cfg)
-    ctx.obj["source"] = source  # None = auto-detected; can be accessed by commands
+    ctx.obj["engine"] = get_session_backend(source=provider, claude_dir=claude_dir, config=cfg)
+    ctx.obj["source"] = provider  # can be accessed by commands for source filtering
 
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
@@ -2080,7 +2078,7 @@ _register_alias(tools_app, _tools_search_cmd, "search", "find")
 @app.command("list")
 def list_sessions(
     ctx: typer.Context,
-    source: Optional[str] = typer.Option(None, "--source", help="Sessions from: claude | aistudio | gemini | all. Overrides global --source."),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
     after: Optional[str] = typer.Option(None, "--after", help="Only sessions after this date (e.g. 2026-01-15)."),
     before: Optional[str] = typer.Option(None, "--before", help="Only sessions before this date."),
@@ -2096,7 +2094,7 @@ def list_sessions(
         aise list --after 2026-01-01           # sessions since Jan 1
         aise list --format json                # JSON output
     """
-    engine = _resolve_engine(ctx, source)
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2123,7 +2121,7 @@ def _root_search_cmd(
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
     tool: Optional[str] = typer.Option(None, "--tool",
         help="[messages/tools] Filter for tool call invocations (e.g. Bash, Edit, Write). Auto-routes to messages domain."),
-    source: Optional[str] = typer.Option(None, "--source", help="Sessions from: claude | aistudio | gemini | all. Overrides global --source."),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
 ) -> None:
     """Search messages, files, and tool calls across all sources.
 
@@ -2136,7 +2134,7 @@ def _root_search_cmd(
         aise search tools --tool Write --query "login"       # Write calls with "login"
         aise search --tool Bash --query "git commit"         # auto-routes to messages
     """
-    engine = _resolve_engine(ctx, source)
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2234,7 +2232,7 @@ def get(
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
     max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = show full message. Default: 0"),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
-    source: Optional[str] = typer.Option(None, "--source", help="Sessions from: claude | aistudio | gemini | all. Overrides global --source."),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
 ) -> None:
     """Read messages from one specific session.
 
@@ -2244,7 +2242,7 @@ def get(
         aise get ab841016
         aise get ab841016 --type user --limit 50
     """
-    engine = _resolve_engine(ctx, source)
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2255,7 +2253,7 @@ def get(
 @app.command()
 def stats(
     ctx: typer.Context,
-    source: Optional[str] = typer.Option(None, "--source", help="Sessions from: claude | aistudio | gemini | all. Overrides global --source."),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
 ) -> None:
     """Show session, file, and version counts per source.
 
@@ -2264,7 +2262,7 @@ def stats(
         aise stats --source aistudio      # AI Studio only
         aise stats --source claude        # Claude Code only
     """
-    engine = _resolve_engine(ctx, source)
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)

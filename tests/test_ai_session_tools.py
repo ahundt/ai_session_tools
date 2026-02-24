@@ -632,14 +632,14 @@ def _invoke(args, tmp_path: Optional[Path] = None, projects: Optional[Path] = No
 class TestListCommand:
     def test_list_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "list"], env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        result = runner.invoke(app, ["--provider", "claude", "list"], env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "aaaa0001" in result.output
 
     def test_list_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "list", "--format", "json"],
+            app, ["--provider", "claude", "list", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -650,7 +650,7 @@ class TestListCommand:
     def test_list_project_filter(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "list", "--project", "proj1"],
+            app, ["--provider", "claude", "list", "--project", "proj1"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -665,7 +665,7 @@ class TestMessagesCorrections:
     def test_corrections_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "corrections"],
+            app, ["--provider", "claude", "messages", "corrections"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -673,7 +673,7 @@ class TestMessagesCorrections:
     def test_corrections_has_category(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "corrections"],
+            app, ["--provider", "claude", "messages", "corrections"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "skip_step" in result.output or "you forgot" in result.output
@@ -681,7 +681,7 @@ class TestMessagesCorrections:
     def test_corrections_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "corrections", "--format", "json"],
+            app, ["--provider", "claude", "messages", "corrections", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -692,7 +692,7 @@ class TestMessagesCorrections:
         projects = _make_projects_with_sessions(tmp_path)
         # Custom pattern that matches "start the feature" (not a default correction)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "corrections", "--pattern", "custom:start the feature"],
+            app, ["--provider", "claude", "messages", "corrections", "--pattern", "custom:start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -702,7 +702,7 @@ class TestMessagesCorrections:
         projects = _make_projects_with_sessions(tmp_path)
         # Pattern that won't match anything — built-in "you forgot" should NOT appear
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "corrections", "--pattern", "custom:xyzzy_nomatch_xyzzy"],
+            app, ["--provider", "claude", "messages", "corrections", "--pattern", "custom:xyzzy_nomatch_xyzzy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -712,7 +712,7 @@ class TestMessagesCorrections:
     def test_corrections_bad_pattern_format_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "corrections", "--pattern", "no-colon-here"],
+            app, ["--provider", "claude", "messages", "corrections", "--pattern", "no-colon-here"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -724,7 +724,7 @@ class TestMessagesSearchToolFlag:
     def test_tool_flag_returns_write_call(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "search", "*", "--tool", "Write"],
+            app, ["--provider", "claude", "messages", "search", "*", "--tool", "Write"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -733,7 +733,7 @@ class TestMessagesSearchToolFlag:
     def test_no_tool_unchanged(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "search", "start the feature"],
+            app, ["--provider", "claude", "messages", "search", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -746,7 +746,7 @@ class TestMessagesPlanning:
     def test_planning_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "planning"],
+            app, ["--provider", "claude", "messages", "planning"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -755,7 +755,7 @@ class TestMessagesPlanning:
     def test_planning_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "planning", "--format", "json"],
+            app, ["--provider", "claude", "messages", "planning", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -767,7 +767,7 @@ class TestMessagesPlanning:
         empty_projects = tmp_path / "empty_projects"
         empty_projects.mkdir()
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "planning"],
+            app, ["--provider", "claude", "messages", "planning"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(empty_projects)},
         )
         assert result.exit_code == 0
@@ -777,7 +777,7 @@ class TestMessagesPlanning:
         projects = _make_projects_with_sessions(tmp_path)
         # /ar:plannew is in session 1; /custom is not — result should have only /ar:plannew
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "planning", "--commands", "/ar:plannew"],
+            app, ["--provider", "claude", "messages", "planning", "--commands", "/ar:plannew"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -788,7 +788,7 @@ class TestMessagesPlanning:
     def test_planning_custom_commands_no_match(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "planning", "--commands", "/xyzzy_nomatch"],
+            app, ["--provider", "claude", "messages", "planning", "--commands", "/xyzzy_nomatch"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -798,7 +798,7 @@ class TestMessagesPlanning:
         projects = _make_projects_with_sessions(tmp_path)
         # Both /ar:plannew (s1) and /ar:pn (s2) are in fixture
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "planning", "--commands", "/ar:plannew,/ar:pn"],
+            app, ["--provider", "claude", "messages", "planning", "--commands", "/ar:plannew,/ar:pn"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -814,7 +814,7 @@ class TestFilesCrossRef:
         test_file = tmp_path / "login.py"
         test_file.write_text("def login():\n    pass\n")
         result = runner.invoke(
-            app, ["--source", "claude", "files", "cross-ref", str(test_file)],
+            app, ["--provider", "claude", "files", "cross-ref", str(test_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -824,7 +824,7 @@ class TestFilesCrossRef:
         test_file = tmp_path / "login.py"
         test_file.write_text("def login():\n    pass\n")
         result = runner.invoke(
-            app, ["--source", "claude", "files", "cross-ref", str(test_file)],
+            app, ["--provider", "claude", "files", "cross-ref", str(test_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "\u2713" in result.output or "✓" in result.output or "1/1" in result.output
@@ -834,7 +834,7 @@ class TestFilesCrossRef:
         test_file = tmp_path / "login.py"
         test_file.write_text("completely different content")
         result = runner.invoke(
-            app, ["--source", "claude", "files", "cross-ref", str(test_file)],
+            app, ["--provider", "claude", "files", "cross-ref", str(test_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "✗" in result.output or "0/1" in result.output
@@ -846,7 +846,7 @@ class TestExportSession:
     def test_export_session_stdout(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "export", "session", "aaaa0001"],
+            app, ["--provider", "claude", "export", "session", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -856,7 +856,7 @@ class TestExportSession:
         projects = _make_projects_with_sessions(tmp_path)
         out_file = tmp_path / "out.md"
         result = runner.invoke(
-            app, ["--source", "claude", "export", "session", "aaaa0001", "--output", str(out_file)],
+            app, ["--provider", "claude", "export", "session", "aaaa0001", "--output", str(out_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -867,7 +867,7 @@ class TestExportSession:
         projects = _make_projects_with_sessions(tmp_path)
         out_file = tmp_path / "dry.md"
         result = runner.invoke(
-            app, ["--source", "claude", "export", "session", "aaaa0001", "--output", str(out_file), "--dry-run"],
+            app, ["--provider", "claude", "export", "session", "aaaa0001", "--output", str(out_file), "--dry-run"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -879,7 +879,7 @@ class TestExportRecent:
         projects = _make_projects_with_sessions(tmp_path)
         out_file = tmp_path / "out.md"
         result = runner.invoke(
-            app, ["--source", "claude", "export", "recent", "365", "--output", str(out_file)],
+            app, ["--provider", "claude", "export", "recent", "365", "--output", str(out_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -888,7 +888,7 @@ class TestExportRecent:
     def test_export_recent_empty(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "export", "recent", "0"],
+            app, ["--provider", "claude", "export", "recent", "0"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -901,7 +901,7 @@ class TestToolsSearch:
     def test_tools_search_write_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "tools", "search", "Write"],
+            app, ["--provider", "claude", "tools", "search", "Write"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -909,7 +909,7 @@ class TestToolsSearch:
     def test_tools_search_with_query(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "tools", "search", "Write", "login"],
+            app, ["--provider", "claude", "tools", "search", "Write", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -918,7 +918,7 @@ class TestToolsSearch:
     def test_tools_search_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "tools", "search", "Write", "--format", "json"],
+            app, ["--provider", "claude", "tools", "search", "Write", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -928,7 +928,7 @@ class TestToolsSearch:
     def test_tools_find_alias(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "tools", "find", "Write"],
+            app, ["--provider", "claude", "tools", "find", "Write"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -940,7 +940,7 @@ class TestMessagesSearchPositional:
     def test_positional_query(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "search", "start the feature"],
+            app, ["--provider", "claude", "messages", "search", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -948,7 +948,7 @@ class TestMessagesSearchPositional:
     def test_query_flag_still_works(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "search", "--query", "start the feature"],
+            app, ["--provider", "claude", "messages", "search", "--query", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -960,7 +960,7 @@ class TestMessagesGetPositional:
     def test_positional_session_id(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "get", "aaaa0001"],
+            app, ["--provider", "claude", "messages", "get", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -968,7 +968,7 @@ class TestMessagesGetPositional:
     def test_session_flag_still_works(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "get", "--session", "aaaa0001"],
+            app, ["--provider", "claude", "messages", "get", "--session", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -978,7 +978,7 @@ class TestRootGetPositional:
     def test_root_get_positional(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "get", "aaaa0001"],
+            app, ["--provider", "claude", "get", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -990,7 +990,7 @@ class TestRootSearchToolFlag:
     def test_root_search_tool_flag(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "search", "--tool", "Write", "--query", "login"],
+            app, ["--provider", "claude", "search", "--tool", "Write", "--query", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -998,7 +998,7 @@ class TestRootSearchToolFlag:
     def test_root_search_tools_domain(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "search", "tools", "--tool", "Write", "--query", "login"],
+            app, ["--provider", "claude", "search", "tools", "--tool", "Write", "--query", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -1006,7 +1006,7 @@ class TestRootSearchToolFlag:
     def test_root_search_tools_domain_requires_tool(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "search", "tools"],
+            app, ["--provider", "claude", "search", "tools"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -1016,7 +1016,7 @@ class TestRootFindAlias:
     def test_find_alias_messages(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "find", "messages", "--query", "start the feature"],
+            app, ["--provider", "claude", "find", "messages", "--query", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -1024,7 +1024,7 @@ class TestRootFindAlias:
     def test_find_alias_tool(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "find", "--tool", "Write", "--query", "login"],
+            app, ["--provider", "claude", "find", "--tool", "Write", "--query", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -1034,7 +1034,7 @@ class TestFilesFindAlias:
     def test_files_find_alias(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "files", "find", "--pattern", "*.py"],
+            app, ["--provider", "claude", "files", "find", "--pattern", "*.py"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         # Should exit 0 (even if no files found in recovery dir)
@@ -1045,7 +1045,7 @@ class TestMessagesFindAlias:
     def test_messages_find_positional(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "find", "start the feature"],
+            app, ["--provider", "claude", "messages", "find", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -2995,7 +2995,7 @@ class TestPositionalArgExtract:
             os.environ["AI_SESSION_TOOLS_PROJECTS"] = str(tmp_path / "projects")
             os.environ["AI_SESSION_TOOLS_RECOVERY"] = str(recovery)
             cli_module._g_claude_dir = None
-            result = runner.invoke(app, ["--source", "claude", "files", "extract", "hello.py"])
+            result = runner.invoke(app, ["--provider", "claude", "files", "extract", "hello.py"])
         finally:
             if old_projects is None:
                 os.environ.pop("AI_SESSION_TOOLS_PROJECTS", None)
@@ -3250,7 +3250,7 @@ class TestLoadConfig:
         self._reset_cache()
         import os
         env = {"AI_SESSION_TOOLS_CONFIG": str(tmp_path / "nonexistent.json")}
-        result = runner.invoke(app, ["--source", "claude", "list"], env=env)
+        result = runner.invoke(app, ["--provider", "claude", "list"], env=env)
         # No crash; config loading returns empty dict silently
         from ai_session_tools.cli import load_config
         self._reset_cache()
@@ -3310,7 +3310,7 @@ class TestConfigFileCorrectionsIntegration:
             "correction_patterns": ["config_cat:you forgot"]
         }))
         projects = self._projects(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "corrections", "--format", "json"], env={
+        result = runner.invoke(app, ["--provider", "claude", "messages", "corrections", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
@@ -3329,7 +3329,7 @@ class TestConfigFileCorrectionsIntegration:
         }))
         projects = self._projects(tmp_path)
         result = runner.invoke(app, [
-            "--source", "claude", "messages", "corrections", "--format", "json",
+            "--provider", "claude", "messages", "corrections", "--format", "json",
             "--pattern", "cli_cat:you forgot",
         ], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
@@ -3359,7 +3359,7 @@ class TestConfigFilePlanningIntegration:
             "planning_commands": [r"/ar:plannew\b"]
         }))
         projects = self._projects(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "planning", "--format", "json"], env={
+        result = runner.invoke(app, ["--provider", "claude", "messages", "planning", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
@@ -3378,7 +3378,7 @@ class TestConfigFilePlanningIntegration:
         }))
         projects = self._projects(tmp_path)
         result = runner.invoke(app, [
-            "--source", "claude", "messages", "planning", "--format", "json",
+            "--provider", "claude", "messages", "planning", "--format", "json",
             "--commands", r"/ar:plannew\b",
         ], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
@@ -3590,7 +3590,7 @@ class TestMessagesPlanningDiscovery:
     def test_planning_discovery_exit0(self, tmp_path):
         """Default (no --commands) uses discovery mode and exits 0."""
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "planning"], env={
+        result = runner.invoke(app, ["--provider", "claude", "messages", "planning"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
         assert result.exit_code == 0, result.output
@@ -3598,7 +3598,7 @@ class TestMessagesPlanningDiscovery:
     def test_planning_discovery_finds_commands(self, tmp_path):
         """Default output includes auto-discovered /ar:plannew."""
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "planning"], env={
+        result = runner.invoke(app, ["--provider", "claude", "messages", "planning"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
         assert result.exit_code == 0
@@ -3607,7 +3607,7 @@ class TestMessagesPlanningDiscovery:
     def test_planning_discovery_json_format(self, tmp_path):
         """Discovery mode with --format json returns valid JSON with command key."""
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "planning", "--format", "json"], env={
+        result = runner.invoke(app, ["--provider", "claude", "messages", "planning", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
         assert result.exit_code == 0
@@ -3619,7 +3619,7 @@ class TestMessagesPlanningDiscovery:
         """--commands flag switches to pattern mode, overriding discovery."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(app, [
-            "--source", "claude", "messages", "planning", "--commands", r"/ar:plannew\b", "--format", "json"
+            "--provider", "claude", "messages", "planning", "--commands", r"/ar:plannew\b", "--format", "json"
         ], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
@@ -4020,13 +4020,13 @@ class TestSearchMessagesWithContext:
 class TestMessagesSearchContext:
     def test_context_flag_accepted(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "search", "feature", "--context", "2"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "search", "feature", "--context", "2"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_context_shows_surrounding_messages(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "search", "start the feature",
+        result = runner.invoke(app, ["--provider", "claude", "messages", "search", "start the feature",
                                      "--context", "1"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
@@ -4035,13 +4035,13 @@ class TestMessagesSearchContext:
 
     def test_context_zero_same_as_default(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "search", "feature", "--context", "0"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "search", "feature", "--context", "0"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_context_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "search", "feature",
+        result = runner.invoke(app, ["--provider", "claude", "messages", "search", "feature",
                                      "--context", "1", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
@@ -4058,27 +4058,27 @@ class TestMessagesSearchContext:
 class TestMessagesAnalyze:
     def test_analyze_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "inspect", "aaaa0001"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "inspect", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_analyze_shows_tool_name(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "inspect", "aaaa0001"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "inspect", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "Write" in result.output
 
     def test_analyze_shows_file_path(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "inspect", "aaaa0001"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "inspect", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "login.py" in result.output
 
     def test_analyze_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "inspect", "aaaa0001", "--format", "json"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "inspect", "aaaa0001", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -4089,7 +4089,7 @@ class TestMessagesAnalyze:
 
     def test_analyze_missing_session_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "inspect", "nonexistent-session"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "inspect", "nonexistent-session"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code != 0
 
@@ -4099,13 +4099,13 @@ class TestMessagesAnalyze:
 class TestMessagesTimeline:
     def test_timeline_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "timeline", "aaaa0001"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "timeline", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_timeline_shows_event_types(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "timeline", "aaaa0001"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "timeline", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "user" in result.output
@@ -4113,7 +4113,7 @@ class TestMessagesTimeline:
 
     def test_timeline_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "timeline", "aaaa0001", "--format", "json"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "timeline", "aaaa0001", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -4133,7 +4133,7 @@ class TestMessagesTimeline:
 
     def test_timeline_preview_chars_option(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["--source", "claude", "messages", "timeline", "aaaa0001",
+        result = runner.invoke(app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
                                      "--preview-chars", "10", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
@@ -4486,7 +4486,7 @@ class TestMessagesExtractCLI:
     def test_extract_pbcopy_exit0(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "extract", "dddd0001", "pbcopy"],
+            app, ["--provider", "claude", "messages", "extract", "dddd0001", "pbcopy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -4494,7 +4494,7 @@ class TestMessagesExtractCLI:
     def test_extract_pbcopy_shows_content(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "extract", "dddd0001", "pbcopy"],
+            app, ["--provider", "claude", "messages", "extract", "dddd0001", "pbcopy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "clipboard" in result.output
@@ -4502,7 +4502,7 @@ class TestMessagesExtractCLI:
     def test_extract_pbcopy_json_format(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "extract", "dddd0001", "pbcopy", "--format", "json"],
+            app, ["--provider", "claude", "messages", "extract", "dddd0001", "pbcopy", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -4513,7 +4513,7 @@ class TestMessagesExtractCLI:
     def test_extract_missing_session_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "extract", "zzzz", "pbcopy"],
+            app, ["--provider", "claude", "messages", "extract", "zzzz", "pbcopy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -4521,7 +4521,7 @@ class TestMessagesExtractCLI:
     def test_extract_invalid_type_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["--source", "claude", "messages", "extract", "dddd0001", "invalid-type"],
+            app, ["--provider", "claude", "messages", "extract", "dddd0001", "invalid-type"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
