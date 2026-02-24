@@ -229,6 +229,7 @@ _PLANNING_SPEC = TableSpec(
 # Module-level overrides set by global options
 _g_claude_dir: Optional[str] = None
 _g_config_path: Optional[str] = None
+_g_source: str = "claude"  # --source flag: "claude" | "aistudio" | "gemini" | "all"
 _config_cache: Optional[dict] = None  # lazily loaded, reset per process
 
 
@@ -321,12 +322,24 @@ def app_callback(
         ),
         envvar="AI_SESSION_TOOLS_CONFIG",
     ),
+    source: Optional[str] = typer.Option(
+        None, "--source",
+        help=(
+            "Session source backend: claude (default), aistudio, gemini, or all. "
+            "claude: Claude Code JSONL sessions in ~/.claude/projects/. "
+            "aistudio: Google AI Studio JSON/md sessions (paths from config). "
+            "gemini: Gemini CLI JSON sessions in ~/.gemini/tmp/. "
+            "all: aggregate stats/list across all configured sources."
+        ),
+    ),
 ) -> None:
-    global _g_claude_dir, _g_config_path, _config_cache
+    global _g_claude_dir, _g_config_path, _g_source, _config_cache
     _g_claude_dir = claude_dir
     if config != _g_config_path:
         _g_config_path = config
         _config_cache = None  # invalidate cache when path changes
+    if source is not None:
+        _g_source = source
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
@@ -362,6 +375,109 @@ def get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] =
 
     # expanduser() so that env var values like "~/.claude/projects" work correctly
     return SessionRecoveryEngine(Path(projects_dir).expanduser(), Path(recovery_dir).expanduser())
+
+
+# ── Multi-source engine factory ───────────────────────────────────────────────
+
+def get_multi_source_engine():
+    """Return a MultiSourceEngine for the current --source selection.
+
+    Used by stats/list/search when --source != 'claude'.
+    Source backends come from config.json — no hardcoded paths (WOLOG).
+    """
+    from ai_session_tools.engine import get_multi_engine
+    cfg = load_config()
+    return get_multi_engine(cfg)
+
+
+def _do_multi_stats(source: str) -> None:
+    """Print stats across all configured session sources."""
+    from ai_session_tools.sources.aistudio import AiStudioSource
+    from ai_session_tools.sources.gemini_cli import GeminiCliSource
+    cfg = load_config()
+    sd = cfg.get("source_dirs", {})
+
+    rows: list[tuple[str, int]] = []
+
+    if source in ("aistudio", "all"):
+        ai_dirs = sd.get("aistudio", [])
+        if isinstance(ai_dirs, str):
+            ai_dirs = [ai_dirs]
+        ai_src = AiStudioSource([Path(p) for p in ai_dirs])
+        ai_count = sum(1 for _ in ai_src.stream_sessions())
+        rows.append(("AI Studio", ai_count))
+
+    if source in ("gemini", "all"):
+        gc_dir = sd.get("gemini_cli", "")
+        if gc_dir:
+            gc_src = GeminiCliSource(Path(gc_dir))
+            gc_count = sum(1 for _ in gc_src.stream_sessions())
+            rows.append(("Gemini CLI", gc_count))
+
+    if source == "all":
+        try:
+            claude_engine = get_engine()
+            stats_data = claude_engine.get_stats()
+            rows.append(("Claude Code", stats_data.get("total_sessions", 0)))
+        except Exception:
+            pass
+
+    from rich.table import Table
+    table = Table(title=f"Session Counts (--source {source})")
+    table.add_column("Source", style="cyan")
+    table.add_column("Sessions", justify="right")
+    total = 0
+    for name, count in rows:
+        table.add_row(name, str(count))
+        total += count
+    table.add_row("[bold]Total[/bold]", f"[bold]{total}[/bold]")
+    console.print(table)
+
+
+def _do_multi_list(source: str, limit: Optional[int], fmt: str) -> None:
+    """List sessions from non-Claude source backends."""
+    import contextlib
+    from ai_session_tools.sources.aistudio import AiStudioSource
+    from ai_session_tools.sources.gemini_cli import GeminiCliSource
+    cfg = load_config()
+    sd = cfg.get("source_dirs", {})
+
+    rows: list[dict] = []
+
+    if source in ("aistudio", "all"):
+        ai_dirs = sd.get("aistudio", [])
+        if isinstance(ai_dirs, str):
+            ai_dirs = [ai_dirs]
+        ai_src = AiStudioSource([Path(p) for p in ai_dirs])
+        for si in ai_src.stream_sessions():
+            rows.append({"source": "aistudio", "id": si.session_id,
+                         "dir": si.project_dir, "format": getattr(si, "source_format", "aistudio")})
+            if limit and len(rows) >= limit:
+                break
+
+    if source in ("gemini", "all") and (not limit or len(rows) < limit):
+        gc_dir = sd.get("gemini_cli", "")
+        if gc_dir:
+            gc_src = GeminiCliSource(Path(gc_dir))
+            for si in gc_src.stream_sessions():
+                rows.append({"source": "gemini", "id": si.session_id,
+                             "dir": si.project_dir, "format": "gemini_cli"})
+                if limit and len(rows) >= limit:
+                    break
+
+    if fmt == "json":
+        import sys as _sys
+        _sys.stdout.write(json.dumps(rows, indent=2) + "\n")
+        return
+
+    from rich.table import Table
+    table = Table(title=f"Sessions (--source {source}, {len(rows)} total)")
+    table.add_column("Source", style="cyan", no_wrap=True)
+    table.add_column("Session ID", style="green")
+    table.add_column("Directory")
+    for row in rows:
+        table.add_row(row["source"], row["id"], row["dir"])
+    console.print(table)
 
 
 # ── Shared helper functions ───────────────────────────────────────────────────
@@ -1757,15 +1873,24 @@ def list_sessions(
     limit: Optional[int] = typer.Option(None, "--limit", help="Max sessions to return. Default: unlimited."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ) -> None:
-    """List Claude Code sessions with metadata (project, date, branch, message count).
+    """List sessions with metadata.
+
+    Use --source to switch backends:
+        aise list                              # Claude Code sessions (default)
+        aise --source aistudio list            # AI Studio sessions
+        aise --source gemini list              # Gemini CLI sessions
+        aise --source all list                 # All configured sources
 
     Examples:
-        aise list                              # all sessions
+        aise list                              # all Claude Code sessions
         aise list --project myproject          # filter by project
         aise list --after 2026-01-01           # sessions since Jan 1
         aise list --format json                # JSON output
     """
-    _do_list_sessions(get_engine(), project, after, before, limit, fmt)
+    if _g_source != "claude":
+        _do_multi_list(_g_source, limit, fmt)
+    else:
+        _do_list_sessions(get_engine(), project, after, before, limit, fmt)
 
 
 def _root_search_cmd(
@@ -1900,8 +2025,18 @@ def get(
 
 @app.command()
 def stats() -> None:
-    """Show counts of sessions, files, versions, and the most-edited file."""
-    _do_stats(get_engine())
+    """Show counts of sessions, files, versions, and the most-edited file.
+
+    Use --source to switch backends:
+        aise stats                   # Claude Code sessions (default)
+        aise --source aistudio stats # AI Studio session count
+        aise --source gemini stats   # Gemini CLI session count
+        aise --source all stats      # All configured sources
+    """
+    if _g_source != "claude":
+        _do_multi_stats(_g_source)
+    else:
+        _do_stats(get_engine())
 
 
 # ── Config app ───────────────────────────────────────────────────────────────
