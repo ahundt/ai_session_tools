@@ -846,7 +846,7 @@ class TestExportSession:
     def test_export_session_stdout(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["export", "session", "aaaa0001"],
+            app, ["--source", "claude", "export", "session", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -856,7 +856,7 @@ class TestExportSession:
         projects = _make_projects_with_sessions(tmp_path)
         out_file = tmp_path / "out.md"
         result = runner.invoke(
-            app, ["export", "session", "aaaa0001", "--output", str(out_file)],
+            app, ["--source", "claude", "export", "session", "aaaa0001", "--output", str(out_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -867,7 +867,7 @@ class TestExportSession:
         projects = _make_projects_with_sessions(tmp_path)
         out_file = tmp_path / "dry.md"
         result = runner.invoke(
-            app, ["export", "session", "aaaa0001", "--output", str(out_file), "--dry-run"],
+            app, ["--source", "claude", "export", "session", "aaaa0001", "--output", str(out_file), "--dry-run"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -879,7 +879,7 @@ class TestExportRecent:
         projects = _make_projects_with_sessions(tmp_path)
         out_file = tmp_path / "out.md"
         result = runner.invoke(
-            app, ["export", "recent", "365", "--output", str(out_file)],
+            app, ["--source", "claude", "export", "recent", "365", "--output", str(out_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -888,7 +888,7 @@ class TestExportRecent:
     def test_export_recent_empty(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["export", "recent", "0"],
+            app, ["--source", "claude", "export", "recent", "0"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
