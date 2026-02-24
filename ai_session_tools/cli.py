@@ -454,13 +454,15 @@ _PLANNING_SPEC = TableSpec(
 
 # Module-level overrides set by global options
 _g_claude_dir: Optional[str] = None
-_g_source: str = "claude"  # --source flag: "claude" | "aistudio" | "gemini" | "all"
+# NOTE: _g_source is being deprecated in favor of ctx.obj["engine"] composition root (C7)
+# Kept for backward compatibility with get_engine() during transition
 
-# Import config loading from shared module to ensure all parts of the app use the same loader
+# Import config loading and session backend from shared modules
 from ai_session_tools.config import load_config, set_config_path  # noqa: E402
+from ai_session_tools.engine import get_session_backend  # noqa: E402
 
 
-# ── Root app callback (global options) ────────────────────────────────────────
+# ── Root app callback (global options + composition root) ────────────────────────
 
 @app.callback(invoke_without_command=True)
 def app_callback(
@@ -497,12 +499,27 @@ def app_callback(
         ),
     ),
 ) -> None:
-    global _g_claude_dir, _g_source
+    """Composition root: builds SessionBackend once, injects into ctx.obj for all subcommands.
+
+    Priority for --config flag:
+      1. --config CLI flag (absolute priority)
+      2. AI_SESSION_TOOLS_CONFIG env var
+      3. typer.get_app_dir("ai_session_tools") / "config.json" (OS default)
+
+    This ensures all parts of the app use the same config loader (no dual-loading bugs).
+    """
+    global _g_claude_dir
     _g_claude_dir = claude_dir
     # Notify shared config module about --config flag so all parts of app use same config
     set_config_path(config)
-    if source is not None:
-        _g_source = source
+
+    # ── COMPOSITION ROOT: Build SessionBackend ONCE, inject into ctx.obj ──
+    # ctx.obj is inherited by all child contexts (sub-apps, sub-commands)
+    ctx.ensure_object(dict)
+    cfg = load_config()  # already handles _g_config_path / env var priority
+    ctx.obj["engine"] = get_session_backend(source=source, claude_dir=claude_dir, config=cfg)
+    ctx.obj["source"] = source  # None = auto-detected; can be accessed by commands
+
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
