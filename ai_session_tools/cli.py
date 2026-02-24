@@ -454,8 +454,6 @@ _PLANNING_SPEC = TableSpec(
 
 # Module-level overrides set by global options
 _g_claude_dir: Optional[str] = None
-# NOTE: _g_source is being deprecated in favor of ctx.obj["engine"] composition root (C7)
-# Kept for backward compatibility with get_engine() during transition
 
 # Import config loading and session backend from shared modules
 from ai_session_tools.config import load_config, set_config_path  # noqa: E402
@@ -555,220 +553,6 @@ def get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] =
 
     # expanduser() so that env var values like "~/.claude/projects" work correctly
     return SessionRecoveryEngine(Path(projects_dir).expanduser(), Path(recovery_dir).expanduser())
-
-
-# ── Multi-source engine factory ───────────────────────────────────────────────
-
-def get_multi_source_engine():
-    """Return a MultiSourceEngine for the current --source selection.
-
-    Used by stats/list/search when --source != 'claude'.
-    Source backends come from config.json — no hardcoded paths (WOLOG).
-    """
-    from ai_session_tools.engine import get_multi_engine
-    cfg = load_config()
-    return get_multi_engine(cfg)
-
-
-def _do_multi_stats(source: str) -> None:
-    """Print stats across all configured session sources."""
-    from ai_session_tools.sources.aistudio import AiStudioSource
-    from ai_session_tools.sources.gemini_cli import GeminiCliSource
-    cfg = load_config()
-    sd = cfg.get("source_dirs", {})
-
-    rows: list[tuple[str, int]] = []
-
-    if source in ("aistudio", "all"):
-        ai_dirs = sd.get("aistudio", [])
-        if isinstance(ai_dirs, str):
-            ai_dirs = [ai_dirs]
-        ai_src = AiStudioSource([Path(p) for p in ai_dirs])
-        ai_count = sum(1 for _ in ai_src.stream_sessions())
-        rows.append(("AI Studio", ai_count))
-
-    if source in ("gemini", "all"):
-        gc_dir = sd.get("gemini_cli", "")
-        if gc_dir:
-            gc_src = GeminiCliSource(Path(gc_dir))
-            gc_count = sum(1 for _ in gc_src.stream_sessions())
-            rows.append(("Gemini CLI", gc_count))
-
-    if source == "all":
-        try:
-            claude_engine = get_engine()
-            stats_data = claude_engine.get_stats()
-            rows.append(("Claude Code", stats_data.get("total_sessions", 0)))
-        except Exception:
-            pass
-
-    from rich.table import Table
-    table = Table(title=f"Session Counts (--source {source})")
-    table.add_column("Source", style="cyan")
-    table.add_column("Sessions", justify="right")
-    total = 0
-    for name, count in rows:
-        table.add_row(name, str(count))
-        total += count
-    table.add_row("[bold]Total[/bold]", f"[bold]{total}[/bold]")
-    console.print(table)
-
-
-def _do_multi_list(source: str, limit: Optional[int], fmt: str) -> None:
-    """List sessions from non-Claude source backends."""
-    import contextlib
-    from ai_session_tools.sources.aistudio import AiStudioSource
-    from ai_session_tools.sources.gemini_cli import GeminiCliSource
-    cfg = load_config()
-    sd = cfg.get("source_dirs", {})
-
-    rows: list[dict] = []
-
-    if source in ("aistudio", "all"):
-        ai_dirs = sd.get("aistudio", [])
-        if isinstance(ai_dirs, str):
-            ai_dirs = [ai_dirs]
-        ai_src = AiStudioSource([Path(p) for p in ai_dirs])
-        for si in ai_src.stream_sessions():
-            rows.append({"source": "aistudio", "id": si.session_id,
-                         "dir": si.project_dir, "format": getattr(si, "source_format", "aistudio")})
-            if limit and len(rows) >= limit:
-                break
-
-    if source in ("gemini", "all") and (not limit or len(rows) < limit):
-        gc_dir = sd.get("gemini_cli", "")
-        if gc_dir:
-            gc_src = GeminiCliSource(Path(gc_dir))
-            for si in gc_src.stream_sessions():
-                rows.append({"source": "gemini", "id": si.session_id,
-                             "dir": si.project_dir, "format": "gemini_cli"})
-                if limit and len(rows) >= limit:
-                    break
-
-    if fmt == "json":
-        import sys as _sys
-        _sys.stdout.write(json.dumps(rows, indent=2) + "\n")
-        return
-
-    from rich.table import Table
-    table = Table(title=f"Sessions (--source {source}, {len(rows)} total)")
-    table.add_column("Source", style="cyan", no_wrap=True)
-    table.add_column("Session ID", style="green")
-    table.add_column("Directory")
-    for row in rows:
-        table.add_row(row["source"], row["id"], row["dir"])
-    console.print(table)
-
-
-def _do_multi_messages_search(
-    source: str, query: str,
-    message_type: Optional[str] = None,
-    limit: int = 10, max_chars: int = 0, fmt: str = "table",
-) -> None:
-    """Search messages across non-Claude source backends.
-
-    Delegates to AiStudioSource/GeminiCliSource search_messages() and renders
-    results using the same table format as _do_messages_search(). Context
-    (--context) and --tool are not supported for multi-source backends.
-    """
-    import contextlib
-    from ai_session_tools.sources.aistudio import AiStudioSource
-    from ai_session_tools.sources.gemini_cli import GeminiCliSource
-    cfg = load_config()
-    sd = cfg.get("source_dirs", {})
-    results = []
-
-    if source in ("aistudio", "all"):
-        ai_dirs = sd.get("aistudio", [])
-        if isinstance(ai_dirs, str):
-            ai_dirs = [ai_dirs]
-        with contextlib.suppress(Exception):
-            ai_src = AiStudioSource([Path(p) for p in ai_dirs])
-            results.extend(ai_src.search_messages(query, message_type))
-
-    if source in ("gemini", "all"):
-        gc_dir = sd.get("gemini_cli", "")
-        if gc_dir:
-            with contextlib.suppress(Exception):
-                gc_src = GeminiCliSource(Path(gc_dir))
-                results.extend(gc_src.search_messages(query, message_type))
-
-    results = results[:limit]
-    if not results:
-        console.print("[yellow]No messages match query[/yellow]")
-        return
-
-    truncate = max_chars if max_chars > 0 else None
-    if fmt == "json":
-        import sys as _sys
-        _sys.stdout.write(json.dumps([r.to_dict() for r in results], indent=2) + "\n")
-        return
-
-    spec = TableSpec(
-        title_template=f"Messages ({{n}} found) [source: {source}]",
-        columns=[
-            ColumnSpec("Timestamp", style="dim", no_wrap=True),
-            ColumnSpec("Type", style="cyan"),
-            ColumnSpec("Session", style="blue"),
-            ColumnSpec("Content"),
-        ],
-        row_fn=lambda d: [
-            d.get("timestamp", "")[:19],
-            d.get("type", ""),
-            (d.get("session_id", "")[:30] + "\u2026"),
-            d.get("content", "")[:truncate],
-        ],
-        summary_template="Found {n} messages",
-    )
-    _render_output(results, fmt, spec)
-
-
-def _do_multi_messages_get(
-    source: str, session_id: str,
-    message_type: Optional[str] = None,
-    limit: int = 10, max_chars: int = 0, fmt: str = "table",
-) -> None:
-    """Get messages from a specific session in non-Claude source backends.
-
-    Searches for session by name/ID substring match across configured sources.
-    """
-    import contextlib
-    from ai_session_tools.sources.aistudio import AiStudioSource
-    from ai_session_tools.sources.gemini_cli import GeminiCliSource
-    cfg = load_config()
-    sd = cfg.get("source_dirs", {})
-    found_messages = []
-
-    def _collect(src, sid: str) -> None:
-        for si in src.stream_sessions():
-            if sid.lower() in si.session_id.lower():
-                msgs = src.read_session(si)
-                if message_type:
-                    msgs = [m for m in msgs if m.type.value == message_type]
-                found_messages.extend(msgs[:limit])
-                if len(found_messages) >= limit:
-                    return
-
-    if source in ("aistudio", "all"):
-        ai_dirs = sd.get("aistudio", [])
-        if isinstance(ai_dirs, str):
-            ai_dirs = [ai_dirs]
-        with contextlib.suppress(Exception):
-            _collect(AiStudioSource([Path(p) for p in ai_dirs]), session_id)
-
-    if source in ("gemini", "all") and len(found_messages) < limit:
-        gc_dir = sd.get("gemini_cli", "")
-        if gc_dir:
-            with contextlib.suppress(Exception):
-                _collect(GeminiCliSource(Path(gc_dir)), session_id)
-
-    if not found_messages:
-        console.print(f"[yellow]No messages found for session '{session_id}'[/yellow]")
-        return
-
-    formatter = MessageFormatter(max_chars=max_chars)
-    console.print(formatter.format_many(found_messages[:limit]))
-    console.print(f"\n[bold]Found {len(found_messages[:limit])} messages[/bold]")
 
 
 # ── Shared helper functions ───────────────────────────────────────────────────
@@ -1677,6 +1461,7 @@ def _do_stats(engine: SessionRecoveryEngine) -> None:
 
 @export_app.command("session")
 def export_session(
+    ctx: typer.Context,
     session_id: str = typer.Argument(..., help="Session ID (prefix match, e.g. ab841016)."),
     output: Optional[str] = typer.Option(
         None, "--output", "-o",
@@ -1695,11 +1480,16 @@ def export_session(
         aise export session ab841016 --output out.md    # write explicitly
         aise export session ab841016 --dry-run          # preview only
     """
-    _do_export_session(get_engine(), session_id, output=output, dry_run=dry_run)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_export_session(engine, session_id, output=output, dry_run=dry_run)
 
 
 @export_app.command("recent")
 def export_recent(
+    ctx: typer.Context,
     days: int = typer.Argument(7, help="Number of days back to include (default: 7)."),
     output: Optional[str] = typer.Option(
         None, "--output", "-o",
@@ -1715,13 +1505,18 @@ def export_recent(
         aise export recent 14 --output week2.md       # last 14 days → file
         aise export recent --project myproject        # filter by project
     """
-    _do_export_recent(get_engine(), days=days, output=output, project=project, dry_run=dry_run)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_export_recent(engine, days=days, output=output, project=project, dry_run=dry_run)
 
 
 # ── files_app commands ────────────────────────────────────────────────────────
 
 @files_app.command("search")
 def files_search(
+    ctx: typer.Context,
     pattern: str = typer.Option("*", "--pattern", "-p", help="Filename glob/regex to match (e.g. '*.py', 'cli*'). Default: * (all files)"),
     min_edits: int = typer.Option(0, "--min-edits", help="Only show files edited at least this many times across all sessions. Default: 0"),
     max_edits: Optional[int] = typer.Option(None, "--max-edits", help="Only show files edited at most this many times. Default: unlimited"),
@@ -1746,7 +1541,11 @@ def files_search(
         aise files search -i py,md --after 2026-01-15      # Python/Markdown since Jan 15
         aise files search --after 2026-01-15T14:30:00      # files modified after specific time
     """
-    _do_files_search(get_engine(), pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, after, before, limit, fmt)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_files_search(engine, pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, after, before, limit, fmt)
 
 
 # Register 'find' as alias for 'files search'
@@ -1755,6 +1554,7 @@ files_app.command("find")(files_search)
 
 @files_app.command("extract")
 def files_extract(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
     version: Optional[int] = typer.Option(
         None, "--version", "-v",
@@ -1814,11 +1614,16 @@ def files_extract(
         aise files extract cli.py --restore --dry-run    # preview restore
         aise files extract cli.py --output-dir ./backup  # write to ./backup/
     """
-    _do_extract(get_engine(), name, version=version, session=session, output_dir=output_dir, restore=restore, dry_run=dry_run)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_extract(engine, name, version=version, session=session, output_dir=output_dir, restore=restore, dry_run=dry_run)
 
 
 @files_app.command("history")
 def files_history(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to versions from this session ID (prefix match)."),
     export: bool = typer.Option(False, "--export", help="Write all versions to disk as cli_v1.py, cli_v2.py, etc."),
@@ -1840,7 +1645,10 @@ def files_history(
         aise files history cli.py --export --export-dir ./versions
         aise files history cli.py --stdout                  # all versions to stdout
     """
-    engine = get_engine()
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
     versions = engine.get_versions(name)
 
     if session:
@@ -1862,6 +1670,7 @@ def files_history(
 
 @files_app.command("cross-ref")
 def files_cross_ref(
+    ctx: typer.Context,
     file: str = typer.Argument(..., help="Path to a file to compare against session edits (e.g. ./cli.py)."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to one session (prefix match)."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
@@ -1873,7 +1682,11 @@ def files_cross_ref(
         aise files cross-ref ./engine.py --session ab841016
         aise files cross-ref ./cli.py --format json
     """
-    _do_files_cross_ref(get_engine(), file, session, fmt)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_files_cross_ref(engine, file, session, fmt)
 
 
 # Add 'find' as alias for 'files search' (registered after files_search is defined below)
@@ -1881,6 +1694,7 @@ def files_cross_ref(
 # ── messages_app commands ─────────────────────────────────────────────────────
 
 def _messages_search_cmd(
+    ctx: typer.Context,
     query: Optional[str] = typer.Argument(None, help="Text to search for in messages. Use quotes for multi-word queries."),
     query_opt: Optional[str] = typer.Option(None, "--query", "-q", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
@@ -1908,11 +1722,13 @@ def _messages_search_cmd(
         aise messages search "error" --context 3       # show 3 surrounding messages
     """
     q = query or query_opt
-    if _g_source != "claude":
-        _do_multi_messages_search(_g_source, q or "", message_type, limit, max_chars, fmt)
-    else:
-        _do_messages_search(get_engine(), q or "", message_type, limit, max_chars, fmt,
-                            tool=tool, context=context)
+    # Get backend from composition root (ctx.obj injected by app_callback)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_messages_search(engine, q or "", message_type, limit, max_chars, fmt,
+                        tool=tool, context=context)
 
 
 _register_alias(messages_app, _messages_search_cmd, "search", "find")
@@ -1920,6 +1736,7 @@ _register_alias(messages_app, _messages_search_cmd, "search", "find")
 
 @messages_app.command("get")
 def messages_get(
+    ctx: typer.Context,
     session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016). Find IDs via 'aise list'."),
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
@@ -1935,17 +1752,17 @@ def messages_get(
         aise messages get ab841016 --type user
     """
     sid = session_id or session_opt
-    if _g_source != "claude":
-        if not sid:
-            err_console.print("[red]Session ID is required.[/red] Use 'aise list --source aistudio' to find session IDs.")
-            raise typer.Exit(code=1)
-        _do_multi_messages_get(_g_source, sid, message_type, limit, max_chars, fmt)
-    else:
-        _do_get(get_engine(), sid, message_type, limit, max_chars, fmt)
+    # Get backend from composition root (ctx.obj injected by app_callback)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_get(engine, sid, message_type, limit, max_chars, fmt)
 
 
 @messages_app.command("corrections")
 def messages_corrections(
+    ctx: typer.Context,
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
     after: Optional[str] = typer.Option(None, "--after", help="Only corrections after this date."),
     before: Optional[str] = typer.Option(None, "--before"),
@@ -1980,12 +1797,17 @@ def messages_corrections(
         aise messages corrections --pattern 'regression:you deleted' --pattern 'regression:you removed'
         aise messages corrections --pattern 'oops:nono' --pattern 'oops:that.s wrong'
     """
-    _do_messages_corrections(get_engine(), project, after, before, limit, fmt,
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_messages_corrections(engine, project, after, before, limit, fmt,
                               pattern_overrides=pattern)
 
 
 @messages_app.command("planning")
 def messages_planning(
+    ctx: typer.Context,
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
     after: Optional[str] = typer.Option(None, "--after", help="Only commands after this date."),
     before: Optional[str] = typer.Option(None, "--before", help="Only commands before this date."),
@@ -2020,11 +1842,16 @@ def messages_planning(
         aise messages planning --commands '/ar:plannew,/ar:pn'
         aise messages planning --commands '/mycommand,/mc,/plan,/p'
     """
-    _do_messages_planning(get_engine(), project, after, before, fmt, commands_raw=commands)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_messages_planning(engine, project, after, before, fmt, commands_raw=commands)
 
 
-@messages_app.command("analyze")
-def messages_analyze(
+@messages_app.command("inspect")
+def messages_inspect(
+    ctx: typer.Context,
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. ab841016). Find IDs via 'aise list'."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ) -> None:
@@ -2034,14 +1861,19 @@ def messages_analyze(
     input — not hardcoded to specific tool names.
 
     Examples:
-        aise messages analyze ab841016
-        aise messages analyze ab841016 --format json
+        aise messages inspect ab841016
+        aise messages inspect ab841016 --format json
     """
-    _do_messages_analyze(get_engine(), session_id, fmt)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_messages_analyze(engine, session_id, fmt)
 
 
 @messages_app.command("timeline")
 def messages_timeline(
+    ctx: typer.Context,
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. ab841016). Find IDs via 'aise list'."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
     preview_chars: int = typer.Option(
@@ -2059,7 +1891,11 @@ def messages_timeline(
         aise messages timeline ab841016 --format json
         aise messages timeline ab841016 --preview-chars 80
     """
-    _do_messages_timeline(get_engine(), session_id, fmt, preview_chars=preview_chars)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_messages_timeline(engine, session_id, fmt, preview_chars=preview_chars)
 
 
 #: Supported content extraction types for ``messages extract``.
@@ -2102,6 +1938,7 @@ def _do_messages_extract(
 
 @messages_app.command("extract")
 def messages_extract(
+    ctx: typer.Context,
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. dddd0001). Find IDs via 'aise list'."),
     content_type: str = typer.Argument(
         ...,
@@ -2132,12 +1969,17 @@ def messages_extract(
 
         aise messages extract dddd0001 pbcopy --format plain
     """
-    _do_messages_extract(get_engine(), session_id, content_type, fmt)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_messages_extract(engine, session_id, content_type, fmt)
 
 
 # ── tools_app commands ────────────────────────────────────────────────────────
 
 def _tools_search_cmd(
+    ctx: typer.Context,
     tool: str = typer.Argument(..., help="Tool name (e.g. Bash, Edit, Write, Read, Glob, Grep)."),
     query: Optional[str] = typer.Argument(None, help="Optional text to match in tool input. Omit to list all uses."),
     limit: int = typer.Option(10, "--limit", help="Max results. Default: 10"),
@@ -2154,8 +1996,12 @@ def _tools_search_cmd(
         aise tools find Edit "cli.py"                # find alias
         aise tools search Write --format json        # JSON output
     """
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
     _do_messages_search(
-        get_engine(), query or "", message_type="assistant",
+        engine, query or "", message_type="assistant",
         limit=limit, max_chars=max_chars, fmt=fmt, tool=tool,
     )
 
@@ -2197,6 +2043,7 @@ def list_sessions(
 
 
 def _root_search_cmd(
+    ctx: typer.Context,
     domain: Optional[str] = typer.Argument(None, metavar="[files|messages|tools]",
         help="Domain: 'files', 'messages', or 'tools' (tool calls). Auto-detected from flags."),
     pattern: Optional[str] = typer.Option(None, "--pattern", "-p", help="[files] Filename glob/regex to match (e.g. '*.py', 'cli*'). Default: * (all files)"),
@@ -2228,8 +2075,12 @@ def _root_search_cmd(
         aise search --tool Bash --query "git commit"         # auto-routes to messages
         aise find files --pattern "*.py"                     # find is an alias
     """
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
     _do_search(
-        get_engine(), domain, pattern, query, min_edits, max_edits,
+        engine, domain, pattern, query, min_edits, max_edits,
         include_extensions, exclude_extensions, include_sessions, exclude_sessions,
         after, before, message_type, limit, max_chars, fmt, tool=tool,
     )
@@ -2240,6 +2091,7 @@ _register_alias(app, _root_search_cmd, "search", "find")
 
 @app.command()
 def extract(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Filename to extract (e.g. cli.py). Use 'aise search' to find available names."),
     version: Optional[int] = typer.Option(
         None, "--version", "-v",
@@ -2267,11 +2119,16 @@ def extract(
     Equivalent to 'aise files extract'. Use 'aise search' to find available filenames.
     By default prints the latest version to stdout (pipe-friendly).
     """
-    _do_extract(get_engine(), name, version=version, session=session, output_dir=output_dir, restore=restore, dry_run=dry_run)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_extract(engine, name, version=version, session=session, output_dir=output_dir, restore=restore, dry_run=dry_run)
 
 
 @app.command()
 def history(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Filename to show history for (e.g. cli.py)."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to versions from this session ID (prefix match)."),
     export: bool = typer.Option(False, "--export", help="Write all versions to disk as cli_v1.py, cli_v2.py, etc."),
@@ -2284,7 +2141,10 @@ def history(
     Equivalent to 'aise files history'. Creates a table of all recorded versions.
     READ-ONLY — no files are written unless you use --export or --stdout.
     """
-    engine = get_engine()
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
     versions = engine.get_versions(name)
 
     if session:
@@ -2306,6 +2166,7 @@ def history(
 
 @app.command()
 def get(
+    ctx: typer.Context,
     session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016)."),
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
@@ -2322,8 +2183,12 @@ def get(
         aise get ab841016
         aise get ab841016 --type user --limit 50
     """
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
     sid = session_id or session_opt
-    _do_get(get_engine(), sid, message_type, limit, max_chars, fmt)
+    _do_get(engine, sid, message_type, limit, max_chars, fmt)
 
 
 @app.command()
@@ -2567,7 +2432,7 @@ def _run_single_step(
         raise
 
 
-# ── Analysis commands (aise analyze / graph / organize / vocab / extract / run-all) ──
+# ── Analysis commands (aise analyze / graph / organize / vocab / instruction-history) ──
 
 
 @app.command("analyze")
