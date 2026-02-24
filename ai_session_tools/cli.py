@@ -2567,6 +2567,7 @@ def _run_single_step(
 
 @app.command("analyze")
 def cmd_analyze(
+    ctx: typer.Context,
     step: Optional[str] = typer.Option(
         None, "--step", hidden=True,
         help="Advanced: run only one pipeline step. Use 'aise analyze' for full pipeline."
@@ -2623,7 +2624,11 @@ def cmd_analyze(
     org = Path(org_dir_str).expanduser()
     org.mkdir(parents=True, exist_ok=True)
 
-    source_filter = _g_source if _g_source in ("aistudio", "gemini") else None
+    # Get source filter from ctx.obj (set by app_callback composition root)
+    ctx_obj = ctx.obj if ctx.obj else {}
+    source_filter = ctx_obj.get("source")
+    if source_filter and source_filter not in ("aistudio", "gemini", "all"):
+        source_filter = None  # fallback: None means all sources
     pipeline_order = _pipeline_order(cfg)
     state = ps.load_state(org) if (org and not force) else {}
 
