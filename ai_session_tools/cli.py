@@ -1786,16 +1786,17 @@ def _messages_search_cmd(
         help="Include N messages before and after each match (from the same session). Default: 0.",
     ),
 ) -> None:
-    """Search or find conversation messages from Claude Code sessions.
+    """Search conversation messages across all configured session sources.
 
     Accessible as both 'messages search' and 'messages find' (aliases).
 
     Examples:
-        aise messages search "authentication"
-        aise messages search --query "authentication"  # backward compat
-        aise messages find "error"                     # find is an alias
-        aise messages search "*" --tool Write          # all Write tool calls
-        aise messages search "error" --context 3       # show 3 surrounding messages
+        aise messages search "authentication"                   # all messages
+        aise messages search "critique" --type user             # user turns only
+        aise messages search "step by step" --type assistant    # AI turns only
+        aise messages find "error"                              # find is an alias
+        aise messages search "*" --tool Write                   # all Write tool calls
+        aise messages search "error" --context 3               # show surrounding messages
     """
     q = query or query_opt
     # Get backend from composition root (ctx.obj injected by app_callback)
