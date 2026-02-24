@@ -1585,6 +1585,13 @@ class SessionBackend:
             f"[yellow]{feature} requires --source claude (Claude Code sessions only)[/yellow]"
         )
 
+    def _claude_only(self, method_name: str, default: object, *args: object, **kwargs: object) -> object:
+        """Delegate to Claude backend or warn + return default. DRY pattern for all claude-only features."""
+        if self._is_claude:
+            return getattr(self._backend, method_name)(*args, **kwargs)
+        self._warn_claude_only(method_name.replace("_", " ").title())
+        return default
+
     # ── Cross-backend operations (work for all sources) ──────────────────────
 
     def search_messages(self, query: str, message_type: str | None = None,
@@ -1651,82 +1658,47 @@ class SessionBackend:
     # Alias for backward compat with display helpers that called get_stats()
     get_stats = get_statistics
 
-    # ── Claude-only operations — graceful degradation ────────────────────────
+    # ── Claude-only operations — graceful degradation (using DRY _claude_only helper) ──
 
     def search(self, pattern: str, filters=None) -> list:
-        if self._is_claude:
-            return self._backend.search(pattern, filters)
-        self._warn_claude_only("File search")
-        return []
+        return self._claude_only("search", [], pattern, filters)
 
     def get_versions(self, filename: str) -> list:
-        if self._is_claude:
-            return self._backend.get_versions(filename)
-        self._warn_claude_only("File version history")
-        return []
+        return self._claude_only("get_versions", [], filename)
 
     def extract_final(self, filename: str, output_dir) -> object:
-        if self._is_claude:
-            return self._backend.extract_final(filename, output_dir)
-        self._warn_claude_only("File extraction")
-        return None
+        return self._claude_only("extract_final", None, filename, output_dir)
 
     def extract_all(self, filename: str, output_dir) -> list:
-        if self._is_claude:
-            return self._backend.extract_all(filename, output_dir)
-        self._warn_claude_only("File extraction")
-        return []
+        return self._claude_only("extract_all", [], filename, output_dir)
 
     def find_corrections(self, **kwargs) -> list:
-        if self._is_claude:
-            return self._backend.find_corrections(**kwargs)
-        self._warn_claude_only("Correction analysis")
-        return []
+        return self._claude_only("find_corrections", [], **kwargs)
 
     def analyze_planning_usage(self, **kwargs) -> list:
-        if self._is_claude:
-            return self._backend.analyze_planning_usage(**kwargs)
-        self._warn_claude_only("Planning command analysis")
-        return []
+        return self._claude_only("analyze_planning_usage", [], **kwargs)
 
     def cross_reference_session(self, *args, **kwargs) -> list:
-        if self._is_claude:
-            return self._backend.cross_reference_session(*args, **kwargs)
-        self._warn_claude_only("Cross-reference")
-        return []
+        return self._claude_only("cross_reference_session", [], *args, **kwargs)
 
     def export_session_markdown(self, session_id: str) -> str:
-        if self._is_claude:
-            return self._backend.export_session_markdown(session_id)
-        self._warn_claude_only("Session export")
-        return ""
+        return self._claude_only("export_session_markdown", "", session_id)
 
     def get_clipboard_content(self, session_id: str) -> list:
-        if self._is_claude:
-            return self._backend.get_clipboard_content(session_id)
-        self._warn_claude_only("Clipboard content")
-        return []
+        return self._claude_only("get_clipboard_content", [], session_id)
 
     def analyze_session(self, session_id: str) -> object:
-        if self._is_claude:
-            return self._backend.analyze_session(session_id)
-        self._warn_claude_only("Session analysis")
-        return None
+        return self._claude_only("analyze_session", None, session_id)
 
     def inspect_session(self, session_id: str) -> object:
         """Deep analysis of one session (messages inspect command). Claude only."""
         return self.analyze_session(session_id)
 
     def timeline_session(self, session_id: str, preview_chars: int = 150) -> list:
-        if self._is_claude:
-            return self._backend.timeline_session(session_id, preview_chars)
-        self._warn_claude_only("Session timeline")
-        return []
+        return self._claude_only("timeline_session", [], session_id, preview_chars)
 
     def get_original_path(self, filename: str) -> str | None:
-        if self._is_claude:
-            return self._backend.get_original_path(filename)
-        return None
+        return self._claude_only("get_original_path", None, filename)
 
 
 def get_session_backend(
