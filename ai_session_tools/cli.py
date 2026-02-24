@@ -79,14 +79,233 @@ config_app = typer.Typer(
     ),
 )
 
+source_app = typer.Typer(
+    help=(
+        "Manage session source directories. Sources are auto-detected from standard\n"
+        "locations on startup; use these commands to view or override detection."
+    ),
+)
+
 app.add_typer(files_app, name="files", rich_help_panel="Domain Groups")
 app.add_typer(messages_app, name="messages", rich_help_panel="Domain Groups")
 app.add_typer(export_app, name="export", rich_help_panel="Domain Groups")
 app.add_typer(tools_app, name="tools", rich_help_panel="Domain Groups")
 app.add_typer(config_app, name="config", rich_help_panel="Configuration")
+app.add_typer(source_app, name="source", rich_help_panel="Source Management")
 
 console = Console()
 err_console = Console(stderr=True)
+
+
+# ── aise source CRUD commands ──────────────────────────────────────────────
+
+@source_app.command("list")
+def source_list(fmt: str = typer.Option("table", "--format", "-f", help="Output format: table or json")) -> None:
+    """Show all active sources (auto-detected + configured).
+
+    Example:
+        aise source list
+        aise source list --format json
+    """
+    from ai_session_tools.engine import _discover_sources
+    from ai_session_tools.config import load_config
+    cfg = load_config()
+    effective = _discover_sources(cfg)
+    sd = effective.get("source_dirs", {})
+    explicit_sd = cfg.get("source_dirs", {})
+
+    rows: list[dict] = [
+        {"source": "claude", "type": "claude",
+         "path": str(Path.home() / ".claude" / "projects"),
+         "configured": "auto", "exists": (Path.home() / ".claude" / "projects").exists()}
+    ]
+    for src_type in ("aistudio", "gemini_cli"):
+        paths = sd.get(src_type, [])
+        if isinstance(paths, str):
+            paths = [paths]
+        explicit = explicit_sd.get(src_type, [])
+        if isinstance(explicit, str):
+            explicit = [explicit]
+        for p in paths:
+            rows.append({
+                "source": src_type,
+                "type": src_type,
+                "path": p,
+                "configured": "explicit" if p in (explicit if isinstance(explicit, list) else [explicit]) else "auto-discovered",
+                "exists": Path(p).exists(),
+            })
+
+    if fmt == "json":
+        console.print(json.dumps(rows, indent=2))
+        return
+
+    from rich.table import Table
+    table = Table(title="Active Session Sources")
+    table.add_column("Type", style="cyan")
+    table.add_column("Path")
+    table.add_column("How Added", style="dim")
+    table.add_column("Exists")
+    for r in rows:
+        exists_str = "[green]yes[/green]" if r["exists"] else "[red]no[/red]"
+        table.add_row(r["type"], r["path"], r["configured"], exists_str)
+    console.print(table)
+
+
+@source_app.command("scan")
+def source_scan(
+    save: bool = typer.Option(False, "--save", help="Save all found sources to config automatically."),
+) -> None:
+    """Scan standard locations and report newly discoverable sources.
+
+    Without --save: shows what would be added. With --save: writes to config.
+
+    Example:
+        aise source scan
+        aise source scan --save
+    """
+    from ai_session_tools.engine import _discover_sources
+    from ai_session_tools.config import load_config
+    cfg = load_config()
+    explicit_sd = cfg.get("source_dirs", {})
+    discovered = _discover_sources(cfg).get("source_dirs", {})
+
+    new_sources: list[tuple[str, str]] = []
+    for src_type in ("aistudio", "gemini_cli"):
+        discovered_paths = discovered.get(src_type, [])
+        explicit_paths = explicit_sd.get(src_type, [])
+        if isinstance(discovered_paths, str):
+            discovered_paths = [discovered_paths]
+        if isinstance(explicit_paths, str):
+            explicit_paths = [explicit_paths]
+        for p in discovered_paths:
+            if p not in explicit_paths:
+                new_sources.append((src_type, p))
+
+    if not new_sources:
+        console.print("[green]No new sources found. Config is up to date.[/green]")
+        return
+
+    console.print(f"[bold]Found {len(new_sources)} new source(s):[/bold]")
+    for src_type, path in new_sources:
+        console.print(f"  [{src_type}] {path}")
+
+    if save:
+        _save_sources_to_config(new_sources, cfg)
+        console.print("[green]Saved to config.[/green]")
+    else:
+        console.print("\nRun [bold]aise source scan --save[/bold] to add all, "
+                      "or [bold]aise source add <path>[/bold] to add individually.")
+
+
+@source_app.command("add")
+def source_add(
+    path: str = typer.Argument(..., help="Path to session directory to add."),
+    src_type: str = typer.Option(
+        "", "--type", "-t",
+        help="Source type: aistudio, gemini. Auto-detected if not specified."
+    ),
+) -> None:
+    """Add a session directory to config.
+
+    Example:
+        aise source add ~/Downloads/aistudio_sessions/Google\\ AI\\ Studio
+        aise source add ~/.gemini/tmp --type gemini
+    """
+    from ai_session_tools.config import load_config
+    resolved = str(Path(path).expanduser().resolve())
+    if not Path(resolved).exists():
+        err_console.print(f"[red]Path does not exist: {resolved}[/red]")
+        raise typer.Exit(code=1)
+
+    # Auto-detect type if not specified
+    effective_type = src_type
+    if not effective_type:
+        if ".gemini" in resolved or "gemini" in resolved.lower():
+            effective_type = "gemini_cli"
+        else:
+            effective_type = "aistudio"  # default for unknown paths
+
+    cfg = load_config()
+    sd = dict(cfg.get("source_dirs", {}))
+    existing = sd.get(effective_type, [])
+    if isinstance(existing, str):
+        existing = [existing]
+    if resolved not in existing:
+        existing.append(resolved)
+        sd[effective_type] = existing
+        cfg["source_dirs"] = sd
+        _write_config(cfg)
+        console.print(f"[green]Added [{effective_type}] {resolved}[/green]")
+    else:
+        console.print(f"[yellow]Already in config: {resolved}[/yellow]")
+
+
+@source_app.command("remove")
+def source_remove(
+    path: str = typer.Argument(..., help="Path or partial path to remove from config."),
+) -> None:
+    """Remove a session directory from config.
+
+    Example:
+        aise source remove ~/Downloads/old_sessions
+    """
+    from ai_session_tools.config import load_config
+    # Use resolve() for exact path match — prevents substring collisions
+    # e.g. removing /data would NOT accidentally remove /data_backup
+    resolved = str(Path(path).expanduser().resolve())
+    cfg = load_config()
+    sd = dict(cfg.get("source_dirs", {}))
+    removed = False
+    for src_type in list(sd.keys()):
+        paths = sd[src_type]
+        if isinstance(paths, str):
+            paths = [paths]
+        # Exact match only (both resolved to absolute): no substring matching
+        new_paths = [p for p in paths if Path(p).expanduser().resolve() != Path(resolved)]
+        if len(new_paths) != len(paths):
+            sd[src_type] = new_paths if new_paths else None
+            removed = True
+    cfg["source_dirs"] = {k: v for k, v in sd.items() if v}
+    if removed:
+        _write_config(cfg)
+        console.print(f"[green]Removed: {resolved}[/green]")
+    else:
+        console.print(f"[yellow]Not found in config: {resolved}[/yellow]")
+
+
+def _save_sources_to_config(new_sources: list[tuple[str, str]], cfg: dict) -> None:
+    """Helper: save discovered sources to config.json."""
+    sd = dict(cfg.get("source_dirs", {}))
+    for src_type, path in new_sources:
+        existing = sd.get(src_type, [])
+        if isinstance(existing, str):
+            existing = [existing]
+        if path not in existing:
+            existing.append(path)
+        sd[src_type] = existing
+    cfg["source_dirs"] = sd
+    _write_config(cfg)
+
+
+def _write_config(cfg: dict) -> None:
+    """Write config dict to the same path load_config() reads from.
+
+    Priority mirrors load_config():
+      1. _g_config_path (from --config CLI flag)
+      2. AI_SESSION_TOOLS_CONFIG env var (treated as file path)
+      3. typer.get_app_dir("ai_session_tools") / "config.json" (OS default)
+    This ensures write path == read path for all invocation methods.
+    """
+    if _g_config_path:
+        config_path = Path(_g_config_path).expanduser()
+    elif env_p := os.getenv("AI_SESSION_TOOLS_CONFIG"):
+        # env var is the FILE path (same as load_config() behavior)
+        config_path = Path(env_p).expanduser()
+    else:
+        config_dir = Path(typer.get_app_dir("ai_session_tools"))
+        config_path = config_dir / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
 # ── CLI rendering infrastructure ──────────────────────────────────────────────
