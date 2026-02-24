@@ -18,13 +18,110 @@ from pathlib import Path
 from typing import Callable as _Callable, List, Optional, Set
 
 import typer
+import click
 from rich.console import Console
+from collections import defaultdict
+from typer.core import TyperGroup, HAS_RICH
+import typer.rich_utils as _ru
 
 from .engine import SessionRecoveryEngine
 from .formatters import MessageFormatter, get_formatter
 from .models import FileVersion, FilterSpec
 
+
+class _CommandsFirstGroup(TyperGroup):
+    """TyperGroup that renders Commands panels BEFORE Options panel in --help output."""
+
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        if not HAS_RICH or self.rich_markup_mode is None:
+            return super().format_help(ctx, formatter)
+
+        console = _ru._get_rich_console()
+
+        # Usage line
+        console.print(
+            _ru.Padding(_ru.highlighter(self.get_usage(ctx)), 1),
+            style=_ru.STYLE_USAGE_COMMAND,
+        )
+
+        # Help text
+        if self.help:
+            console.print(
+                _ru.Padding(
+                    _ru.Align(
+                        _ru._get_help_text(obj=self, markup_mode=self.rich_markup_mode),
+                        pad=False,
+                    ),
+                    (0, 1, 1, 1),
+                )
+            )
+
+        # Collect params into panels
+        panel_to_arguments: defaultdict = defaultdict(list)
+        panel_to_options: defaultdict = defaultdict(list)
+        for param in self.get_params(ctx):
+            if getattr(param, "hidden", False):
+                continue
+            panel_name = getattr(param, _ru._RICH_HELP_PANEL_NAME, None)
+            if isinstance(param, click.Argument):
+                panel_to_arguments[panel_name or _ru.ARGUMENTS_PANEL_TITLE].append(param)
+            elif isinstance(param, click.Option):
+                panel_to_options[panel_name or _ru.OPTIONS_PANEL_TITLE].append(param)
+
+        # Arguments panels
+        for panel_name, args in panel_to_arguments.items():
+            _ru._print_options_panel(
+                name=panel_name, params=args, ctx=ctx,
+                markup_mode=self.rich_markup_mode, console=console,
+            )
+
+        # ── Commands panels FIRST ─────────────────────────────────────────────
+        panel_to_commands: defaultdict = defaultdict(list)
+        for command_name in self.list_commands(ctx):
+            command = self.get_command(ctx, command_name)
+            if command and not command.hidden:
+                panel_name = (
+                    getattr(command, _ru._RICH_HELP_PANEL_NAME, None)
+                    or _ru.COMMANDS_PANEL_TITLE
+                )
+                panel_to_commands[panel_name].append(command)
+
+        max_cmd_len = max(
+            (len(cmd.name or "") for cmds in panel_to_commands.values() for cmd in cmds),
+            default=0,
+        )
+        # Default commands panel first, then named panels
+        for panel_name, commands in sorted(
+            panel_to_commands.items(),
+            key=lambda kv: (kv[0] != _ru.COMMANDS_PANEL_TITLE, kv[0]),
+        ):
+            _ru._print_commands_panel(
+                name=panel_name, commands=commands,
+                markup_mode=self.rich_markup_mode,
+                console=console, cmd_len=max_cmd_len,
+            )
+
+        # ── Options panels AFTER commands ─────────────────────────────────────
+        # Default options panel first, then named panels
+        for panel_name, options in sorted(
+            panel_to_options.items(),
+            key=lambda kv: (kv[0] != _ru.OPTIONS_PANEL_TITLE, kv[0]),
+        ):
+            _ru._print_options_panel(
+                name=panel_name, params=options, ctx=ctx,
+                markup_mode=self.rich_markup_mode, console=console,
+            )
+
+        # Epilogue
+        if self.epilog:
+            lines = self.epilog.split("\n\n")
+            epilogue = "\n".join([x.replace("\n", " ").strip() for x in lines])
+            epilogue_text = _ru._make_rich_text(text=epilogue, markup_mode=self.rich_markup_mode)
+            console.print(_ru.Padding(_ru.Align(epilogue_text, pad=False), 1))
+
+
 app = typer.Typer(
+    cls=_CommandsFirstGroup,
     help=(
         "Search, analyze, and organize AI sessions from Claude Code, AI Studio, and Gemini CLI.\n\n"
         "Sources are auto-detected from standard install locations. Use --source to narrow to one backend.\n\n"
