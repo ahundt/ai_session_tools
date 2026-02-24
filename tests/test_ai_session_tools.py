@@ -2995,7 +2995,7 @@ class TestPositionalArgExtract:
             os.environ["AI_SESSION_TOOLS_PROJECTS"] = str(tmp_path / "projects")
             os.environ["AI_SESSION_TOOLS_RECOVERY"] = str(recovery)
             cli_module._g_claude_dir = None
-            result = runner.invoke(app, ["files", "extract", "hello.py"])
+            result = runner.invoke(app, ["--source", "claude", "files", "extract", "hello.py"])
         finally:
             if old_projects is None:
                 os.environ.pop("AI_SESSION_TOOLS_PROJECTS", None)
@@ -3590,7 +3590,7 @@ class TestMessagesPlanningDiscovery:
     def test_planning_discovery_exit0(self, tmp_path):
         """Default (no --commands) uses discovery mode and exits 0."""
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "planning"], env={
+        result = runner.invoke(app, ["--source", "claude", "messages", "planning"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
         assert result.exit_code == 0, result.output
@@ -3598,7 +3598,7 @@ class TestMessagesPlanningDiscovery:
     def test_planning_discovery_finds_commands(self, tmp_path):
         """Default output includes auto-discovered /ar:plannew."""
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "planning"], env={
+        result = runner.invoke(app, ["--source", "claude", "messages", "planning"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
         assert result.exit_code == 0
@@ -3607,7 +3607,7 @@ class TestMessagesPlanningDiscovery:
     def test_planning_discovery_json_format(self, tmp_path):
         """Discovery mode with --format json returns valid JSON with command key."""
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "planning", "--format", "json"], env={
+        result = runner.invoke(app, ["--source", "claude", "messages", "planning", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
         assert result.exit_code == 0
@@ -3619,7 +3619,7 @@ class TestMessagesPlanningDiscovery:
         """--commands flag switches to pattern mode, overriding discovery."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(app, [
-            "messages", "planning", "--commands", r"/ar:plannew\b", "--format", "json"
+            "--source", "claude", "messages", "planning", "--commands", r"/ar:plannew\b", "--format", "json"
         ], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
@@ -4020,13 +4020,13 @@ class TestSearchMessagesWithContext:
 class TestMessagesSearchContext:
     def test_context_flag_accepted(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "search", "feature", "--context", "2"],
+        result = runner.invoke(app, ["--source", "claude", "messages", "search", "feature", "--context", "2"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_context_shows_surrounding_messages(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "search", "start the feature",
+        result = runner.invoke(app, ["--source", "claude", "messages", "search", "start the feature",
                                      "--context", "1"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
@@ -4035,13 +4035,13 @@ class TestMessagesSearchContext:
 
     def test_context_zero_same_as_default(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "search", "feature", "--context", "0"],
+        result = runner.invoke(app, ["--source", "claude", "messages", "search", "feature", "--context", "0"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_context_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "search", "feature",
+        result = runner.invoke(app, ["--source", "claude", "messages", "search", "feature",
                                      "--context", "1", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0

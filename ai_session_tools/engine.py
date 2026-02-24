@@ -1700,6 +1700,14 @@ class SessionBackend:
     def get_original_path(self, filename: str) -> str | None:
         return self._claude_only("get_original_path", None, filename)
 
+    @property
+    def recovery_dir(self) -> "Path":
+        """Recovery directory (Claude-only). Used by _version_src_path in cli.py."""
+        if self._is_claude:
+            return self._backend.recovery_dir
+        from pathlib import Path
+        return Path()
+
 
 def get_session_backend(
     source: str | None = None,
