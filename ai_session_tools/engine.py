@@ -1420,3 +1420,77 @@ class SessionRecoveryEngine:
                     continue
 
         return last_path
+
+
+# ── Multi-source engine ──────────────────────────────────────────────────────
+
+
+class MultiSourceEngine:
+    """Composable engine: delegates to multiple Storage backends simultaneously.
+
+    Adding a new format = new Storage impl, zero changes to search/filter/CLI layers.
+    """
+
+    def __init__(self, sources: list) -> None:
+        self._sources = sources
+
+    def search_messages(self, pattern: str, filters=None) -> list:
+        """Aggregate search across ALL sources."""
+        import contextlib
+        results = []
+        for source in self._sources:
+            with contextlib.suppress(Exception):
+                results.extend(source.search_messages(pattern, filters))
+        return sorted(results, key=lambda m: m.timestamp or "", reverse=True)
+
+    def list_sessions(self) -> list:
+        """List all sessions from all sources."""
+        import contextlib
+        all_sessions = []
+        for source in self._sources:
+            with contextlib.suppress(Exception):
+                all_sessions.extend(source.list_sessions())
+        return all_sessions
+
+    def read_session(self, session_info) -> list:
+        """Read messages for a session (delegates to first source that has it)."""
+        import contextlib
+        for source in self._sources:
+            with contextlib.suppress(Exception):
+                msgs = source.read_session(session_info)
+                if msgs:
+                    return msgs
+        return []
+
+    def stats(self) -> dict:
+        """Aggregate stats across all sources."""
+        import contextlib
+        total: dict = {}
+        for source in self._sources:
+            with contextlib.suppress(Exception):
+                for k, v in source.stats().items():
+                    total[k] = total.get(k, 0) + v
+        return total
+
+
+def get_multi_engine(config: dict | None = None):
+    """Factory: builds MultiSourceEngine from config. WOLOG: no hardcoded paths."""
+    import contextlib
+    from pathlib import Path as _Path
+    from ai_session_tools.sources.aistudio import AiStudioSource, load_config
+    from ai_session_tools.sources.gemini_cli import GeminiCliSource
+
+    if config is None:
+        config = load_config()
+
+    sources = []
+    sd = config.get("source_dirs", {})
+
+    if ai := sd.get("aistudio"):
+        dirs = [ai] if isinstance(ai, str) else ai
+        sources.append(AiStudioSource([_Path(p) for p in dirs]))
+
+    if gc := sd.get("gemini_cli"):
+        sources.append(GeminiCliSource(_Path(gc)))
+
+    return MultiSourceEngine(sources)

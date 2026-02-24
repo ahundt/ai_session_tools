@@ -2034,6 +2034,90 @@ def config_init(
     )
 
 
+# ── Analysis commands (aise analyze / graph / organize / vocab / extract / run-all) ──
+
+
+@app.command("analyze")
+def cmd_analyze(
+    marker_window: int = typer.Option(0, "--window", "-w", help="Chars to use for marker matching (0=from config)"),
+) -> None:
+    """Run qualitative coding + empirical scoring + vocabulary mining on all AI Studio sessions.
+
+    Reads all three source directories, applies CODEBOOK.md codes (Hsieh & Shannon 2005),
+    scores by Wei et al. 2022 CoT metrics, and writes session_db.json + VOCABULARY_ANALYSIS.md.
+    """
+    from ai_session_tools.analysis.analyzer import main as analyze_main, run_analysis
+    if marker_window > 0:
+        run_analysis(marker_window=marker_window)
+    else:
+        analyze_main()
+
+
+@app.command("graph")
+def cmd_graph() -> None:
+    """Build session provenance graph from session_db.json -> SESSION_GRAPH.json.
+
+    Detects 'Branch of X', 'Copy of X', 'Name vN' lineage patterns and project groupings.
+    Requires `aise analyze` to have been run first.
+    """
+    from ai_session_tools.analysis.graph import main as graph_main
+    graph_main()
+
+
+@app.command("organize")
+def cmd_organize() -> None:
+    """Create taxonomy symlinks + INDEX.md + SESSIONS_FULL.md + KNOWLEDGE_GRAPH.md.
+
+    Non-destructive: never deletes existing symlinks or permanent files.
+    Reads session_db.json (requires `aise analyze` first).
+    """
+    from ai_session_tools.analysis.orchestrator import main as org_main
+    org_main()
+
+
+@app.command("vocab")
+def cmd_vocab() -> None:
+    """Standalone vocabulary analysis -> VOCABULARY_ANALYSIS.md.
+
+    Normally vocabulary is mined inline by `aise analyze`. Use this to re-run standalone.
+    """
+    from ai_session_tools.analysis.vocab import main as vocab_main
+    vocab_main()
+
+
+@app.command("extract")
+def cmd_extract() -> None:
+    """Extract verbatim user instruction history from Gemini CLI session -> USER_INSTRUCTIONS_CLEAN.md.
+
+    Session path: from config key 'gemini_org_task_session' or auto-discovered.
+    """
+    from ai_session_tools.analysis.extract import main as extract_main
+    extract_main()
+
+
+@app.command("run-all")
+def cmd_run_all() -> None:
+    """Full pipeline: extract -> analyze -> graph -> organize.
+
+    Runs all four analysis commands in correct order.
+    """
+    from ai_session_tools.analysis.extract import main as extract_main
+    from ai_session_tools.analysis.analyzer import main as analyze_main
+    from ai_session_tools.analysis.graph import main as graph_main
+    from ai_session_tools.analysis.orchestrator import main as org_main
+
+    console = Console()
+    console.print("[bold]Step 1/4: extract[/bold]")
+    extract_main()
+    console.print("[bold]Step 2/4: analyze[/bold]")
+    analyze_main()
+    console.print("[bold]Step 3/4: graph[/bold]")
+    graph_main()
+    console.print("[bold]Step 4/4: organize[/bold]")
+    org_main()
+    console.print("[bold green]Pipeline complete.[/bold green]")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def cli_main():
