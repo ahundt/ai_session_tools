@@ -20,7 +20,8 @@ from collections import Counter
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-from ai_session_tools.sources.aistudio import AiStudioSource, load_config
+from ai_session_tools.sources.aistudio import AiStudioSource
+from ai_session_tools.config import load_config
 from ai_session_tools.analysis.codebook import (
     load_codebook, load_keyword_maps, compile_codes, get_ngrams, is_meaningful
 )

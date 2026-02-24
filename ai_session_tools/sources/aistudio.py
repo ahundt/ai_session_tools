@@ -16,28 +16,13 @@ from pathlib import Path
 from typing import Generator
 
 from ai_session_tools.models import MessageType, SessionInfo, SessionMessage
+from ai_session_tools.config import load_config
 
 BINARY_EXTS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".mp3", ".mp4", ".m4a",
     ".wav", ".docx", ".xlsx", ".pptx", ".rtf", ".zip", ".pyc", ".dylib",
     ".so", ".dll", ".exe", ".bin", ".dat", ".db", ".sqlite",
 })
-
-
-def load_config() -> dict:
-    """Load config from ~/Library/Application Support/ai_session_tools/config.json.
-
-    Returns empty dict if config file does not exist.
-    WOLOG: no hardcoded paths in source — all user-specific paths from config.
-    """
-    config_dir = Path(os.environ.get(
-        "AI_SESSION_TOOLS_CONFIG",
-        os.path.expanduser("~/Library/Application Support/ai_session_tools")
-    ))
-    config_path = config_dir / "config.json"
-    with contextlib.suppress(OSError, json.JSONDecodeError):
-        return json.loads(config_path.read_text(encoding="utf-8"))
-    return {}
 
 
 class AiStudioSource:

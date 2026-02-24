@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from ai_session_tools.sources.aistudio import load_config
+from ai_session_tools.config import load_config
 
 # Context notes: brief description of what was happening at each message stage
 _CONTEXT_RANGES: list[tuple[range, str]] = [

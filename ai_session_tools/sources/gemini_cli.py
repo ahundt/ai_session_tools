@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Generator
 
 from ai_session_tools.models import MessageType, SessionInfo, SessionMessage
-from ai_session_tools.sources.aistudio import load_config
+from ai_session_tools.config import load_config
 
 
 class GeminiCliSource:

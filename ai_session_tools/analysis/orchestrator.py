@@ -19,7 +19,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-from ai_session_tools.sources.aistudio import load_config
+from ai_session_tools.config import load_config
 from ai_session_tools.analysis.codebook import load_keyword_maps
 
 # Files that must NEVER be deleted or overwritten

@@ -228,73 +228,10 @@ _PLANNING_SPEC = TableSpec(
 
 # Module-level overrides set by global options
 _g_claude_dir: Optional[str] = None
-_g_config_path: Optional[str] = None
 _g_source: str = "claude"  # --source flag: "claude" | "aistudio" | "gemini" | "all"
-_config_cache: Optional[dict] = None  # lazily loaded, reset per process
 
-
-def load_config() -> dict:
-    """Load app config from JSON file. Returns empty dict if not found or unreadable.
-
-    Config file location priority:
-      1. ``--config`` CLI flag (set on the root app callback)
-      2. ``AI_SESSION_TOOLS_CONFIG`` environment variable
-      3. OS-appropriate default via ``typer.get_app_dir("ai_session_tools")``:
-           - macOS: ``~/Library/Application Support/ai_session_tools/config.json``
-           - Linux: ``~/.config/ai_session_tools/config.json``
-           - Windows: ``%APPDATA%/ai_session_tools/config.json``
-
-    Supported keys (all optional):
-
-    - ``correction_patterns`` (list of strings): correction patterns in
-      ``"CATEGORY:REGEX"`` format; replaces built-in defaults when present.
-      Example: ``["regression:you deleted", "skip_step:you forgot"]``
-    - ``planning_commands`` (list of strings): slash-command regex patterns
-      to count; replaces built-in defaults when present.
-      Example: ``["/ar:plannew", "/ar:pn", "/mycommand"]``
-
-    Example ``config.json``::
-
-        {
-            "correction_patterns": [
-                "regression:you deleted",
-                "regression:you removed",
-                "skip_step:you forgot",
-                "skip_step:you missed"
-            ],
-            "planning_commands": [
-                "/ar:plannew",
-                "/ar:pn",
-                "/mycommand"
-            ]
-        }
-    """
-    global _config_cache
-    if _config_cache is not None:
-        return _config_cache
-
-    # Priority: --config flag > AI_SESSION_TOOLS_CONFIG env > typer.get_app_dir default
-    if _g_config_path:
-        config_file = Path(_g_config_path).expanduser()
-    else:
-        env_val = os.getenv("AI_SESSION_TOOLS_CONFIG")
-        if env_val:
-            config_file = Path(env_val).expanduser()
-        else:
-            app_dir = typer.get_app_dir("ai_session_tools")
-            config_file = Path(app_dir) / "config.json"
-
-    if config_file.exists():
-        try:
-            with open(config_file, encoding="utf-8") as f:
-                _config_cache = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            err_console.print(f"[yellow]Warning: could not load config {config_file}: {exc}[/yellow]")
-            _config_cache = {}
-    else:
-        _config_cache = {}
-
-    return _config_cache
+# Import config loading from shared module to ensure all parts of the app use the same loader
+from ai_session_tools.config import load_config, set_config_path  # noqa: E402
 
 
 # ── Root app callback (global options) ────────────────────────────────────────
@@ -333,11 +270,10 @@ def app_callback(
         ),
     ),
 ) -> None:
-    global _g_claude_dir, _g_config_path, _g_source, _config_cache
+    global _g_claude_dir, _g_source
     _g_claude_dir = claude_dir
-    if config != _g_config_path:
-        _g_config_path = config
-        _config_cache = None  # invalidate cache when path changes
+    # Notify shared config module about --config flag so all parts of app use same config
+    set_config_path(config)
     if source is not None:
         _g_source = source
     if ctx.invoked_subcommand is None:

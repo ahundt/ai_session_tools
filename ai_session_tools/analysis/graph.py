@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-from ai_session_tools.sources.aistudio import load_config
+from ai_session_tools.config import load_config
 
 
 @dataclass
