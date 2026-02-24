@@ -632,14 +632,14 @@ def _invoke(args, tmp_path: Optional[Path] = None, projects: Optional[Path] = No
 class TestListCommand:
     def test_list_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["list"], env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        result = runner.invoke(app, ["--source", "claude", "list"], env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "aaaa0001" in result.output
 
     def test_list_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["list", "--format", "json"],
+            app, ["--source", "claude", "list", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -650,7 +650,7 @@ class TestListCommand:
     def test_list_project_filter(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["list", "--project", "proj1"],
+            app, ["--source", "claude", "list", "--project", "proj1"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
