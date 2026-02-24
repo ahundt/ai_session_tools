@@ -220,13 +220,58 @@ def write_vocab_report(tri: Counter[str], quad: Counter[str], output_file: Path)
     print(f"Vocabulary: {len(tri_rows)} trigrams, {len(quad_rows)} quadgrams -> {output_file}")
 
 
-def run_analysis(marker_window: int | None = None) -> list[SessionRecord]:
+def _filter_config_by_source(cfg: dict, source_filter: str) -> dict:
+    """Filter config to include only specified source backend.
+
+    Args:
+        cfg: Configuration dict
+        source_filter: 'aistudio', 'gemini', or None (all)
+
+    Returns:
+        Filtered config dict with only requested sources in source_dirs
+    """
+    filtered = dict(cfg)
+    if not source_filter:
+        return filtered
+
+    sd = filtered.get("source_dirs", {})
+    new_sd = {}
+
+    if source_filter in ("aistudio", "all"):
+        if "aistudio" in sd:
+            new_sd["aistudio"] = sd["aistudio"]
+
+    if source_filter in ("gemini", "all"):
+        if "gemini_cli" in sd:
+            new_sd["gemini_cli"] = sd["gemini_cli"]
+
+    filtered["source_dirs"] = new_sd
+    return filtered
+
+
+def run_analysis(
+    marker_window: int | None = None,
+    source_filter: str | None = None,
+    config: dict | None = None,
+) -> list[SessionRecord]:
     """Single-pass streaming analysis: code + vocabulary simultaneously.
+
+    Args:
+        marker_window: Chars for marker matching (0 = from config)
+        source_filter: Narrow to one backend: 'aistudio', 'gemini', or None (all)
+        config: Config dict (if None, loads from config.json)
 
     WOLOG: all paths from config; no hardcoded truncation.
     Single source scan, O(1) memory per session (generator).
     """
-    cfg = load_config()
+    if config is None:
+        cfg = load_config()
+    else:
+        cfg = config
+
+    # Filter sources based on source_filter parameter
+    if source_filter:
+        cfg = _filter_config_by_source(cfg, source_filter)
     source_dirs_cfg = cfg.get("source_dirs", {}).get("aistudio", [])
     if isinstance(source_dirs_cfg, str):
         source_dirs_cfg = [source_dirs_cfg]
@@ -340,9 +385,14 @@ def run_analysis(marker_window: int | None = None) -> list[SessionRecord]:
     return records
 
 
-def main() -> None:
-    """Entry point for `aise analyze` CLI command."""
-    run_analysis()
+def main(source_filter: str | None = None, marker_window: int | None = None) -> None:
+    """Entry point for `aise analyze` CLI command.
+
+    Args:
+        source_filter: Narrow to one backend: 'aistudio', 'gemini', or None (all)
+        marker_window: Chars for marker matching (0 = from config)
+    """
+    run_analysis(marker_window=marker_window, source_filter=source_filter)
 
 
 if __name__ == "__main__":

@@ -2238,10 +2238,13 @@ def cmd_analyze(
     scores by Wei et al. 2022 CoT metrics, and writes session_db.json + VOCABULARY_ANALYSIS.md.
     """
     from ai_session_tools.analysis.analyzer import main as analyze_main, run_analysis
+    # Pass source_filter from _g_source to narrow analysis to one backend
+    # Only narrow if explicitly requesting aistudio or gemini; otherwise analyze all sources
+    source_filter = _g_source if _g_source in ("aistudio", "gemini") else None
     if marker_window > 0:
-        run_analysis(marker_window=marker_window)
+        run_analysis(marker_window=marker_window, source_filter=source_filter)
     else:
-        analyze_main()
+        analyze_main(source_filter=source_filter, marker_window=marker_window)
 
 
 @app.command("graph")
