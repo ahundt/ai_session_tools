@@ -276,7 +276,12 @@ def run_analysis(
     if isinstance(source_dirs_cfg, str):
         source_dirs_cfg = [source_dirs_cfg]
     source_dirs = [Path(p) for p in source_dirs_cfg]
-    org_dir = Path(cfg.get("org_dir", str(Path.home() / "Downloads/aistudio_sessions/organized")))
+    org_dir_str = cfg.get("org_dir")
+    if not org_dir_str:
+        raise RuntimeError(
+            "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
+        )
+    org_dir = Path(org_dir_str)
     db_file = org_dir / "session_db.json"
     vocab_output = org_dir / cfg.get("vocab_output_filename", "VOCABULARY_ANALYSIS.md")
     mw = marker_window or cfg.get("marker_window", 25_000)

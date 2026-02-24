@@ -202,7 +202,12 @@ def build_graph(records: list[dict], strategies: list | None = None, config: dic
 def main() -> None:
     """Entry point for `aise graph` CLI command."""
     cfg = load_config()
-    org_dir = Path(cfg.get("org_dir", str(Path.home() / "Downloads/aistudio_sessions/organized")))
+    org_dir_str = cfg.get("org_dir")
+    if not org_dir_str:
+        raise RuntimeError(
+            "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
+        )
+    org_dir = Path(org_dir_str)
     db_file = org_dir / "session_db.json"
     out_file = org_dir / "SESSION_GRAPH.json"
 

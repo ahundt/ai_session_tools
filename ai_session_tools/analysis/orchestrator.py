@@ -238,7 +238,12 @@ def write_knowledge_graph(records: list[dict], org_dir: Path) -> None:
 def run_orchestration() -> None:
     """Main orchestration: read session_db.json, create symlinks, write index files."""
     cfg = load_config()
-    org_dir = Path(cfg.get("org_dir", str(Path.home() / "Downloads/aistudio_sessions/organized")))
+    org_dir_str = cfg.get("org_dir")
+    if not org_dir_str:
+        raise RuntimeError(
+            "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
+        )
+    org_dir = Path(org_dir_str)
     db_file = org_dir / "session_db.json"
 
     if not db_file.exists():

@@ -50,7 +50,12 @@ def mine_all() -> tuple[Counter[str], Counter[str]]:
 def write_report(tri: Counter[str], quad: Counter[str]) -> None:
     """Write vocabulary report. No arbitrary truncation."""
     cfg = load_config()
-    org_dir = Path(cfg.get("org_dir", str(Path.home() / "Downloads/aistudio_sessions/organized")))
+    org_dir_str = cfg.get("org_dir")
+    if not org_dir_str:
+        raise RuntimeError(
+            "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
+        )
+    org_dir = Path(org_dir_str)
     output_file = org_dir / cfg.get("vocab_output_filename", "VOCABULARY_ANALYSIS.md")
 
     tri_rows = [(freq, phrase) for phrase, freq in tri.most_common()

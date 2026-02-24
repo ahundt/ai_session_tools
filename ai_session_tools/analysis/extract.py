@@ -111,7 +111,12 @@ def extract_history(session_file: str | Path, output_file: str | Path) -> int:
 def main() -> None:
     """Entry point for `aise extract` CLI command."""
     cfg = load_config()
-    org_dir = Path(cfg.get("org_dir", str(Path.home() / "Downloads/aistudio_sessions/organized")))
+    org_dir_str = cfg.get("org_dir")
+    if not org_dir_str:
+        raise RuntimeError(
+            "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
+        )
+    org_dir = Path(org_dir_str)
     output_file = org_dir / "USER_INSTRUCTIONS_CLEAN.md"
 
     # Find session file: from config or auto-discover
