@@ -133,8 +133,8 @@ def write_index(records: list[dict], session_paths: dict[str, list[str]], org_di
         )
         encoded = name.replace(" ", "%20").replace("&", "%26")
         link = f"[{name}]({link_target}/{encoded})"
-        tech = rec.get("techniques", ["—"])[0]
-        role = rec.get("roles", ["—"])[0]
+        tech = (rec.get("techniques") or ["—"])[0]
+        role = (rec.get("roles") or ["—"])[0]
         era = rec.get("era", "—")
         util = rec.get("utility", 0)
         lines.append(f"| {count} | {util} | {link} | {tech} | {role} | {era} |\n")
@@ -178,7 +178,7 @@ def write_index(records: list[dict], session_paths: dict[str, list[str]], org_di
         enc = name.replace(" ", "%20").replace("&", "%26")
         full_lines.append(
             f"| {i} | {rec.get('utility', 0)} | [{name}]({lp}/{enc}) "
-            f"| {rec.get('techniques', ['—'])[0]} | {rec.get('roles', ['—'])[0]} "
+            f"| {(rec.get('techniques') or ['—'])[0]} | {(rec.get('roles') or ['—'])[0]} "
             f"| {rec.get('era', '—')} |\n"
         )
 
