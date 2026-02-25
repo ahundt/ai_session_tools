@@ -10,18 +10,37 @@ Output formats (config.json["organize_formats"] or --format CLI flag):
   "markdown"  — TAXONOMY.md  grouped by dimension
 
 Taxonomy dimensions (config.json["taxonomy_dimensions"]):
-  Each dimension is a dict with:
-    name          — directory name for the taxonomy dimension
-    match         — "field" (read record field directly) or "keyword" (match via keyword_map)
-    field         — record field name  (for match=field)
-    scalar        — true if field holds a single value, not a list (for match=field)
-    keyword_map   — key into keyword_maps  (for match=keyword)
-    match_field   — record field to match against  (for match=keyword)
-    match_type    — "substring" or "set_intersection"  (for match=keyword)
-    fallback      — category when no keywords match  (for match=keyword, optional)
-    exclude       — list of category values to skip  (optional, default [])
-    prefer_for_links — include this dim when choosing INDEX.md link targets (default true)
-    label         — human-readable display label for INDEX.md taxonomy section (optional)
+  Each dimension is a dict. Required keys depend on "match" type:
+
+  COMMON (all dimensions):
+    name             — directory name for the taxonomy dimension  (required)
+    match            — "field" or "keyword"  (required)
+    exclude          — list of category values to skip  (optional, default [])
+    prefer_for_links — false to exclude this dim from INDEX.md link targets  (optional, default true)
+    label            — human-readable display label for INDEX.md  (optional; auto-derived from name)
+
+  match="field"  — reads a session record field directly:
+    field    — name of the record field (e.g. "techniques", "era", "roles")  (required)
+    scalar   — true if field holds a single string, not a list  (optional, default false)
+
+    Example — add a dimension that groups by source format:
+      {"name": "08_by_source", "match": "field", "field": "source_format",
+       "scalar": true, "prefer_for_links": false}
+
+  match="keyword"  — classifies by matching keywords from a keyword_map:
+    keyword_map  — key into config.json["keyword_maps"]  (required)
+    source_field — which record field to match against (e.g. "name", "techniques")  (required)
+    match_type   — "substring" (field text contains keyword) or
+                   "set_intersection" (field list shares an element with keywords)  (required)
+    fallback     — category to assign when no keywords match  (optional)
+
+    Example — add a dimension grouping by language detected in session name:
+      {"name": "09_by_language", "match": "keyword",
+       "keyword_map": "language_map", "source_field": "name",
+       "match_type": "substring", "fallback": "english"}
+      Also add "language_map": {"python": ["python", "py"], ...} to keyword_maps.
+
+  Run `aise organize --validate` to check config health before running the full pipeline.
 
 METHODOLOGICAL REFERENCES:
 - Hsieh & Shannon (2005): https://journals.sagepub.com/doi/10.1177/1049732305276687
@@ -51,7 +70,7 @@ _DEFAULT_TAXONOMY_DIMENSIONS: list[dict] = [
         "name": "01_by_project",
         "match": "keyword",
         "keyword_map": "project_map",
-        "match_field": "name",
+        "source_field": "name",
         "match_type": "substring",
         "fallback": "misc_research",
         "prefer_for_links": True,
@@ -60,7 +79,7 @@ _DEFAULT_TAXONOMY_DIMENSIONS: list[dict] = [
         "name": "02_by_workflow",
         "match": "keyword",
         "keyword_map": "workflow_map",
-        "match_field": "techniques",
+        "source_field": "techniques",
         "match_type": "set_intersection",
         "prefer_for_links": True,
     },
@@ -99,13 +118,81 @@ _DEFAULT_TAXONOMY_DIMENSIONS: list[dict] = [
 ]
 
 
-def load_taxonomy_dimensions() -> list[dict]:
+_VALID_MATCH_TYPES = frozenset({"substring", "set_intersection"})
+_VALID_MATCH_VALUES = frozenset({"field", "keyword"})
+
+# Per-process set to avoid repeating the same warning for every session
+_warned_missing_maps: set[str] = set()
+
+
+def validate_taxonomy_dimensions(dims: list[dict], keyword_maps: dict | None = None) -> list[str]:
+    """Validate taxonomy dimension configs. Returns list of error strings (empty = OK).
+
+    Checks:
+    - Required keys present for each match type
+    - Valid match and match_type values
+    - keyword_map references exist in keyword_maps (warnings, not errors)
+
+    Call this before running orchestration to surface config problems early.
+    """
+    errors: list[str] = []
+    for i, dim in enumerate(dims):
+        loc = f"taxonomy_dimensions[{i}] (name={dim.get('name', '<missing>')})"
+        if "name" not in dim:
+            errors.append(f"{loc}: missing required key 'name'")
+        match = dim.get("match")
+        if match not in _VALID_MATCH_VALUES:
+            errors.append(
+                f"{loc}: 'match' must be one of {sorted(_VALID_MATCH_VALUES)}, got {match!r}"
+            )
+            continue  # can't check further without knowing match type
+        if match == "field":
+            if "field" not in dim:
+                errors.append(
+                    f"{loc}: match='field' requires 'field' key "
+                    f"(name of the record field to read, e.g. \"techniques\")"
+                )
+        elif match == "keyword":
+            for key in ("keyword_map", "match_type"):
+                if key not in dim:
+                    errors.append(
+                        f"{loc}: match='keyword' requires '{key}' key"
+                    )
+            mt = dim.get("match_type")
+            if mt and mt not in _VALID_MATCH_TYPES:
+                errors.append(
+                    f"{loc}: 'match_type' must be one of {sorted(_VALID_MATCH_TYPES)}, got {mt!r}"
+                )
+            if "source_field" not in dim and "match_field" not in dim:
+                errors.append(
+                    f"{loc}: match='keyword' requires 'source_field' key "
+                    f"(which record field to search, e.g. \"name\" or \"techniques\")"
+                )
+            # Warn (not error) if keyword_map reference is missing from keyword_maps
+            if keyword_maps is not None and "keyword_map" in dim:
+                kmap_name = dim["keyword_map"]
+                if kmap_name not in keyword_maps or not keyword_maps[kmap_name]:
+                    errors.append(
+                        f"{loc}: keyword_map={kmap_name!r} is empty or missing from "
+                        f"keyword_maps config. Sessions will all use fallback={dim.get('fallback')!r}. "
+                        f"Add entries to config.json[\"keyword_maps\"][\"{kmap_name}\"]."
+                    )
+    return errors
+
+
+def load_taxonomy_dimensions(keyword_maps: dict | None = None) -> list[dict]:
     """Load taxonomy dimensions from config.json["taxonomy_dimensions"] or module default.
 
-    Returns the default 7-dimension config when not configured.
+    Validates the loaded config and raises ValueError with clear messages if invalid.
+    Pass keyword_maps to also check that referenced maps exist.
     """
     dims = get_config_section("taxonomy_dimensions")
     if dims and isinstance(dims, list):
+        errors = validate_taxonomy_dimensions(dims, keyword_maps)
+        if errors:
+            raise ValueError(
+                "Invalid taxonomy_dimensions config:\n" + "\n".join(f"  - {e}" for e in errors)
+            )
         return dims
     return _DEFAULT_TAXONOMY_DIMENSIONS
 
@@ -164,11 +251,25 @@ def assign_taxonomy(
         elif match == "keyword":
             kmap_name = dim["keyword_map"]
             kmap = keyword_maps.get(kmap_name, {})
-            match_field = dim.get("match_field", "name")
+            # source_field is the canonical name; match_field is kept for backward compat
+            source_field = dim.get("source_field") or dim.get("match_field", "name")
             match_type = dim.get("match_type", "substring")
             fallback = dim.get("fallback")
 
-            field_val = rec.get(match_field, "")
+            if not kmap:
+                warn_key = f"{dim_name}:{kmap_name}"
+                if warn_key not in _warned_missing_maps:
+                    _warned_missing_maps.add(warn_key)
+                    import sys
+                    print(
+                        f"WARNING: taxonomy dimension '{dim_name}' references "
+                        f"keyword_map '{kmap_name}' which is empty or missing. "
+                        f"Sessions will use fallback={fallback!r}. "
+                        f"Add entries to config.json[\"keyword_maps\"][\"{kmap_name}\"].",
+                        file=sys.stderr,
+                    )
+
+            field_val = rec.get(source_field, "")
             matched = False
 
             if match_type == "substring":
@@ -547,7 +648,7 @@ def run_orchestration(formats: list[str] | None = None) -> None:
     print(f"Output formats: {', '.join(active_formats)}")
 
     keyword_maps = load_keyword_maps()
-    dimensions = load_taxonomy_dimensions()
+    dimensions = load_taxonomy_dimensions(keyword_maps=keyword_maps)
 
     # Always compute taxonomy — needed for all format outputs and write_index
     taxonomy = build_taxonomy(records, keyword_maps, dimensions)

@@ -526,7 +526,7 @@ _PLANNING_SPEC = TableSpec(
 _g_claude_dir: Optional[str] = None
 
 # Import config loading and session backend from shared modules
-from ai_session_tools.config import load_config, set_config_path  # noqa: E402
+from ai_session_tools.config import load_config, set_config_path, get_config_section  # noqa: E402
 from ai_session_tools.engine import get_session_backend  # noqa: E402
 
 
@@ -2443,7 +2443,7 @@ _CONFIG_INIT_TEMPLATE = {
             "name": "01_by_project",
             "match": "keyword",
             "keyword_map": "project_map",
-            "match_field": "name",
+            "source_field": "name",
             "match_type": "substring",
             "fallback": "misc_research",
             "prefer_for_links": True,
@@ -2452,7 +2452,7 @@ _CONFIG_INIT_TEMPLATE = {
             "name": "02_by_workflow",
             "match": "keyword",
             "keyword_map": "workflow_map",
-            "match_field": "techniques",
+            "source_field": "techniques",
             "match_type": "set_intersection",
             "prefer_for_links": True,
         },
@@ -2839,6 +2839,14 @@ def cmd_organize(
             "Default: from config.json['organize_formats'] or 'symlinks'."
         ),
     ),
+    validate: bool = typer.Option(
+        False, "--validate", "-V",
+        help=(
+            "Check taxonomy config health without running orchestration. "
+            "Reports each dimension: OK, WARN (empty keyword_map), or ERROR (missing key). "
+            "Exits 1 if any errors found."
+        ),
+    ),
 ) -> None:
     """Create taxonomy output in one or more formats + INDEX.md + SESSIONS_FULL.md.
 
@@ -2848,7 +2856,58 @@ def cmd_organize(
 
     Requires SESSION_GRAPH.json from 'aise analyze --step graph'.
     Tip: Use 'aise analyze' to run the full pipeline automatically.
+
+    Validate config without running: aise organize --validate
     """
+    from ai_session_tools.analysis.orchestrator import (
+        load_taxonomy_dimensions, validate_taxonomy_dimensions, _DEFAULT_TAXONOMY_DIMENSIONS
+    )
+    from ai_session_tools.analysis.codebook import load_keyword_maps
+
+    if validate:
+        cfg = load_config()
+        keyword_maps = load_keyword_maps()
+        raw_dims = get_config_section("taxonomy_dimensions")
+        if raw_dims and isinstance(raw_dims, list):
+            dims = raw_dims
+            source = "config.json[taxonomy_dimensions]"
+        else:
+            dims = _DEFAULT_TAXONOMY_DIMENSIONS
+            source = "built-in defaults (no taxonomy_dimensions in config)"
+
+        console.print(f"[bold]Validating taxonomy dimensions[/bold] ({source})\n")
+        errors = validate_taxonomy_dimensions(dims, keyword_maps)
+
+        has_errors = any("ERROR" in e or "missing required key" in e or "must be one of" in e
+                         for e in errors)
+        has_warns = any("empty or missing" in e for e in errors)
+
+        for dim in dims:
+            name = dim.get("name", "<unnamed>")
+            match = dim.get("match", "?")
+            if match == "field":
+                detail = f"field={dim.get('field', '?')}, scalar={dim.get('scalar', False)}"
+            else:
+                sf = dim.get("source_field") or dim.get("match_field", "?")
+                kmap = dim.get("keyword_map", "?")
+                kmap_size = len(keyword_maps.get(kmap, {}))
+                detail = f"source_field={sf}, keyword_map={kmap} ({kmap_size} categories)"
+            console.print(f"  [cyan]{name}[/cyan]  match={match}  {detail}")
+
+        if errors:
+            console.print()
+            for e in errors:
+                if "empty or missing" in e:
+                    console.print(f"  [yellow]WARN[/yellow] {e}")
+                else:
+                    console.print(f"  [red]ERROR[/red] {e}")
+        else:
+            console.print("\n  [green]All dimensions OK[/green]")
+
+        if has_errors:
+            raise typer.Exit(code=1)
+        return
+
     cfg = load_config()
     org_dir_str = cfg.get("org_dir", "").strip()
     if not org_dir_str:
