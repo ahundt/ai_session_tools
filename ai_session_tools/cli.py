@@ -357,25 +357,35 @@ def _save_sources_to_config(new_sources: list[tuple[str, str]], cfg: dict) -> No
     _write_config(cfg)
 
 
+def _resolve_config_path() -> Path:
+    """Return the config file path from the same priority chain as load_config().
+
+    Single implementation used by both _write_config() and _get_config_file_path()
+    so read path == write path in all invocation modes.
+    """
+    from ai_session_tools.config import _g_config_path
+    if _g_config_path:
+        return Path(_g_config_path).expanduser()
+    if env_p := os.getenv("AI_SESSION_TOOLS_CONFIG"):
+        return Path(env_p).expanduser()
+    return Path(typer.get_app_dir("ai_session_tools")) / "config.json"
+
+
 def _write_config(cfg: dict) -> None:
     """Write config dict to the same path load_config() reads from.
 
-    Priority mirrors load_config():
-      1. _g_config_path (from --config CLI flag)
-      2. AI_SESSION_TOOLS_CONFIG env var (treated as file path)
-      3. typer.get_app_dir("ai_session_tools") / "config.json" (OS default)
-    This ensures write path == read path for all invocation methods.
+    Creates parent directories if needed. Safe to call even if the file
+    does not exist yet — this is the only correct place to create it.
+    (set_config_path does NOT create files; config_init and source-mutation
+    commands call _write_config which creates the file on first write.)
+
+    Always invalidates the in-memory cache so the next load_config() call
+    reads the updated file rather than serving stale data.
     """
-    if _g_config_path:
-        config_path = Path(_g_config_path).expanduser()
-    elif env_p := os.getenv("AI_SESSION_TOOLS_CONFIG"):
-        # env var is the FILE path (same as load_config() behavior)
-        config_path = Path(env_p).expanduser()
-    else:
-        config_dir = Path(typer.get_app_dir("ai_session_tools"))
-        config_path = config_dir / "config.json"
+    config_path = _resolve_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    invalidate_config_cache()
 
 
 # ── CLI rendering infrastructure ──────────────────────────────────────────────
@@ -526,7 +536,7 @@ _PLANNING_SPEC = TableSpec(
 _g_claude_dir: Optional[str] = None
 
 # Import config loading and session backend from shared modules
-from ai_session_tools.config import load_config, set_config_path, get_config_section  # noqa: E402
+from ai_session_tools.config import load_config, set_config_path, get_config_section, invalidate_config_cache  # noqa: E402
 from ai_session_tools.engine import get_session_backend  # noqa: E402
 
 
@@ -2313,14 +2323,11 @@ def stats(
 # ── Config app ───────────────────────────────────────────────────────────────
 
 def _get_config_file_path() -> Path:
-    """Return the resolved config file path based on current priority chain."""
-    from ai_session_tools.config import _g_config_path
-    if _g_config_path:
-        return Path(_g_config_path).expanduser()
-    env_val = os.getenv("AI_SESSION_TOOLS_CONFIG")
-    if env_val:
-        return Path(env_val).expanduser()
-    return Path(typer.get_app_dir("ai_session_tools")) / "config.json"
+    """Return the resolved config file path based on current priority chain.
+
+    Delegates to _resolve_config_path() — single source of truth for path resolution.
+    """
+    return _resolve_config_path()
 
 
 @config_app.command("path")
@@ -2549,12 +2556,8 @@ def config_init(
         )
         raise typer.Exit(code=1)
 
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(json.dumps(_CONFIG_INIT_TEMPLATE, indent=2) + "\n", encoding="utf-8")
-
-    # Invalidate cache so next command picks up the new file
-    global _config_cache
-    _config_cache = None
+    _write_config(_CONFIG_INIT_TEMPLATE)
+    # _write_config always calls invalidate_config_cache() so no extra step needed
 
     console.print(f"[green]Created:[/green] {config_file}")
     console.print(

@@ -29,6 +29,16 @@ def set_config_path(path: str | None) -> None:
         _config_cache = None  # invalidate cache on path change
 
 
+def invalidate_config_cache() -> None:
+    """Force load_config() to re-read from disk on the next call.
+
+    Call this after writing a new config file (e.g. after config init or source add)
+    so the next load_config() picks up the updated file contents.
+    """
+    global _config_cache
+    _config_cache = None
+
+
 def load_config() -> dict:
     """Load config respecting priority: --config flag > env var > OS default.
 
