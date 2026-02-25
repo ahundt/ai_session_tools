@@ -2424,6 +2424,71 @@ _CONFIG_INIT_TEMPLATE = {
     # "json"     — SESSION_TAXONOMY.json: {name: {taxonomy, utility, era}}
     # "markdown" — TAXONOMY.md: sessions grouped by dimension and category
     "organize_formats": ["symlinks"],
+    # ── Taxonomy dimension definitions ─────────────────────────────────────
+    # Each dimension controls one axis of the taxonomy. Fields:
+    #   name           — directory name (e.g. "03_by_technique")
+    #   match          — "field" (read record field) or "keyword" (match via keyword_map)
+    #   field          — record field name         (for match=field)
+    #   scalar         — true if field is a single value, not a list (for match=field)
+    #   keyword_map    — key into keyword_maps     (for match=keyword)
+    #   match_field    — record field to match against  (for match=keyword)
+    #   match_type     — "substring" or "set_intersection"  (for match=keyword)
+    #   fallback       — category when no keywords match  (for match=keyword, optional)
+    #   exclude        — category values to skip  (optional, default [])
+    #   prefer_for_links — use this dim for INDEX.md link targets (default true)
+    #   label          — human-readable label for INDEX.md (optional)
+    # Remove this key or set to [] to use the built-in 7-dimension default.
+    "taxonomy_dimensions": [
+        {
+            "name": "01_by_project",
+            "match": "keyword",
+            "keyword_map": "project_map",
+            "match_field": "name",
+            "match_type": "substring",
+            "fallback": "misc_research",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "02_by_workflow",
+            "match": "keyword",
+            "keyword_map": "workflow_map",
+            "match_field": "techniques",
+            "match_type": "set_intersection",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "03_by_technique",
+            "match": "field",
+            "field": "techniques",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "04_by_task",
+            "match": "field",
+            "field": "task_categories",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "05_by_expert_role",
+            "match": "field",
+            "field": "roles",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "06_by_writing_method",
+            "match": "field",
+            "field": "writing_methods",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "07_by_era",
+            "match": "field",
+            "field": "era",
+            "scalar": True,
+            "exclude": ["unknown"],
+            "prefer_for_links": False,
+        },
+    ],
     # ── Continuation marker detection for prompt role classification ───────
     "continuation_markers": {
         "min_initial_len": 50,

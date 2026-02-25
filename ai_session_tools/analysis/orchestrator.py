@@ -9,6 +9,20 @@ Output formats (config.json["organize_formats"] or --format CLI flag):
   "json"      — SESSION_TAXONOMY.json  {name: {dim: [cats], utility, era}}
   "markdown"  — TAXONOMY.md  grouped by dimension
 
+Taxonomy dimensions (config.json["taxonomy_dimensions"]):
+  Each dimension is a dict with:
+    name          — directory name for the taxonomy dimension
+    match         — "field" (read record field directly) or "keyword" (match via keyword_map)
+    field         — record field name  (for match=field)
+    scalar        — true if field holds a single value, not a list (for match=field)
+    keyword_map   — key into keyword_maps  (for match=keyword)
+    match_field   — record field to match against  (for match=keyword)
+    match_type    — "substring" or "set_intersection"  (for match=keyword)
+    fallback      — category when no keywords match  (for match=keyword, optional)
+    exclude       — list of category values to skip  (optional, default [])
+    prefer_for_links — include this dim when choosing INDEX.md link targets (default true)
+    label         — human-readable display label for INDEX.md taxonomy section (optional)
+
 METHODOLOGICAL REFERENCES:
 - Hsieh & Shannon (2005): https://journals.sagepub.com/doi/10.1177/1049732305276687
 - SAGE/Nature archiving: https://journals.sagepub.com/doi/full/10.1177/00016993211051521
@@ -21,13 +35,84 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 from collections import defaultdict
 from pathlib import Path
 
-from ai_session_tools.config import load_config
+from ai_session_tools.config import load_config, get_config_section
 from ai_session_tools.analysis.codebook import load_keyword_maps, load_scoring_weights
 
 VALID_FORMATS: frozenset[str] = frozenset({"symlinks", "json", "markdown"})
+
+# Default taxonomy dimensions — reproduces the previous hardcoded behavior exactly.
+# Override by setting config.json["taxonomy_dimensions"].
+_DEFAULT_TAXONOMY_DIMENSIONS: list[dict] = [
+    {
+        "name": "01_by_project",
+        "match": "keyword",
+        "keyword_map": "project_map",
+        "match_field": "name",
+        "match_type": "substring",
+        "fallback": "misc_research",
+        "prefer_for_links": True,
+    },
+    {
+        "name": "02_by_workflow",
+        "match": "keyword",
+        "keyword_map": "workflow_map",
+        "match_field": "techniques",
+        "match_type": "set_intersection",
+        "prefer_for_links": True,
+    },
+    {
+        "name": "03_by_technique",
+        "match": "field",
+        "field": "techniques",
+        "prefer_for_links": True,
+    },
+    {
+        "name": "04_by_task",
+        "match": "field",
+        "field": "task_categories",
+        "prefer_for_links": True,
+    },
+    {
+        "name": "05_by_expert_role",
+        "match": "field",
+        "field": "roles",
+        "prefer_for_links": True,
+    },
+    {
+        "name": "06_by_writing_method",
+        "match": "field",
+        "field": "writing_methods",
+        "prefer_for_links": True,
+    },
+    {
+        "name": "07_by_era",
+        "match": "field",
+        "field": "era",
+        "scalar": True,
+        "exclude": ["unknown"],
+        "prefer_for_links": False,
+    },
+]
+
+
+def load_taxonomy_dimensions() -> list[dict]:
+    """Load taxonomy dimensions from config.json["taxonomy_dimensions"] or module default.
+
+    Returns the default 7-dimension config when not configured.
+    """
+    dims = get_config_section("taxonomy_dimensions")
+    if dims and isinstance(dims, list):
+        return dims
+    return _DEFAULT_TAXONOMY_DIMENSIONS
+
+
+def _dim_label(name: str) -> str:
+    """Convert dim name like '03_by_technique' to display label '03 By Technique'."""
+    return re.sub(r"[_]+", " ", name).title()
 
 
 def make_symlink(source_path: str, link_path: Path) -> bool:
@@ -42,48 +127,81 @@ def make_symlink(source_path: str, link_path: Path) -> bool:
     return False
 
 
-def assign_taxonomy(rec: dict, project_map: dict, workflow_map: dict) -> dict[str, list[str]]:
-    """Return mapping of taxonomy_dir -> [sub_categories] for a single session record."""
+def assign_taxonomy(
+    rec: dict,
+    keyword_maps: dict[str, dict[str, list[str]]],
+    dimensions: list[dict],
+) -> dict[str, list[str]]:
+    """Return {taxonomy_dir: [categories]} for a single session record.
+
+    Args:
+        rec:          Session DB record (dict with techniques, roles, era, etc.)
+        keyword_maps: All keyword maps keyed by map name (project_map, workflow_map, etc.)
+        dimensions:   Taxonomy dimension configs from load_taxonomy_dimensions()
+    """
     assignments: defaultdict[str, list[str]] = defaultdict(list)
 
-    for tech in rec.get("techniques", []):
-        assignments["03_by_technique"].append(tech)
+    for dim in dimensions:
+        dim_name = dim["name"]
+        match = dim.get("match", "field")
+        exclude: set[str] = set(dim.get("exclude", []))
 
-    for role in rec.get("roles", []):
-        assignments["05_by_expert_role"].append(role)
+        if match == "field":
+            field = dim["field"]
+            val = rec.get(field)
+            if dim.get("scalar", False):
+                # Single-value field (e.g. era)
+                if val is not None:
+                    s = str(val)
+                    if s and s not in exclude:
+                        assignments[dim_name].append(s)
+            else:
+                # List field (e.g. techniques, roles)
+                for item in (val or []):
+                    if item and str(item) not in exclude:
+                        assignments[dim_name].append(str(item))
 
-    for cat in rec.get("task_categories", []):
-        assignments["04_by_task"].append(cat)
+        elif match == "keyword":
+            kmap_name = dim["keyword_map"]
+            kmap = keyword_maps.get(kmap_name, {})
+            match_field = dim.get("match_field", "name")
+            match_type = dim.get("match_type", "substring")
+            fallback = dim.get("fallback")
 
-    for method in rec.get("writing_methods", []):
-        assignments["06_by_writing_method"].append(method)
+            field_val = rec.get(match_field, "")
+            matched = False
 
-    era = rec.get("era", "unknown")
-    assignments["07_by_era"].append(era)
+            if match_type == "substring":
+                field_str = (
+                    field_val if isinstance(field_val, str)
+                    else " ".join(str(v) for v in (field_val or []))
+                ).lower()
+                for cat, keywords in kmap.items():
+                    if cat in exclude:
+                        continue
+                    if any(kw.lower() in field_str for kw in keywords):
+                        assignments[dim_name].append(cat)
+                        matched = True
 
-    # 01_by_project: keyword match on name
-    name_lower = rec.get("name", "").lower()
-    matched = False
-    for proj, kws in project_map.items():
-        if any(k.lower() in name_lower for k in kws):
-            assignments["01_by_project"].append(proj)
-            matched = True
-    if not matched:
-        assignments["01_by_project"].append("misc_research")
+            elif match_type == "set_intersection":
+                field_set = set(field_val or [])
+                for cat, keywords in kmap.items():
+                    if cat in exclude:
+                        continue
+                    if field_set & set(keywords):
+                        assignments[dim_name].append(cat)
+                        matched = True
 
-    # 02_by_workflow: derived from techniques
-    techs = set(rec.get("techniques", []))
-    for workflow, markers in workflow_map.items():
-        if techs & set(markers):
-            assignments["02_by_workflow"].append(workflow)
+            if not matched and fallback and fallback not in exclude:
+                assignments[dim_name].append(fallback)
 
     return dict(assignments)
 
 
 def build_taxonomy(
     records: list[dict],
-    project_map: dict,
-    workflow_map: dict,
+    keyword_maps: dict[str, dict[str, list[str]]],
+    dimensions: list[dict],
 ) -> dict[str, dict[str, list[str]]]:
     """Compute taxonomy assignments for all records.
 
@@ -94,7 +212,7 @@ def build_taxonomy(
     for rec in records:
         name = rec.get("name")
         if name:
-            result[name] = assign_taxonomy(rec, project_map, workflow_map)
+            result[name] = assign_taxonomy(rec, keyword_maps, dimensions)
     return result
 
 
@@ -104,6 +222,30 @@ def taxonomy_to_session_paths(taxonomy: dict[str, dict[str, list[str]]]) -> dict
         name: [f"{dim}/{cat}" for dim, cats in dims.items() for cat in cats]
         for name, dims in taxonomy.items()
     }
+
+
+def _preferred_link_path(
+    primary_paths: list[str],
+    dimensions: list[dict],
+) -> str:
+    """Select the best link path from a session's taxonomy paths.
+
+    Prefers dims with prefer_for_links=True; skips fallback categories.
+    Returns first non-skipped path, or primary_paths[0] as last resort.
+    """
+    non_preferred = {d["name"] for d in dimensions if not d.get("prefer_for_links", True)}
+    fallback_cats = {d["fallback"] for d in dimensions if d.get("fallback")}
+
+    for p in primary_paths:
+        parts = p.split("/", 1)
+        dim_part = parts[0]
+        cat_part = parts[1] if len(parts) > 1 else ""
+        if dim_part in non_preferred:
+            continue
+        if cat_part in fallback_cats:
+            continue
+        return p
+    return primary_paths[0] if primary_paths else ""
 
 
 def apply_symlinks(
@@ -153,11 +295,15 @@ def write_taxonomy_markdown(
     taxonomy: dict[str, dict[str, list[str]]],
     records: list[dict],
     org_dir: Path,
+    dimensions: list[dict] | None = None,
 ) -> None:
     """Write TAXONOMY.md: sessions grouped by taxonomy dimension and category."""
     name_to_rec = {r["name"]: r for r in records}
     sw = load_scoring_weights()
     min_utility = int(sw.get("min_utility_for_index", 20))
+
+    # Ordered dim names for display
+    dim_order = [d["name"] for d in (dimensions or [])]
 
     # {dim: {cat: [names]}}
     dim_cat_names: defaultdict[str, defaultdict[str, list[str]]] = defaultdict(
@@ -168,9 +314,16 @@ def write_taxonomy_markdown(
             for cat in cats:
                 dim_cat_names[dim][cat].append(name)
 
+    # Respect configured dim order; append any extra dims not in config
+    ordered_dims = dim_order + [d for d in sorted(dim_cat_names) if d not in dim_order]
+
     lines = ["# Session Taxonomy\n\n"]
-    for dim in sorted(dim_cat_names):
-        lines.append(f"## {dim}\n\n")
+    for dim in ordered_dims:
+        if dim not in dim_cat_names:
+            continue
+        dim_cfg = next((d for d in (dimensions or []) if d["name"] == dim), {})
+        label = dim_cfg.get("label") or _dim_label(dim)
+        lines.append(f"## {label}\n\n")
         for cat in sorted(dim_cat_names[dim]):
             names = dim_cat_names[dim][cat]
             qualifying = [
@@ -196,13 +349,20 @@ def write_taxonomy_markdown(
     print(f"TAXONOMY.md: {len(dim_cat_names)} dimensions")
 
 
-def write_index(records: list[dict], session_paths: dict[str, list[str]], org_dir: Path) -> None:
+def write_index(
+    records: list[dict],
+    session_paths: dict[str, list[str]],
+    org_dir: Path,
+    dimensions: list[dict] | None = None,
+) -> None:
     """Write INDEX.md and SESSIONS_FULL.md. Always written regardless of format.
 
+    Uses dimensions to generate the Taxonomy section and select preferred link targets.
     min_utility_for_index loaded from scoring_weights (default 20).
     """
     sw = load_scoring_weights(org_dir)
     min_utility = int(sw.get("min_utility_for_index", 20))
+    dims = dimensions or _DEFAULT_TAXONOMY_DIMENSIONS
 
     sorted_recs = sorted(records, key=lambda r: r.get("utility", 0), reverse=True)
     all_ranked = [r for r in sorted_recs if r.get("utility", 0) >= min_utility]
@@ -218,11 +378,12 @@ def write_index(records: list[dict], session_paths: dict[str, list[str]], org_di
 
     for count, rec in enumerate(all_ranked, 1):
         name = rec["name"]
-        primary_paths = session_paths.get(name, ["01_by_project/misc_research"])
-        link_target = next(
-            (p for p in primary_paths if "07_by_era" not in p and "misc_research" not in p),
-            primary_paths[0] if primary_paths else "01_by_project/misc_research"
-        )
+        primary_paths = session_paths.get(name, [])
+        link_target = _preferred_link_path(primary_paths, dims)
+        if not link_target and primary_paths:
+            link_target = primary_paths[0]
+        if not link_target:
+            link_target = "01_by_project/misc_research"
         encoded = name.replace(" ", "%20").replace("&", "%26")
         link = f"[{name}]({link_target}/{encoded})"
         tech = (rec.get("techniques") or ["—"])[0]
@@ -231,17 +392,18 @@ def write_index(records: list[dict], session_paths: dict[str, list[str]], org_di
         util = rec.get("utility", 0)
         lines.append(f"| {count} | {util} | {link} | {tech} | {role} | {era} |\n")
 
+    lines.append(
+        f"\n*Full list: {len(all_ranked)} sessions ranked. "
+        f"See [SESSIONS_FULL.md](SESSIONS_FULL.md).*\n\n"
+    )
+
+    # Taxonomy section — generated from configured dimensions
+    lines.append("## Taxonomy\n\n")
+    for dim in dims:
+        label = dim.get("label") or _dim_label(dim["name"])
+        lines.append(f"- [{label}]({dim['name']}/)\n")
     lines += [
-        f"\n*Full list: {len(all_ranked)} sessions ranked. See [SESSIONS_FULL.md](SESSIONS_FULL.md).*\n\n",
-        "## Taxonomy\n\n",
-        "- [01 By Project](01_by_project/)\n",
-        "- [02 By Workflow](02_by_workflow/)\n",
-        "- [03 By Technique](03_by_technique/)\n",
-        "- [04 By Task](04_by_task/)\n",
-        "- [05 By Expert Role](05_by_expert_role/)\n",
-        "- [06 By Writing Method](06_by_writing_method/)\n",
-        "- [07 By Era](07_by_era/)\n\n",
-        "## Governance\n\n",
+        "\n## Governance\n\n",
         "- [Codebook](CODEBOOK.md)\n",
         "- [References](REFERENCES.md)\n",
         "- [User Instructions](USER_INSTRUCTIONS_CLEAN.md)\n",
@@ -262,11 +424,12 @@ def write_index(records: list[dict], session_paths: dict[str, list[str]], org_di
     ]
     for i, rec in enumerate(all_ranked, 1):
         name = rec["name"]
-        paths = session_paths.get(name, ["01_by_project/misc_research"])
-        lp = next(
-            (p for p in paths if "07_by_era" not in p and "misc_research" not in p),
-            paths[0] if paths else "01_by_project/misc_research"
-        )
+        paths = session_paths.get(name, [])
+        lp = _preferred_link_path(paths, dims)
+        if not lp and paths:
+            lp = paths[0]
+        if not lp:
+            lp = "01_by_project/misc_research"
         enc = name.replace(" ", "%20").replace("&", "%26")
         full_lines.append(
             f"| {i} | {rec.get('utility', 0)} | [{name}]({lp}/{enc}) "
@@ -362,6 +525,7 @@ def run_orchestration(formats: list[str] | None = None) -> None:
                  Valid values: "symlinks", "json", "markdown" (combinable as a list).
                  Default when unconfigured: ["symlinks"].
 
+    Taxonomy dimensions are read from config.json["taxonomy_dimensions"].
     INDEX.md and SESSIONS_FULL.md are always written regardless of formats.
     """
     cfg = load_config()
@@ -383,11 +547,10 @@ def run_orchestration(formats: list[str] | None = None) -> None:
     print(f"Output formats: {', '.join(active_formats)}")
 
     keyword_maps = load_keyword_maps()
-    project_map = keyword_maps.get("project_map", {})
-    workflow_map = keyword_maps.get("workflow_map", {})
+    dimensions = load_taxonomy_dimensions()
 
     # Always compute taxonomy — needed for all format outputs and write_index
-    taxonomy = build_taxonomy(records, project_map, workflow_map)
+    taxonomy = build_taxonomy(records, keyword_maps, dimensions)
     session_paths = taxonomy_to_session_paths(taxonomy)
 
     if "symlinks" in active_formats:
@@ -398,10 +561,10 @@ def run_orchestration(formats: list[str] | None = None) -> None:
         write_taxonomy_json(taxonomy, records, org_dir)
 
     if "markdown" in active_formats:
-        write_taxonomy_markdown(taxonomy, records, org_dir)
+        write_taxonomy_markdown(taxonomy, records, org_dir, dimensions=dimensions)
 
     # Index files always written
-    write_index(records, session_paths, org_dir)
+    write_index(records, session_paths, org_dir, dimensions=dimensions)
     write_knowledge_graph(records, org_dir)
     print("Orchestration complete.")
 
