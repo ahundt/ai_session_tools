@@ -85,7 +85,7 @@ def get_ngrams(text: str, n: int) -> list[str]:
     return [" ".join(words[i:i + n]) for i in range(len(words) - n + 1)]
 
 
-_STOP_WORDS = frozenset({
+_DEFAULT_STOP_WORDS = frozenset({
     "the", "this", "that", "and", "is", "for", "with", "from", "you", "are",
     "into", "of", "to", "a", "in", "it", "as", "be", "an", "or", "on", "at",
     "by", "we", "i", "can", "but", "not", "so", "if", "do", "its", "all",
@@ -94,14 +94,32 @@ _STOP_WORDS = frozenset({
 })
 
 
-def is_meaningful(phrase: str) -> bool:
-    """Filter out phrases that start with or consist entirely of stop words."""
+def load_stop_words(org_dir: Path) -> frozenset[str]:
+    """Load stop words from stop_words.json. Returns module default if absent.
+
+    File: <org_dir>/stop_words.json  — list of lowercase words to exclude from n-grams.
+    """
+    path = org_dir / "stop_words.json"
+    with contextlib.suppress(OSError, json.JSONDecodeError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        words = data.get("stop_words", [])
+        if words:
+            return frozenset(w.lower() for w in words)
+    return _DEFAULT_STOP_WORDS
+
+
+def is_meaningful(phrase: str, stop_words: frozenset[str] | None = None) -> bool:
+    """Filter out phrases that start with or consist entirely of stop words.
+
+    stop_words: loaded via load_stop_words(org_dir). Falls back to _DEFAULT_STOP_WORDS.
+    """
+    sw = stop_words if stop_words is not None else _DEFAULT_STOP_WORDS
     words = phrase.split()
     if not words:
         return False
-    if words[0] in _STOP_WORDS:
+    if words[0] in sw:
         return False
-    if all(w in _STOP_WORDS for w in words):
+    if all(w in sw for w in words):
         return False
     return True
 

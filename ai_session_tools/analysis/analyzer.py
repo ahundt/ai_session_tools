@@ -25,6 +25,7 @@ from ai_session_tools.config import load_config
 from ai_session_tools.analysis.codebook import (
     load_codebook, load_keyword_maps, compile_codes, get_ngrams, is_meaningful,
     extract_prose, prose_fraction, classify_prompt_role, load_continuation_config,
+    load_stop_words,
 )
 
 
@@ -226,23 +227,33 @@ def compute_descendant_boost(records: list[SessionRecord], boost_per_descendant:
             name_to_rec[rec.graph_parent].utility += boost_per_descendant
 
 
-def write_vocab_report(tri: Counter[str], quad: Counter[str], output_file: Path) -> None:
-    """Write vocabulary analysis to markdown. No arbitrary truncation."""
+def write_vocab_report(
+    tri: Counter[str],
+    quad: Counter[str],
+    output_file: Path,
+    min_freq: int = 3,
+    stop_words: frozenset[str] | None = None,
+) -> None:
+    """Write vocabulary analysis to markdown. No arbitrary truncation.
+
+    min_freq: loaded from scoring_weights.json["min_ngram_freq"] (default 3).
+    stop_words: loaded from stop_words.json (default _DEFAULT_STOP_WORDS).
+    """
     tri_rows = [(freq, phrase) for phrase, freq in tri.most_common()
-                if freq >= 3 and is_meaningful(phrase)]
+                if freq >= min_freq and is_meaningful(phrase, stop_words)]
     quad_rows = [(freq, phrase) for phrase, freq in quad.most_common()
-                 if freq >= 3 and is_meaningful(phrase)]
+                 if freq >= min_freq and is_meaningful(phrase, stop_words)]
 
     lines = [
         "# Vocabulary Analysis: Recurring Prompt Phrases\n\n",
         "N-gram analysis of user turns across all AI Studio sessions.\n",
         "Source: PromptEngineering.org — https://www.promptengineering.org/building-a-reusable-prompt-library/\n\n",
-        f"## 3-Word Phrases ({len(tri_rows)} total with freq >= 3)\n\n",
+        f"## 3-Word Phrases ({len(tri_rows)} total with freq >= {min_freq})\n\n",
         "| Count | Phrase |\n| :--- | :--- |\n",
     ]
     lines.extend(f"| {freq} | {phrase} |\n" for freq, phrase in tri_rows)
     lines += [
-        f"\n## 4-Word Phrases ({len(quad_rows)} total with freq >= 3)\n\n",
+        f"\n## 4-Word Phrases ({len(quad_rows)} total with freq >= {min_freq})\n\n",
         "| Count | Phrase |\n| :--- | :--- |\n",
     ]
     lines.extend(f"| {freq} | {phrase} |\n" for freq, phrase in quad_rows)
@@ -318,21 +329,26 @@ def run_analysis(
     mw = marker_window or cfg.get("marker_window", 25_000)
     md_mw = cfg.get("md_marker_window", 2_000)  # .md files include model responses; limit window
 
-    # Load scoring weights
-    scoring_weights: dict[str, int] = {
+    # Load scoring weights (all thresholds from config — no hardcoded values in loops)
+    scoring_weights: dict = {
         "technique": 20, "role": 15, "thinking_budget": 30,
         "anti_ai": 35, "version_multiplier": 10, "corrected_bonus": 25,
-        "descendant_boost": 15,
+        "descendant_boost": 15, "min_ngram_freq": 3,
+        "min_session_text_len": 50, "min_utility_for_index": 20,
     }
     sw_path = org_dir / "scoring_weights.json"
     with contextlib.suppress(OSError, json.JSONDecodeError):
         scoring_weights.update(json.loads(sw_path.read_text(encoding="utf-8")))
+
+    min_ngram_freq = int(scoring_weights.get("min_ngram_freq", 3))
+    min_session_text_len = int(scoring_weights.get("min_session_text_len", 50))
 
     tech_codes, role_codes = load_codebook(org_dir)
     keyword_maps = load_keyword_maps(org_dir)
     tech_patterns = compile_codes(tech_codes)
     role_patterns = compile_codes(role_codes)
     continuation_markers, min_initial_len = load_continuation_config(org_dir)
+    stop_words = load_stop_words(org_dir)
 
     source = AiStudioSource(source_dirs=source_dirs)
     records: list[SessionRecord] = []
@@ -449,7 +465,7 @@ def run_analysis(
         json.dump(db, f, indent=2)
     print(f"Analysis complete: {len(records)} sessions -> {db_file}")
 
-    write_vocab_report(tri, quad, vocab_output)
+    write_vocab_report(tri, quad, vocab_output, min_freq=min_ngram_freq, stop_words=stop_words)
     return records
 
 

@@ -22,13 +22,27 @@ from pathlib import Path
 from ai_session_tools.config import load_config
 from ai_session_tools.analysis.codebook import load_keyword_maps
 
-# Files that must NEVER be deleted or overwritten
-PERMANENT_FILES = frozenset({
+# Default permanent files — overridden by permanent_files.json in org_dir
+_DEFAULT_PERMANENT_FILES = frozenset({
     "CODEBOOK.md", "REFERENCES.md", "ORGANIZATION_TASK_INSTRUCTIONS.md",
     "USER_INSTRUCTIONS_CLEAN.md", "extract_verbatim_history.py",
     "analyze_sessions.py", "orchestrate_kb.py", "vocabulary_miner.py",
     "session_db.json", ".git", "VOCABULARY_ANALYSIS.md",
 })
+
+
+def load_permanent_files(org_dir: Path) -> frozenset[str]:
+    """Load permanent file list from permanent_files.json. Returns module default if absent.
+
+    File: <org_dir>/permanent_files.json — {"permanent_files": ["CODEBOOK.md", ...]}
+    """
+    path = org_dir / "permanent_files.json"
+    with contextlib.suppress(OSError, json.JSONDecodeError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        files = data.get("permanent_files", [])
+        if files:
+            return frozenset(files)
+    return _DEFAULT_PERMANENT_FILES
 
 
 def make_symlink(source_path: str, link_path: Path) -> bool:
@@ -114,9 +128,18 @@ def build_symlinks(
 
 
 def write_index(records: list[dict], session_paths: dict[str, list[str]], org_dir: Path) -> None:
-    """Write INDEX.md with correct per-session links. No hardcoded misc_research."""
+    """Write INDEX.md with correct per-session links. No hardcoded misc_research.
+
+    min_utility_for_index loaded from scoring_weights.json (default 20).
+    """
+    min_utility = 20
+    sw_path = org_dir / "scoring_weights.json"
+    with contextlib.suppress(OSError, json.JSONDecodeError):
+        sw = json.loads(sw_path.read_text(encoding="utf-8"))
+        min_utility = int(sw.get("min_utility_for_index", 20))
+
     sorted_recs = sorted(records, key=lambda r: r.get("utility", 0), reverse=True)
-    all_ranked = [r for r in sorted_recs if r.get("utility", 0) >= 20]
+    all_ranked = [r for r in sorted_recs if r.get("utility", 0) >= min_utility]
 
     lines = [
         "# AI Studio Knowledge Base: Integrated Dashboard\n\n",
@@ -167,7 +190,7 @@ def write_index(records: list[dict], session_paths: dict[str, list[str]], org_di
     # SESSIONS_FULL.md: ALL ranked sessions, no truncation (MSG 133)
     full_lines = [
         "# All Sessions: Complete Ranked List\n\n",
-        f"{len(all_ranked)} sessions with utility >= 20, ranked by score.\n\n",
+        f"{len(all_ranked)} sessions with utility >= {min_utility}, ranked by score.\n\n",
         "| Rank | Utility | Session | Technique | Role | Era |\n",
         "| :--- | :--- | :--- | :--- | :--- | :--- |\n",
     ]
@@ -261,7 +284,8 @@ def run_orchestration() -> None:
     write_knowledge_graph(records, org_dir)
 
     # Verify permanent files are intact
-    for pf in PERMANENT_FILES:
+    permanent_files = load_permanent_files(org_dir)
+    for pf in permanent_files:
         path = org_dir / pf
         if pf != "session_db.json" and not path.exists():
             print(f"WARNING: Permanent file missing: {pf}")
