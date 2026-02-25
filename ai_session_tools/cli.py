@@ -2381,6 +2381,70 @@ def config_show(
 
 
 _CONFIG_INIT_TEMPLATE = {
+    "_comment": (
+        "ai_session_tools configuration. "
+        "Set org_dir and source_dirs before running 'aise analyze'. "
+        "Config path: override with --config flag or AI_SESSION_TOOLS_CONFIG env var."
+    ),
+    # ── Required for aise analyze ──────────────────────────────────────────
+    "org_dir": "",          # Path to your organized/ directory (output destination)
+    "source_dirs": {
+        "aistudio": [],     # List of Google AI Studio export directories
+        "gemini_cli": "",   # Path to Gemini CLI tmp dir (auto-detected: ~/.gemini/tmp)
+    },
+    # ── Optional analysis settings ─────────────────────────────────────────
+    "vocab_output_filename": "VOCABULARY_ANALYSIS.md",
+    "gemini_org_task_session": "",  # Session file path for aise instruction-history
+    "marker_window": 25000,         # Chars of user text to scan for codebook markers
+    # ── Scoring weights (all numeric thresholds in one place) ──────────────
+    "scoring_weights": {
+        "technique": 20,
+        "role": 15,
+        "thinking_budget": 30,
+        "anti_ai": 35,
+        "version_multiplier": 10,
+        "corrected_bonus": 25,
+        "descendant_boost": 15,
+        "tfidf_similarity_threshold": 0.70,
+        "min_ngram_freq": 3,
+        "min_session_text_len": 50,
+        "min_utility_for_index": 20,
+    },
+    # ── Stop words: common function words excluded from n-gram analysis ────
+    "stop_words": [
+        "the", "this", "that", "and", "is", "for", "with", "from", "you", "are",
+        "into", "of", "to", "a", "in", "it", "as", "be", "an", "or", "on", "at",
+        "by", "we", "i", "can", "but", "not", "so", "if", "do", "its", "all",
+        "my", "me", "have", "has", "was", "will", "your", "our", "they", "them",
+        "also", "then", "than", "when", "just", "up", "out", "about",
+    ],
+    # ── Files that aise organize must never delete or overwrite ───────────
+    "permanent_files": [
+        "CODEBOOK.md", "REFERENCES.md", "ORGANIZATION_TASK_INSTRUCTIONS.md",
+        "USER_INSTRUCTIONS_CLEAN.md", "extract_verbatim_history.py",
+        "analyze_sessions.py", "orchestrate_kb.py", "vocabulary_miner.py",
+        "session_db.json", ".git", "VOCABULARY_ANALYSIS.md",
+    ],
+    # ── Continuation marker detection for prompt role classification ───────
+    "continuation_markers": {
+        "min_initial_len": 50,
+        "prefix_markers": [
+            "ok", "okay", "yes", "yeah", "sure", "great", "good", "nice",
+            "thanks", "thank you", "now", "also", "and", "but", "so",
+            "wait", "hmm", "hm", "continue", "proceed", "go on", "go ahead",
+            "can you", "could you", "please", "i want", "i need",
+            "actually", "by the way", "one more", "also can", "also please",
+            "commit", "push", "run", "execute", "fix the", "fix that", "fix it",
+        ],
+    },
+    # ── Keyword maps for taxonomy classification (populate to improve results)
+    "keyword_maps": {
+        "task_categories": {},
+        "writing_methods": {},
+        "project_map": {},
+        "workflow_map": {},
+    },
+    # ── Claude Code session analysis settings ──────────────────────────────
     "correction_patterns": [
         "regression:you deleted",
         "regression:you removed",
@@ -2390,14 +2454,8 @@ _CONFIG_INIT_TEMPLATE = {
         "incomplete:also need",
     ],
     "planning_commands": [
-        "/ar:plannew",
-        "/ar:pn",
-        "/ar:planrefine",
-        "/ar:pr",
-        "/ar:planupdate",
-        "/ar:pu",
-        "/ar:planprocess",
-        "/ar:pp",
+        "/ar:plannew", "/ar:pn", "/ar:planrefine", "/ar:pr",
+        "/ar:planupdate", "/ar:pu", "/ar:planprocess", "/ar:pp",
     ],
 }
 
@@ -2436,7 +2494,8 @@ def config_init(
 
     console.print(f"[green]Created:[/green] {config_file}")
     console.print(
-        "[dim]Edit the file to customize correction patterns and planning commands.[/dim]\n"
+        "[dim]Edit org_dir and source_dirs.aistudio to enable 'aise analyze'.[/dim]\n"
+        "[dim]All scoring thresholds, stop words, and keyword maps are in one place.[/dim]\n"
         "[dim]Run 'aise config show' to verify the active configuration.[/dim]"
     )
 

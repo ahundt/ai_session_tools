@@ -64,3 +64,17 @@ def load_config() -> dict:
         return _config_cache
 
     return {}
+
+
+def get_config_section(key: str, default=None):
+    """Return config[key] if present and non-empty, else default.
+
+    Empty containers ([], {}) and empty strings are treated as absent so callers
+    fall through to their file-based or module-level defaults.
+    """
+    cfg = load_config()
+    if key in cfg:
+        val = cfg[key]
+        if val not in (None, "", [], {}):
+            return val
+    return default

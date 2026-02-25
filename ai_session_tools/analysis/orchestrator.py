@@ -20,7 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from ai_session_tools.config import load_config
-from ai_session_tools.analysis.codebook import load_keyword_maps
+from ai_session_tools.analysis.codebook import load_keyword_maps, load_scoring_weights
 
 # Default permanent files — overridden by permanent_files.json in org_dir
 _DEFAULT_PERMANENT_FILES = frozenset({
@@ -31,17 +31,23 @@ _DEFAULT_PERMANENT_FILES = frozenset({
 })
 
 
-def load_permanent_files(org_dir: Path) -> frozenset[str]:
-    """Load permanent file list from permanent_files.json. Returns module default if absent.
+def load_permanent_files(org_dir: Path | None = None) -> frozenset[str]:
+    """Load permanent file list from config.json[permanent_files] or org_dir/permanent_files.json.
 
-    File: <org_dir>/permanent_files.json — {"permanent_files": ["CODEBOOK.md", ...]}
+    Priority: config.json["permanent_files"] > org_dir/permanent_files.json > module default.
     """
-    path = org_dir / "permanent_files.json"
-    with contextlib.suppress(OSError, json.JSONDecodeError):
-        data = json.loads(path.read_text(encoding="utf-8"))
-        files = data.get("permanent_files", [])
-        if files:
-            return frozenset(files)
+    from ai_session_tools.config import get_config_section
+    files = get_config_section("permanent_files")
+    if files and isinstance(files, list):
+        return frozenset(files)
+
+    if org_dir is not None:
+        path = org_dir / "permanent_files.json"
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            file_list = data.get("permanent_files", [])
+            if file_list:
+                return frozenset(file_list)
     return _DEFAULT_PERMANENT_FILES
 
 
@@ -132,11 +138,8 @@ def write_index(records: list[dict], session_paths: dict[str, list[str]], org_di
 
     min_utility_for_index loaded from scoring_weights.json (default 20).
     """
-    min_utility = 20
-    sw_path = org_dir / "scoring_weights.json"
-    with contextlib.suppress(OSError, json.JSONDecodeError):
-        sw = json.loads(sw_path.read_text(encoding="utf-8"))
-        min_utility = int(sw.get("min_utility_for_index", 20))
+    sw = load_scoring_weights(org_dir)
+    min_utility = int(sw.get("min_utility_for_index", 20))
 
     sorted_recs = sorted(records, key=lambda r: r.get("utility", 0), reverse=True)
     all_ranked = [r for r in sorted_recs if r.get("utility", 0) >= min_utility]

@@ -15,6 +15,28 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from ai_session_tools.config import get_config_section, load_config
+
+
+def load_scoring_weights(org_dir: Path | None = None) -> dict:
+    """Load scoring weights from config.json[scoring_weights] or org_dir/scoring_weights.json.
+
+    Priority: config.json["scoring_weights"] > org_dir/scoring_weights.json > {}.
+    Callers use .get(key, default) on the returned dict for individual values.
+    """
+    sw = get_config_section("scoring_weights")
+    if sw and isinstance(sw, dict):
+        return sw
+
+    if org_dir is None:
+        org_dir_str = load_config().get("org_dir", "")
+        org_dir = Path(org_dir_str).expanduser() if org_dir_str else None
+    if org_dir is not None:
+        path = org_dir / "scoring_weights.json"
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            return json.loads(path.read_text(encoding="utf-8"))
+    return {}
+
 
 def load_codebook(org_dir: Path) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """Parse CODEBOOK.md → (tech_codes, role_codes). Non-destructive read only.
@@ -49,11 +71,24 @@ def load_codebook(org_dir: Path) -> tuple[dict[str, list[str]], dict[str, list[s
     return tech_codes, role_codes
 
 
-def load_keyword_maps(org_dir: Path) -> dict[str, dict[str, list[str]]]:
-    """Load all external keyword map files. WOLOG: no hardcoding, all from config files.
+def load_keyword_maps(org_dir: Path | None = None) -> dict[str, dict[str, list[str]]]:
+    """Load keyword maps from config.json[keyword_maps] or separate org_dir JSON files.
 
-    Files: task_categories.json, writing_methods.json, project_map.json, workflow_map.json
+    Priority: config.json["keyword_maps"] > org_dir/*.json files > empty dict.
+    Files (fallback): task_categories.json, writing_methods.json, project_map.json, workflow_map.json
     """
+    # Check config first
+    km = get_config_section("keyword_maps")
+    if km and isinstance(km, dict):
+        return km
+
+    # Fall back to separate files
+    if org_dir is None:
+        org_dir_str = load_config().get("org_dir", "")
+        org_dir = Path(org_dir_str).expanduser() if org_dir_str else None
+    if org_dir is None:
+        return {}
+
     maps: dict[str, dict[str, list[str]]] = {}
     for name in ("task_categories", "writing_methods", "project_map", "workflow_map"):
         path = org_dir / f"{name}.json"
@@ -94,17 +129,27 @@ _DEFAULT_STOP_WORDS = frozenset({
 })
 
 
-def load_stop_words(org_dir: Path) -> frozenset[str]:
-    """Load stop words from stop_words.json. Returns module default if absent.
+def load_stop_words(org_dir: Path | None = None) -> frozenset[str]:
+    """Load stop words from config.json[stop_words] or org_dir/stop_words.json.
 
-    File: <org_dir>/stop_words.json  — list of lowercase words to exclude from n-grams.
+    Priority: config.json["stop_words"] > org_dir/stop_words.json > module default.
     """
-    path = org_dir / "stop_words.json"
-    with contextlib.suppress(OSError, json.JSONDecodeError):
-        data = json.loads(path.read_text(encoding="utf-8"))
-        words = data.get("stop_words", [])
-        if words:
-            return frozenset(w.lower() for w in words)
+    # Check config first
+    words = get_config_section("stop_words")
+    if words and isinstance(words, list):
+        return frozenset(w.lower() for w in words)
+
+    # Fall back to separate file
+    if org_dir is None:
+        org_dir_str = load_config().get("org_dir", "")
+        org_dir = Path(org_dir_str).expanduser() if org_dir_str else None
+    if org_dir is not None:
+        path = org_dir / "stop_words.json"
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            file_words = data.get("stop_words", [])
+            if file_words:
+                return frozenset(w.lower() for w in file_words)
     return _DEFAULT_STOP_WORDS
 
 
@@ -172,22 +217,31 @@ def prose_fraction(text: str) -> float:
     return len(prose) / len(text)
 
 
-def load_continuation_config(org_dir: Path) -> tuple[list[str], int]:
-    """Load continuation prompt detection config from continuation_markers.json.
+def load_continuation_config(org_dir: Path | None = None) -> tuple[list[str], int]:
+    """Load continuation prompt detection from config.json[continuation_markers] or file.
 
-    Returns (prefix_markers, min_initial_len) — both from config file.
-    File: <org_dir>/continuation_markers.json
-
-    If absent, returns empty list + 0 so caller falls back to length-only detection.
-    Putting markers in a JSON file makes them discoverable, editable, and version-controlled
-    without touching source code.
+    Priority: config.json["continuation_markers"] > org_dir/continuation_markers.json > ([], 0).
+    Returns (prefix_markers, min_initial_len).
+    If absent, returns ([], 0) so caller falls back to length-only detection.
     """
-    path = org_dir / "continuation_markers.json"
-    with contextlib.suppress(OSError, json.JSONDecodeError):
-        data = json.loads(path.read_text(encoding="utf-8"))
-        markers = data.get("prefix_markers", [])
-        min_len = int(data.get("min_initial_len", 0))
+    # Check config first
+    cm = get_config_section("continuation_markers")
+    if cm and isinstance(cm, dict):
+        markers = cm.get("prefix_markers", [])
+        min_len = int(cm.get("min_initial_len", 0))
         return markers, min_len
+
+    # Fall back to separate file
+    if org_dir is None:
+        org_dir_str = load_config().get("org_dir", "")
+        org_dir = Path(org_dir_str).expanduser() if org_dir_str else None
+    if org_dir is not None:
+        path = org_dir / "continuation_markers.json"
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            markers = data.get("prefix_markers", [])
+            min_len = int(data.get("min_initial_len", 0))
+            return markers, min_len
     return [], 0
 
 

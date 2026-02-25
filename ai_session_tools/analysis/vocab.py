@@ -12,14 +12,13 @@ Licensed under the Apache License, Version 2.0
 from __future__ import annotations
 
 import contextlib
-import json
 from collections import Counter
 from pathlib import Path
 
 from ai_session_tools.config import load_config
 from ai_session_tools.sources.aistudio import AiStudioSource
 from ai_session_tools.analysis.codebook import (
-    get_ngrams, is_meaningful, load_stop_words, extract_prose,
+    get_ngrams, is_meaningful, load_stop_words, load_scoring_weights, extract_prose,
 )
 
 
@@ -27,7 +26,7 @@ def mine_all() -> tuple[Counter[str], Counter[str]]:
     """Stream prose text from AI Studio sources. O(1) memory per session.
 
     Uses prose-only extraction to avoid polluting n-grams with code tokens.
-    min_session_text_len loaded from scoring_weights.json (default 50).
+    min_session_text_len loaded from config.json[scoring_weights] (default 50).
     """
     cfg = load_config()
     source_dirs_cfg = cfg.get("source_dirs", {}).get("aistudio", [])
@@ -35,15 +34,8 @@ def mine_all() -> tuple[Counter[str], Counter[str]]:
         source_dirs_cfg = [source_dirs_cfg]
     source_dirs = [Path(p) for p in source_dirs_cfg]
 
-    # Load min session length threshold from scoring weights
-    org_dir_str = cfg.get("org_dir", "")
-    org_dir = Path(org_dir_str) if org_dir_str else None
-    min_len = 50
-    if org_dir:
-        sw_path = org_dir / "scoring_weights.json"
-        with contextlib.suppress(OSError, json.JSONDecodeError):
-            sw = json.loads(sw_path.read_text(encoding="utf-8"))
-            min_len = int(sw.get("min_session_text_len", 50))
+    sw = load_scoring_weights()
+    min_len = int(sw.get("min_session_text_len", 50))
 
     source = AiStudioSource(source_dirs=source_dirs)
     tri: Counter[str] = Counter()
@@ -68,7 +60,7 @@ def mine_all() -> tuple[Counter[str], Counter[str]]:
 def write_report(tri: Counter[str], quad: Counter[str]) -> None:
     """Write vocabulary report. No arbitrary truncation.
 
-    min_ngram_freq and stop_words loaded from config files in org_dir.
+    min_ngram_freq and stop_words loaded from config.json or org_dir files.
     """
     cfg = load_config()
     org_dir_str = cfg.get("org_dir")
@@ -79,13 +71,8 @@ def write_report(tri: Counter[str], quad: Counter[str]) -> None:
     org_dir = Path(org_dir_str)
     output_file = org_dir / cfg.get("vocab_output_filename", "VOCABULARY_ANALYSIS.md")
 
-    # Load thresholds from config
-    min_freq = 3
-    sw_path = org_dir / "scoring_weights.json"
-    with contextlib.suppress(OSError, json.JSONDecodeError):
-        sw = json.loads(sw_path.read_text(encoding="utf-8"))
-        min_freq = int(sw.get("min_ngram_freq", 3))
-
+    sw = load_scoring_weights(org_dir)
+    min_freq = int(sw.get("min_ngram_freq", 3))
     stop_words = load_stop_words(org_dir)
 
     tri_rows = [(freq, phrase) for phrase, freq in tri.most_common()

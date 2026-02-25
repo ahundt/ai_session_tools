@@ -23,9 +23,9 @@ from pathlib import Path
 from ai_session_tools.sources.aistudio import AiStudioSource
 from ai_session_tools.config import load_config
 from ai_session_tools.analysis.codebook import (
-    load_codebook, load_keyword_maps, compile_codes, get_ngrams, is_meaningful,
-    extract_prose, prose_fraction, classify_prompt_role, load_continuation_config,
-    load_stop_words,
+    load_codebook, load_keyword_maps, load_scoring_weights, compile_codes, get_ngrams,
+    is_meaningful, extract_prose, prose_fraction, classify_prompt_role,
+    load_continuation_config, load_stop_words,
 )
 
 
@@ -329,17 +329,8 @@ def run_analysis(
     mw = marker_window or cfg.get("marker_window", 25_000)
     md_mw = cfg.get("md_marker_window", 2_000)  # .md files include model responses; limit window
 
-    # Load scoring weights (all thresholds from config — no hardcoded values in loops)
-    scoring_weights: dict = {
-        "technique": 20, "role": 15, "thinking_budget": 30,
-        "anti_ai": 35, "version_multiplier": 10, "corrected_bonus": 25,
-        "descendant_boost": 15, "min_ngram_freq": 3,
-        "min_session_text_len": 50, "min_utility_for_index": 20,
-    }
-    sw_path = org_dir / "scoring_weights.json"
-    with contextlib.suppress(OSError, json.JSONDecodeError):
-        scoring_weights.update(json.loads(sw_path.read_text(encoding="utf-8")))
-
+    # Load scoring weights from config.json[scoring_weights] or scoring_weights.json
+    scoring_weights = load_scoring_weights(org_dir)
     min_ngram_freq = int(scoring_weights.get("min_ngram_freq", 3))
     min_session_text_len = int(scoring_weights.get("min_session_text_len", 50))
 
