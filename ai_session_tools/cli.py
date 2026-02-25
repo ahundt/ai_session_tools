@@ -2418,13 +2418,12 @@ _CONFIG_INIT_TEMPLATE = {
         "my", "me", "have", "has", "was", "will", "your", "our", "they", "them",
         "also", "then", "than", "when", "just", "up", "out", "about",
     ],
-    # ── Files that aise organize must never delete or overwrite ───────────
-    "permanent_files": [
-        "CODEBOOK.md", "REFERENCES.md", "ORGANIZATION_TASK_INSTRUCTIONS.md",
-        "USER_INSTRUCTIONS_CLEAN.md", "extract_verbatim_history.py",
-        "analyze_sessions.py", "orchestrate_kb.py", "vocabulary_miner.py",
-        "session_db.json", ".git", "VOCABULARY_ANALYSIS.md",
-    ],
+    # ── aise organize output formats ───────────────────────────────────────
+    # Valid values: "symlinks", "json", "markdown" (list to combine)
+    # "symlinks" — non-destructive symlink taxonomy dirs in org_dir (default)
+    # "json"     — SESSION_TAXONOMY.json: {name: {taxonomy, utility, era}}
+    # "markdown" — TAXONOMY.md: sessions grouped by dimension and category
+    "organize_formats": ["symlinks"],
     # ── Continuation marker detection for prompt role classification ───────
     "continuation_markers": {
         "min_initial_len": 50,
@@ -2561,6 +2560,7 @@ def _run_single_step(
     marker_window: int,
     cfg: dict,
     org_dir: Path,
+    organize_formats: Optional[list[str]] = None,
 ) -> None:
     """Run a single pipeline step.
 
@@ -2570,6 +2570,7 @@ def _run_single_step(
         marker_window: Chars for marker matching (0 = use config default)
         cfg: Configuration dict
         org_dir: Organization directory
+        organize_formats: Output formats for the organize step (None = read from config)
 
     Raises:
         typer.Exit: If step fails
@@ -2584,6 +2585,8 @@ def _run_single_step(
             mod.run_analysis(marker_window=marker_window, source_filter=source_filter)
         elif step == "analyze" and source_filter:
             mod.run_analysis(marker_window=0, source_filter=source_filter)
+        elif step == "organize":
+            mod.run_orchestration(formats=organize_formats)
         else:
             mod.main()
     except SystemExit:
@@ -2618,6 +2621,13 @@ def cmd_analyze(
     org_dir: Optional[str] = typer.Option(
         None, "--org-dir",
         help="Override config.org_dir for this run."
+    ),
+    fmt: Optional[str] = typer.Option(
+        None, "--format", "-f",
+        help=(
+            "Output format(s) for the organize step, comma-separated: "
+            "symlinks, json, markdown. Default: from config or 'symlinks'."
+        ),
     ),
 ) -> None:
     """Run the full analysis pipeline: qualitative coding → graph → taxonomy symlinks.
@@ -2660,6 +2670,7 @@ def cmd_analyze(
     source_filter = ctx_obj.get("source")
     if source_filter and source_filter not in ("aistudio", "gemini", "all"):
         source_filter = None  # fallback: None means all sources
+    organize_formats = [f.strip() for f in fmt.split(",")] if fmt else None
     pipeline_order = _pipeline_order(cfg)
     state = ps.load_state(org) if (org and not force) else {}
 
@@ -2671,7 +2682,8 @@ def cmd_analyze(
                 f"Valid: {', '.join(sorted(_PIPELINE_STEPS.keys()))}"
             )
             raise typer.Exit(code=1)
-        _run_single_step(step, source_filter, marker_window, cfg, org)
+        _run_single_step(step, source_filter, marker_window, cfg, org,
+                         organize_formats=organize_formats)
         # Note: Not updating state for single-step runs; use full pipeline for tracking
         return
 
@@ -2718,7 +2730,8 @@ def cmd_analyze(
 
         console.print(f"[cyan][{name}] running...[/cyan]")
         try:
-            _run_single_step(name, source_filter, marker_window, cfg, org)
+            _run_single_step(name, source_filter, marker_window, cfg, org,
+                             organize_formats=organize_formats)
             ran_any = True
         except SystemExit:
             raise
@@ -2753,10 +2766,20 @@ def cmd_graph() -> None:
 
 
 @app.command("organize", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")
-def cmd_organize() -> None:
-    """Create taxonomy symlinks + INDEX.md + SESSIONS_FULL.md + KNOWLEDGE_GRAPH.md.
+def cmd_organize(
+    fmt: Optional[str] = typer.Option(
+        None, "--format", "-f",
+        help=(
+            "Output format(s), comma-separated: symlinks, json, markdown. "
+            "Default: from config.json['organize_formats'] or 'symlinks'."
+        ),
+    ),
+) -> None:
+    """Create taxonomy output in one or more formats + INDEX.md + SESSIONS_FULL.md.
 
-    Non-destructive: never deletes existing symlinks or permanent files.
+    Formats: symlinks (default), json (SESSION_TAXONOMY.json), markdown (TAXONOMY.md).
+    Use --format symlinks,json,markdown to produce all three simultaneously.
+    Non-destructive: symlinks are never deleted, only added.
 
     Requires SESSION_GRAPH.json from 'aise analyze --step graph'.
     Tip: Use 'aise analyze' to run the full pipeline automatically.
@@ -2771,8 +2794,9 @@ def cmd_organize() -> None:
         raise typer.Exit(code=1)
     org = Path(org_dir_str).expanduser()
     _check_step_dep("organize", cfg, org)
-    from ai_session_tools.analysis.orchestrator import main as org_main
-    org_main()
+    formats = [f.strip() for f in fmt.split(",")] if fmt else None
+    from ai_session_tools.analysis.orchestrator import run_orchestration
+    run_orchestration(formats=formats)
 
 
 @app.command("vocab", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")

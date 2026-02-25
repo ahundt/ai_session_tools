@@ -1,8 +1,13 @@
 """
 AI Studio Knowledge Base Orchestrator - backs `aise organize`.
 
-Reads session_db.json, creates non-destructive symlink taxonomy, writes INDEX.md,
-SESSIONS_FULL.md, and KNOWLEDGE_GRAPH.md.
+Reads session_db.json, creates taxonomy output in one or more configurable formats,
+writes INDEX.md, SESSIONS_FULL.md, and KNOWLEDGE_GRAPH.md.
+
+Output formats (config.json["organize_formats"] or --format CLI flag):
+  "symlinks"  — non-destructive symlink taxonomy dirs (default)
+  "json"      — SESSION_TAXONOMY.json  {name: {dim: [cats], utility, era}}
+  "markdown"  — TAXONOMY.md  grouped by dimension
 
 METHODOLOGICAL REFERENCES:
 - Hsieh & Shannon (2005): https://journals.sagepub.com/doi/10.1177/1049732305276687
@@ -22,33 +27,7 @@ from pathlib import Path
 from ai_session_tools.config import load_config
 from ai_session_tools.analysis.codebook import load_keyword_maps, load_scoring_weights
 
-# Default permanent files — overridden by permanent_files.json in org_dir
-_DEFAULT_PERMANENT_FILES = frozenset({
-    "CODEBOOK.md", "REFERENCES.md", "ORGANIZATION_TASK_INSTRUCTIONS.md",
-    "USER_INSTRUCTIONS_CLEAN.md", "extract_verbatim_history.py",
-    "analyze_sessions.py", "orchestrate_kb.py", "vocabulary_miner.py",
-    "session_db.json", ".git", "VOCABULARY_ANALYSIS.md",
-})
-
-
-def load_permanent_files(org_dir: Path | None = None) -> frozenset[str]:
-    """Load permanent file list from config.json[permanent_files] or org_dir/permanent_files.json.
-
-    Priority: config.json["permanent_files"] > org_dir/permanent_files.json > module default.
-    """
-    from ai_session_tools.config import get_config_section
-    files = get_config_section("permanent_files")
-    if files and isinstance(files, list):
-        return frozenset(files)
-
-    if org_dir is not None:
-        path = org_dir / "permanent_files.json"
-        with contextlib.suppress(OSError, json.JSONDecodeError):
-            data = json.loads(path.read_text(encoding="utf-8"))
-            file_list = data.get("permanent_files", [])
-            if file_list:
-                return frozenset(file_list)
-    return _DEFAULT_PERMANENT_FILES
+VALID_FORMATS: frozenset[str] = frozenset({"symlinks", "json", "markdown"})
 
 
 def make_symlink(source_path: str, link_path: Path) -> bool:
@@ -64,7 +43,7 @@ def make_symlink(source_path: str, link_path: Path) -> bool:
 
 
 def assign_taxonomy(rec: dict, project_map: dict, workflow_map: dict) -> dict[str, list[str]]:
-    """Return mapping of taxonomy_dir -> [sub_categories] for this session."""
+    """Return mapping of taxonomy_dir -> [sub_categories] for a single session record."""
     assignments: defaultdict[str, list[str]] = defaultdict(list)
 
     for tech in rec.get("techniques", []):
@@ -82,7 +61,7 @@ def assign_taxonomy(rec: dict, project_map: dict, workflow_map: dict) -> dict[st
     era = rec.get("era", "unknown")
     assignments["07_by_era"].append(era)
 
-    # 01_by_project: keyword match on name (filename signals valid for project mapping)
+    # 01_by_project: keyword match on name
     name_lower = rec.get("name", "").lower()
     matched = False
     for proj, kws in project_map.items():
@@ -101,16 +80,39 @@ def assign_taxonomy(rec: dict, project_map: dict, workflow_map: dict) -> dict[st
     return dict(assignments)
 
 
-def build_symlinks(
+def build_taxonomy(
     records: list[dict],
-    org_dir: Path,
     project_map: dict,
     workflow_map: dict,
-) -> dict[str, list[str]]:
-    """Create symlinks across all taxonomy dimensions. Non-destructive."""
-    session_paths: dict[str, list[str]] = {}
-    created = 0
+) -> dict[str, dict[str, list[str]]]:
+    """Compute taxonomy assignments for all records.
 
+    Returns {session_name: {taxonomy_dim: [categories]}}.
+    Pure computation — no filesystem side effects.
+    """
+    result: dict[str, dict[str, list[str]]] = {}
+    for rec in records:
+        name = rec.get("name")
+        if name:
+            result[name] = assign_taxonomy(rec, project_map, workflow_map)
+    return result
+
+
+def taxonomy_to_session_paths(taxonomy: dict[str, dict[str, list[str]]]) -> dict[str, list[str]]:
+    """Flatten taxonomy to session_paths {name: ["dim/cat", ...]} for write_index."""
+    return {
+        name: [f"{dim}/{cat}" for dim, cats in dims.items() for cat in cats]
+        for name, dims in taxonomy.items()
+    }
+
+
+def apply_symlinks(
+    records: list[dict],
+    org_dir: Path,
+    taxonomy: dict[str, dict[str, list[str]]],
+) -> int:
+    """Create symlinks from pre-computed taxonomy. Non-destructive. Returns new symlink count."""
+    created = 0
     for rec in records:
         raw_fp = rec.get("filepath", "")
         if not raw_fp:
@@ -119,24 +121,85 @@ def build_symlinks(
         if not Path(filepath).exists():
             continue
         name = rec["name"]
-        assignments = assign_taxonomy(rec, project_map, workflow_map)
-        session_paths[name] = []
-
-        for dim, categories in assignments.items():
+        for dim, categories in taxonomy.get(name, {}).items():
             for cat in categories:
                 link_path = org_dir / dim / cat / name
                 if make_symlink(filepath, link_path):
                     created += 1
-                session_paths[name].append(f"{dim}/{cat}")
+    return created
 
-    print(f"Created {created} new symlinks")
-    return session_paths
+
+def write_taxonomy_json(
+    taxonomy: dict[str, dict[str, list[str]]],
+    records: list[dict],
+    org_dir: Path,
+) -> None:
+    """Write SESSION_TAXONOMY.json: {name: {taxonomy, utility, era}} for all sessions."""
+    name_to_rec = {r["name"]: r for r in records}
+    output = {
+        name: {
+            "taxonomy": dims,
+            "utility": name_to_rec.get(name, {}).get("utility", 0),
+            "era": name_to_rec.get(name, {}).get("era", "unknown"),
+        }
+        for name, dims in taxonomy.items()
+    }
+    path = org_dir / "SESSION_TAXONOMY.json"
+    path.write_text(json.dumps(output, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"SESSION_TAXONOMY.json: {len(taxonomy)} sessions")
+
+
+def write_taxonomy_markdown(
+    taxonomy: dict[str, dict[str, list[str]]],
+    records: list[dict],
+    org_dir: Path,
+) -> None:
+    """Write TAXONOMY.md: sessions grouped by taxonomy dimension and category."""
+    name_to_rec = {r["name"]: r for r in records}
+    sw = load_scoring_weights()
+    min_utility = int(sw.get("min_utility_for_index", 20))
+
+    # {dim: {cat: [names]}}
+    dim_cat_names: defaultdict[str, defaultdict[str, list[str]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for name, dims in taxonomy.items():
+        for dim, cats in dims.items():
+            for cat in cats:
+                dim_cat_names[dim][cat].append(name)
+
+    lines = ["# Session Taxonomy\n\n"]
+    for dim in sorted(dim_cat_names):
+        lines.append(f"## {dim}\n\n")
+        for cat in sorted(dim_cat_names[dim]):
+            names = dim_cat_names[dim][cat]
+            qualifying = [
+                n for n in names
+                if name_to_rec.get(n, {}).get("utility", 0) >= min_utility
+            ]
+            if not qualifying:
+                continue
+            lines.append(f"### {cat} ({len(qualifying)} sessions)\n\n")
+            lines.append("| Session | Utility | Era |\n| :--- | :--- | :--- |\n")
+            for name in sorted(
+                qualifying,
+                key=lambda n: name_to_rec.get(n, {}).get("utility", 0),
+                reverse=True,
+            ):
+                util = name_to_rec.get(name, {}).get("utility", 0)
+                era = name_to_rec.get(name, {}).get("era", "—")
+                lines.append(f"| {name} | {util} | {era} |\n")
+            lines.append("\n")
+
+    path = org_dir / "TAXONOMY.md"
+    path.write_text("".join(lines), encoding="utf-8")
+    print(f"TAXONOMY.md: {len(dim_cat_names)} dimensions")
 
 
 def write_index(records: list[dict], session_paths: dict[str, list[str]], org_dir: Path) -> None:
-    """Write INDEX.md with correct per-session links. No hardcoded misc_research.
+    """Write INDEX.md and SESSIONS_FULL.md. Always written regardless of format.
 
-    min_utility_for_index loaded from scoring_weights.json (default 20).
+    min_utility_for_index loaded from scoring_weights (default 20).
     """
     sw = load_scoring_weights(org_dir)
     min_utility = int(sw.get("min_utility_for_index", 20))
@@ -190,7 +253,7 @@ def write_index(records: list[dict], session_paths: dict[str, list[str]], org_di
     with open(org_dir / "INDEX.md", "w", encoding="utf-8") as f:
         f.writelines(lines)
 
-    # SESSIONS_FULL.md: ALL ranked sessions, no truncation (MSG 133)
+    # SESSIONS_FULL.md: all ranked sessions, no truncation
     full_lines = [
         "# All Sessions: Complete Ranked List\n\n",
         f"{len(all_ranked)} sessions with utility >= {min_utility}, ranked by score.\n\n",
@@ -246,7 +309,11 @@ def write_knowledge_graph(records: list[dict], org_dir: Path) -> None:
     ]
 
     significant_roots = [r for r in roots if children.get(r)]
-    for root in sorted(significant_roots, key=lambda n: name_to_rec.get(n, {}).get("utility", 0), reverse=True)[:30]:
+    for root in sorted(
+        significant_roots,
+        key=lambda n: name_to_rec.get(n, {}).get("utility", 0),
+        reverse=True,
+    )[:30]:
         util = name_to_rec.get(root, {}).get("utility", 0)
         lines.append(f"### {root} (utility: {util})\n\n")
         lines.append("```mermaid\ngraph TD\n")
@@ -261,15 +328,49 @@ def write_knowledge_graph(records: list[dict], org_dir: Path) -> None:
     print("KNOWLEDGE_GRAPH.md written")
 
 
-def run_orchestration() -> None:
-    """Main orchestration: read session_db.json, create symlinks, write index files."""
+def _resolve_formats(cfg: dict, formats: list[str] | None) -> list[str]:
+    """Resolve output formats: parameter > config > default ["symlinks"].
+
+    Accepts a list or comma-separated string from config.
+    Raises ValueError for unknown format names.
+    """
+    if formats is not None:
+        resolved = formats
+    else:
+        cfg_val = cfg.get("organize_formats")
+        if isinstance(cfg_val, str):
+            resolved = [f.strip() for f in cfg_val.split(",") if f.strip()]
+        elif isinstance(cfg_val, list):
+            resolved = cfg_val
+        else:
+            resolved = ["symlinks"]
+
+    bad = set(resolved) - VALID_FORMATS
+    if bad:
+        raise ValueError(
+            f"Unknown organize format(s): {sorted(bad)}. "
+            f"Valid: {sorted(VALID_FORMATS)}"
+        )
+    return resolved
+
+
+def run_orchestration(formats: list[str] | None = None) -> None:
+    """Read session_db.json, produce taxonomy output, write index files.
+
+    Args:
+        formats: Output formats to produce. None reads from config.json["organize_formats"].
+                 Valid values: "symlinks", "json", "markdown" (combinable as a list).
+                 Default when unconfigured: ["symlinks"].
+
+    INDEX.md and SESSIONS_FULL.md are always written regardless of formats.
+    """
     cfg = load_config()
     org_dir_str = cfg.get("org_dir")
     if not org_dir_str:
         raise RuntimeError(
             "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
         )
-    org_dir = Path(org_dir_str)
+    org_dir = Path(org_dir_str).expanduser()
     db_file = org_dir / "session_db.json"
 
     if not db_file.exists():
@@ -278,21 +379,30 @@ def run_orchestration() -> None:
     records = json.loads(db_file.read_text(encoding="utf-8"))
     print(f"Loaded {len(records)} session records")
 
-    keyword_maps = load_keyword_maps(org_dir)
+    active_formats = _resolve_formats(cfg, formats)
+    print(f"Output formats: {', '.join(active_formats)}")
+
+    keyword_maps = load_keyword_maps()
     project_map = keyword_maps.get("project_map", {})
     workflow_map = keyword_maps.get("workflow_map", {})
 
-    session_paths = build_symlinks(records, org_dir, project_map, workflow_map)
+    # Always compute taxonomy — needed for all format outputs and write_index
+    taxonomy = build_taxonomy(records, project_map, workflow_map)
+    session_paths = taxonomy_to_session_paths(taxonomy)
+
+    if "symlinks" in active_formats:
+        created = apply_symlinks(records, org_dir, taxonomy)
+        print(f"Created {created} new symlinks")
+
+    if "json" in active_formats:
+        write_taxonomy_json(taxonomy, records, org_dir)
+
+    if "markdown" in active_formats:
+        write_taxonomy_markdown(taxonomy, records, org_dir)
+
+    # Index files always written
     write_index(records, session_paths, org_dir)
     write_knowledge_graph(records, org_dir)
-
-    # Verify permanent files are intact
-    permanent_files = load_permanent_files(org_dir)
-    for pf in permanent_files:
-        path = org_dir / pf
-        if pf != "session_db.json" and not path.exists():
-            print(f"WARNING: Permanent file missing: {pf}")
-
     print("Orchestration complete.")
 
 
