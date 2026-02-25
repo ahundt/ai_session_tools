@@ -149,14 +149,24 @@ class AiStudioSource:
     # ── Private helpers ──────────────────────────────────────────────────────
 
     def _make_session_info(self, path: Path) -> SessionInfo:
-        """Build lightweight SessionInfo from file metadata only (no content read)."""
+        """Build lightweight SessionInfo from file metadata only (no content read).
+
+        Uses file mtime as timestamp_first — best available signal for AI Studio
+        sessions, which embed no createTime in their JSON.
+        """
+        import datetime
+        try:
+            mtime = path.stat().st_mtime
+            ts = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
+        except OSError:
+            ts = ""
         return SessionInfo(
             session_id=path.name,
             project_dir=str(path.parent),
             cwd="",
             git_branch="",
-            timestamp_first="",
-            timestamp_last="",
+            timestamp_first=ts,
+            timestamp_last=ts,
             message_count=0,
             has_compact_summary=False,
         )
