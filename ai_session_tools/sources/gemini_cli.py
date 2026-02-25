@@ -73,11 +73,16 @@ class GeminiCliSource:
                 yield self._make_session_info(chat_file)
 
     def read_session(self, session_info: SessionInfo) -> list[SessionMessage]:
-        """Load and parse all messages for one Gemini CLI session."""
-        path = Path(session_info.session_id)
+        """Load and parse all messages for one Gemini CLI session.
+
+        session_id is the file stem (e.g. 'session-2026-02-23T04-07-bd7e3697').
+        Reconstructs full path as: project_dir / (session_id + '.json').
+        """
+        # Primary: reconstruct from project_dir + stem + .json
+        path = Path(session_info.project_dir) / (session_info.session_id + ".json")
         if not path.exists():
-            # Reconstruct path from project_dir + session_id
-            alt = Path(session_info.project_dir) / session_info.session_id
+            # Fallback: session_id might be a full path (backward compat)
+            alt = Path(session_info.session_id)
             if alt.exists():
                 path = alt
             else:
@@ -130,8 +135,14 @@ class GeminiCliSource:
                 yield f
 
     def _make_session_info(self, path: Path) -> SessionInfo:
-        """Build SessionInfo from Gemini session file (reads minimal headers)."""
-        session_id = str(path)
+        """Build SessionInfo from Gemini session file (reads minimal headers).
+
+        Uses path.stem as session_id (e.g. 'session-2026-02-23T04-07-bd7e3697')
+        so aise list shows a readable short identifier instead of a full path.
+        project_dir stores the parent chats/ directory so read_session can
+        reconstruct the full path as: Path(project_dir) / (session_id + '.json')
+        """
+        session_id = path.stem  # filename without .json extension
         project_hash = path.parent.parent.name
         timestamp = ""
         m = re.search(r"session-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2})", path.name)

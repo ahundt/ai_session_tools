@@ -2140,7 +2140,7 @@ def list_sessions(
 
     Examples:
         aise list                              # all configured sessions
-        aise list --source aistudio            # AI Studio sessions only
+        aise list --provider aistudio          # AI Studio sessions only
         aise list --project myproject          # filter by project
         aise list --after 2026-01-01           # sessions since Jan 1
         aise list --format json                # JSON output
@@ -2180,7 +2180,7 @@ def _root_search_cmd(
 
     Examples:
         aise search messages --query "error"                 # messages containing "error"
-        aise search messages --query "error" --source claude # Claude sessions only
+        aise search messages --query "error" --provider claude # Claude sessions only
         aise search files --pattern "*.py"                   # Python files edited by Claude
         aise search tools --tool Write --query "login"       # Write calls with "login"
         aise search --tool Bash --query "git commit"         # auto-routes to messages
@@ -2310,8 +2310,8 @@ def stats(
 
     Examples:
         aise stats                        # all configured sources
-        aise stats --source aistudio      # AI Studio only
-        aise stats --source claude        # Claude Code only
+        aise stats --provider aistudio    # AI Studio only
+        aise stats --provider claude      # Claude Code only
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
@@ -2724,9 +2724,9 @@ def cmd_analyze(
         aise analyze --step analyze
         aise analyze --step graph
 
-    To narrow to one backend, use --source BEFORE the 'analyze' subcommand:
-        aise --source aistudio analyze    (analyze only AI Studio sessions)
-        aise --source gemini analyze      (analyze only Gemini CLI sessions)
+    To narrow to one backend, use --provider:
+        aise analyze --provider aistudio  (analyze only AI Studio sessions)
+        aise analyze --provider gemini    (analyze only Gemini CLI sessions)
         aise analyze                      (analyze all configured sources)
     """
     from ai_session_tools.analysis import pipeline_state as ps

@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai_session_tools"
-version = "0.2.0"
-description = "Modern Python library for analyzing Claude Code session data"
+version = "0.3.0"
+description = "Analyze and organize AI sessions from Claude Code, AI Studio, and Gemini CLI"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "Andrew Hundt", email = "ATHundt@gmail.com"}
 ]
-keywords = ["claude", "sessions", "analysis", "jsonl", "recovery", "cli"]
+keywords = ["claude", "ai-studio", "gemini", "sessions", "analysis", "jsonl", "recovery", "cli"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

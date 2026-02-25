@@ -7001,3 +7001,168 @@ class TestCwdFieldAndWorkingDirTaxonomy:
         dim = next(d for d in _DEFAULT_TAXONOMY_DIMENSIONS if d["name"] == "08_by_working_dir")
         # No fallback key, or fallback is None/absent
         assert dim.get("fallback") is None
+
+
+class TestAiStudioMessageCount:
+    """AI Studio sessions should have real message_count (not always 0)."""
+
+    def test_message_count_from_chunked_prompt(self, tmp_path):
+        """_make_session_info reads JSON and counts user+model chunks."""
+        import json
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        session_file = tmp_path / "my_session"
+        session_file.write_text(json.dumps({
+            "chunkedPrompt": {"chunks": [
+                {"role": "user", "text": "Hello"},
+                {"role": "model", "text": "Hi"},
+                {"role": "user", "text": "How are you?"},
+                {"role": "model", "text": "Great"},
+            ]}
+        }), encoding="utf-8")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = src.list_sessions()
+        assert len(sessions) == 1
+        assert sessions[0].message_count == 4  # all user + model chunks
+
+    def test_message_count_zero_for_empty_chunks(self, tmp_path):
+        """Sessions with empty chunks list get message_count=0 (not error)."""
+        import json
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        session_file = tmp_path / "empty_session"
+        session_file.write_text(json.dumps({"chunkedPrompt": {"chunks": []}}), encoding="utf-8")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = src.list_sessions()
+        assert sessions[0].message_count == 0
+
+    def test_message_count_zero_for_invalid_json(self, tmp_path):
+        """Files that aren't JSON get message_count=0 (no crash)."""
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        session_file = tmp_path / "not_json"
+        session_file.write_text("this is not json", encoding="utf-8")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = src.list_sessions()
+        assert sessions[0].message_count == 0
+
+    def test_message_count_md_file_is_one(self, tmp_path):
+        """Legacy .md files count as 1 message (the whole content is one user turn)."""
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        session_file = tmp_path / "legacy.md"
+        session_file.write_text("# My legacy prompt\n\nSome content here", encoding="utf-8")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        # .md files return 0 from _make_session_info (JSON parse fails, no chunkedPrompt)
+        sessions = src.list_sessions()
+        assert sessions[0].message_count == 0  # metadata-only; content is 1 message in read_session
+
+
+class TestGeminiCliSessionDisplay:
+    """Gemini CLI sessions should display readable names, not full paths."""
+
+    def test_session_id_is_stem_not_full_path(self, tmp_path):
+        """session_id uses file stem, not the full absolute path."""
+        import json
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "abc123" / "chats"
+        chats_dir.mkdir(parents=True)
+        session_file = chats_dir / "session-2026-02-24T10-30-abcdef12.json"
+        session_file.write_text(json.dumps({
+            "sessionId": "abcdef12",
+            "messages": [{"type": "user", "content": "hello"}],
+        }), encoding="utf-8")
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = src.list_sessions()
+        assert len(sessions) == 1
+        assert sessions[0].session_id == "session-2026-02-24T10-30-abcdef12"
+        assert "/Users/" not in sessions[0].session_id
+        assert sessions[0].session_id != str(session_file)
+
+    def test_read_session_still_works_with_stem_id(self, tmp_path):
+        """read_session reconstructs full path from project_dir + stem + .json."""
+        import json
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "abc123" / "chats"
+        chats_dir.mkdir(parents=True)
+        session_file = chats_dir / "session-2026-02-24T10-30-abcdef12.json"
+        session_file.write_text(json.dumps({
+            "sessionId": "abcdef12",
+            "messages": [
+                {"type": "user", "content": "hello"},
+                {"type": "gemini", "content": "hi there"},
+            ],
+        }), encoding="utf-8")
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = src.list_sessions()
+        assert len(sessions) == 1
+        messages = src.read_session(sessions[0])
+        assert len(messages) == 2
+        assert messages[0].content == "hello"
+
+    def test_message_count_populated_for_gemini(self, tmp_path):
+        """Gemini sessions have real message_count from parsed JSON."""
+        import json
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "hash456" / "chats"
+        chats_dir.mkdir(parents=True)
+        f = chats_dir / "session-2026-01-01T00-00-aabbccdd.json"
+        f.write_text(json.dumps({
+            "messages": [
+                {"type": "user", "content": "question 1"},
+                {"type": "gemini", "content": "answer 1"},
+                {"type": "user", "content": "question 2"},
+            ]
+        }), encoding="utf-8")
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = src.list_sessions()
+        # Only user messages counted
+        assert sessions[0].message_count == 2
+
+
+class TestProviderFlag:
+    """--provider flag works per-command and globally; _g_source global is absent."""
+
+    def test_g_source_global_absent(self):
+        """_g_source module global must not exist (deleted in Phase C)."""
+        import ai_session_tools.cli as cli_mod
+        assert not hasattr(cli_mod, "_g_source"), "_g_source global must not exist"
+
+    def test_resolve_engine_exists(self):
+        """_resolve_engine helper exists and is callable."""
+        import ai_session_tools.cli as cli_mod
+        assert callable(getattr(cli_mod, "_resolve_engine", None))
+
+    def test_stats_exits_zero(self, tmp_path, monkeypatch):
+        """aise stats exits 0 (uses ctx.obj engine not _g_source)."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path))
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0
+
+    def test_list_provider_claude_exits_zero(self, tmp_path, monkeypatch):
+        """aise list --provider claude exits 0."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+
+    def test_global_provider_before_subcommand(self, tmp_path, monkeypatch):
+        """aise --provider claude list also exits 0 (global flag position)."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path))
+        result = runner.invoke(app, ["--provider", "claude", "list"])
+        assert result.exit_code == 0
+
+    def test_provider_help_text_uses_provider_not_source(self):
+        """Help text for list/stats/search uses --provider, not --source."""
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--provider" in result.output
+        assert "--source" not in result.output
+
+    def test_stats_help_uses_provider(self):
+        """aise stats --help shows --provider, not --source."""
+        result = runner.invoke(app, ["stats", "--help"])
+        # Check the docstring examples use --provider
+        assert "--source" not in result.output
+
+    def test_analyze_help_uses_provider(self):
+        """aise analyze --help shows --provider not --source."""
+        result = runner.invoke(app, ["analyze", "--help"])
+        assert "--source" not in result.output

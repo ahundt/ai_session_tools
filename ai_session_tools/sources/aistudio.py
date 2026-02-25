@@ -149,10 +149,12 @@ class AiStudioSource:
     # ── Private helpers ──────────────────────────────────────────────────────
 
     def _make_session_info(self, path: Path) -> SessionInfo:
-        """Build lightweight SessionInfo from file metadata only (no content read).
+        """Build SessionInfo from file metadata + quick JSON peek for message count.
 
         Uses file mtime as timestamp_first — best available signal for AI Studio
         sessions, which embed no createTime in their JSON.
+        Reads file content to count user/model chunks; accepts the I/O cost since
+        aise list inherently shows all sessions.
         """
         import datetime
         try:
@@ -160,6 +162,14 @@ class AiStudioSource:
             ts = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
         except OSError:
             ts = ""
+        message_count = 0
+        with contextlib.suppress(OSError, json.JSONDecodeError, UnicodeDecodeError):
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+            data = json.loads(raw)
+            chunks = data.get("chunkedPrompt", {}).get("chunks", [])
+            message_count = sum(
+                1 for c in chunks if c.get("role") in ("user", "model", "assistant")
+            )
         return SessionInfo(
             session_id=path.name,
             project_dir=str(path.parent),
@@ -167,7 +177,7 @@ class AiStudioSource:
             git_branch="",
             timestamp_first=ts,
             timestamp_last=ts,
-            message_count=0,
+            message_count=message_count,
             has_compact_summary=False,
         )
 
