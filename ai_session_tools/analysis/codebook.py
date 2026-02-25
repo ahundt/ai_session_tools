@@ -104,3 +104,109 @@ def is_meaningful(phrase: str) -> bool:
     if all(w in _STOP_WORDS for w in words):
         return False
     return True
+
+
+# Patterns that identify code/config content — auto-detected, no hardcoded keywords
+_FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INDENTED_CODE_RE = re.compile(r"(?:^|\n)((?:    |\t)[^\n]+(?:\n(?:    |\t)[^\n]+)*)")
+_CODE_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:import|from|def|class|return|if|elif|else|for|while|try|except|with|async|await)\b"
+    r"|[a-zA-Z_]\w*\s*[=\(]"  # assignment or function call
+    r"|\{|\[|</"             # JSON/dict/array start or closing HTML/XML tag
+    r"|#\s*\w"               # comment line
+    r")",
+    re.MULTILINE,
+)
+
+
+def extract_prose(text: str) -> str:
+    """Strip code blocks and code-heavy lines; return prose-only text.
+
+    Auto-detects code via:
+    - Fenced code blocks (``` ... ```)
+    - Indented blocks (4 spaces or tab)
+    - Lines with Python/JS/config syntax signatures
+
+    No configuration knobs — detection is structural, not keyword-based.
+    """
+    # Remove fenced code blocks first (most reliable signal)
+    prose = _FENCED_CODE_RE.sub(" ", text)
+    # Remove indented code blocks
+    prose = _INDENTED_CODE_RE.sub(" ", prose)
+    # Filter remaining lines that look like code
+    lines = []
+    for line in prose.splitlines():
+        if line.strip() and _CODE_LINE_RE.match(line):
+            continue  # skip code-looking lines
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def prose_fraction(text: str) -> float:
+    """Return fraction of characters that are prose (not code), 0.0-1.0.
+
+    Returns 1.0 for empty text (no code to detect).
+    """
+    if not text:
+        return 1.0
+    prose = extract_prose(text)
+    return len(prose) / len(text)
+
+
+def load_continuation_config(org_dir: Path) -> tuple[list[str], int]:
+    """Load continuation prompt detection config from continuation_markers.json.
+
+    Returns (prefix_markers, min_initial_len) — both from config file.
+    File: <org_dir>/continuation_markers.json
+
+    If absent, returns empty list + 0 so caller falls back to length-only detection.
+    Putting markers in a JSON file makes them discoverable, editable, and version-controlled
+    without touching source code.
+    """
+    path = org_dir / "continuation_markers.json"
+    with contextlib.suppress(OSError, json.JSONDecodeError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        markers = data.get("prefix_markers", [])
+        min_len = int(data.get("min_initial_len", 0))
+        return markers, min_len
+    return [], 0
+
+
+def classify_prompt_role(
+    message_text: str,
+    is_first_in_session: bool = True,
+    continuation_markers: list[str] | None = None,
+    min_initial_len: int = 0,
+) -> str:
+    """Classify a user message as 'initial', 'continuation', or 'standalone'.
+
+    Returns:
+        'initial'      — substantive opening prompt (first in session, long enough, no continuation signal)
+        'continuation' — builds on prior context (short or starts with configured marker)
+        'standalone'   — caller should set directly; not computed here
+
+    Parameters:
+        continuation_markers: list of word/phrase strings loaded from continuation_markers.json.
+                               If empty/None, only message length is used as a signal.
+        min_initial_len:       minimum chars for a message to be classified 'initial'.
+                               0 = use length signal only if continuation_markers also matches.
+                               Loaded from continuation_markers.json["min_initial_len"].
+    """
+    text = message_text.strip()
+
+    is_short = (min_initial_len > 0 and len(text) < min_initial_len)
+
+    is_continuation_opener = False
+    if continuation_markers:
+        pattern = re.compile(
+            r"^\s*(?:" + "|".join(r"\b" + re.escape(m) for m in continuation_markers) + r")\b",
+            re.IGNORECASE,
+        )
+        is_continuation_opener = bool(pattern.match(text))
+
+    if is_first_in_session and not is_continuation_opener and not is_short:
+        return "initial"
+    if is_short or is_continuation_opener:
+        return "continuation"
+    return "initial"

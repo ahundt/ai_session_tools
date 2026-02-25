@@ -59,7 +59,7 @@ def assign_taxonomy(rec: dict, project_map: dict, workflow_map: dict) -> dict[st
     for method in rec.get("writing_methods", []):
         assignments["06_by_writing_method"].append(method)
 
-    era = rec.get("era", "2025-2026")
+    era = rec.get("era", "unknown")
     assignments["07_by_era"].append(era)
 
     # 01_by_project: keyword match on name (filename signals valid for project mapping)

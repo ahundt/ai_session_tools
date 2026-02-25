@@ -23,7 +23,8 @@ from pathlib import Path
 from ai_session_tools.sources.aistudio import AiStudioSource
 from ai_session_tools.config import load_config
 from ai_session_tools.analysis.codebook import (
-    load_codebook, load_keyword_maps, compile_codes, get_ngrams, is_meaningful
+    load_codebook, load_keyword_maps, compile_codes, get_ngrams, is_meaningful,
+    extract_prose, prose_fraction, classify_prompt_role, load_continuation_config,
 )
 
 
@@ -56,6 +57,8 @@ class SessionRecord:
     has_srt: bool = False
     has_transcript: bool = False
     project_hash: str = ""
+    prose_frac: float = 1.0   # fraction of user_text that is prose (not code/config)
+    prompt_role: str = "unknown"  # 'initial' | 'continuation' | 'standalone' | 'unknown'
 
     @property
     def user_text_full(self) -> str:
@@ -76,38 +79,66 @@ class SessionRecord:
         return d
 
 
-def _detect_era(name: str, user_text: str) -> str:
-    """Detect era from session filename or content year signals.
+def _detect_era(
+    name: str,
+    user_text: str,
+    filepath: str | None = None,
+    timestamp: str | None = None,
+) -> str:
+    """Detect era (year) from session signals. Returns actual year or 'legacy'/'unknown'.
 
-    Strategy (priority order):
+    Never hardcodes year buckets — all signals come from the data itself.
+    NOTE: timestamp should only be passed when it is authoritative (e.g. Gemini CLI
+    sessions have actual startTime in JSON). AI Studio file mtime reflects download date
+    (unreliable) — do NOT pass it as timestamp.
+
+    Priority (highest to lowest):
     1. 4-digit year at start of name (e.g. "2024-03-meeting")
-    2. Standalone year anywhere in name (e.g. "Meeting Notes 2024")
-    3. Year in first 2000 chars of user_text context (e.g. "as of 2024")
-    4. Default: 2025-2026
+    2. 2-digit year prefix at start of name: YY-MM-DD (e.g. "25-08-27") or YYMMDD (e.g. "250509")
+    3. Standalone 4-digit year anywhere in name (e.g. "Meeting Notes 2024")
+    4. Authoritative ISO timestamp from session JSON metadata (Gemini CLI, Claude Code)
+    5. Year in first 2000 chars of user_text (e.g. "as of 2024")
+    6. .md extension → legacy AI Studio format (2023-2024 era, exact year unknown)
+    7. "unknown" — no year signal found
     """
-    # Priority 1: year prefix in name
-    m = re.match(r"(202[3-6])", name)
+    _yr4_re = re.compile(r"\b(20\d\d)\b")
+
+    # Priority 1: 4-digit year at start of name
+    m = re.match(r"(20\d\d)", name)
     if m:
-        yr = m.group(1)
-        if yr in ("2023", "2024"):
-            return yr
-        return "2025-2026"
+        return m.group(1)
 
-    # Priority 2: standalone year anywhere in name
-    m2 = re.search(r"\b(202[3-6])\b", name)
+    # Priority 2: 2-digit year prefix at start of name (YY-MM-DD or YYMMDD)
+    m2 = re.match(r"(\d{2})[-]?\d{2}[-]?\d{2}", name)
     if m2:
-        yr = m2.group(1)
-        if yr in ("2023", "2024"):
-            return yr
-        return "2025-2026"
+        yy = int(m2.group(1))
+        if 20 <= yy <= 99:  # reasonable 21st century range
+            return str(2000 + yy)
 
-    # Priority 3: year in early content
+    # Priority 3: standalone 4-digit year anywhere in name
+    m3 = _yr4_re.search(name)
+    if m3:
+        return m3.group(1)
+
+    # Priority 4: authoritative ISO timestamp (Gemini CLI startTime, Claude Code session ts)
+    # Do NOT use AI Studio file mtime here — it reflects download date, not creation date.
+    if timestamp:
+        m4 = re.match(r"(20\d\d)", timestamp)
+        if m4:
+            return m4.group(1)
+
+    # Priority 5: ISO date pattern (YYYY-MM-DD) in early content — specific enough to be reliable
     sample = user_text[:2000]
-    for yr in ("2024", "2023"):
-        if re.search(r"\b" + yr + r"\b", sample):
-            return yr
+    m5 = re.search(r"\b(20[2-9]\d)-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b", sample)
+    if m5:
+        return m5.group(1)
 
-    return "2025-2026"
+    # Priority 6: .md extension = legacy AI Studio format (2023-2024 era, exact year unknown)
+    fp = filepath or name
+    if fp.endswith(".md"):
+        return "legacy"
+
+    return "unknown"
 
 
 def apply_codes(
@@ -301,6 +332,7 @@ def run_analysis(
     keyword_maps = load_keyword_maps(org_dir)
     tech_patterns = compile_codes(tech_codes)
     role_patterns = compile_codes(role_codes)
+    continuation_markers, min_initial_len = load_continuation_config(org_dir)
 
     source = AiStudioSource(source_dirs=source_dirs)
     records: list[SessionRecord] = []
@@ -316,16 +348,30 @@ def run_analysis(
 
             user_text = " ".join(m.content for m in messages if m.type.value == "user")
             name = session_info.session_id
-            era = _detect_era(name, user_text)
+            fp = str(Path(session_info.project_dir) / name)
+            # AI Studio: timestamp_first is file mtime (download date, not creation date) — do NOT use
+            era = _detect_era(name, user_text, filepath=fp, timestamp=None)
             lower_sample = user_text[:5000].lower()
 
             # Detect source format from content
             source_format = "markdown" if name.endswith(".md") else "aistudio_json"
 
+            prose_text = extract_prose(user_text)
+            pf = prose_fraction(user_text)
+            user_msgs = [m for m in messages if m.type.value == "user"]
+            first_user = user_msgs[0].content if user_msgs else ""
+            is_single = len(user_msgs) == 1
+            p_role = classify_prompt_role(
+                first_user, is_first_in_session=True,
+                continuation_markers=continuation_markers,
+                min_initial_len=min_initial_len,
+            )
+            if is_single:
+                p_role = "standalone"
             rec = SessionRecord(
                 name=name,
                 source_dir=session_info.project_dir,
-                filepath=str(Path(session_info.project_dir) / name),
+                filepath=fp,
                 source_format=source_format,
                 user_text=user_text,
                 chunk_count=len(messages),
@@ -333,15 +379,17 @@ def run_analysis(
                 era=era,
                 has_srt="srt" in lower_sample,
                 has_transcript="transcript" in lower_sample,
+                prose_frac=pf,
+                prompt_role=p_role,
             )
 
             effective_mw = md_mw if source_format == "markdown" else mw
             apply_codes(rec, tech_patterns, role_patterns, keyword_maps, scoring_weights, marker_window=effective_mw)
             records.append(rec)
 
-            # Vocabulary: full text, no limit
-            tri.update(get_ngrams(user_text, 3))
-            quad.update(get_ngrams(user_text, 4))
+            # Vocabulary: prose-only text to avoid polluting n-grams with code tokens
+            tri.update(get_ngrams(prose_text, 3))
+            quad.update(get_ngrams(prose_text, 4))
 
     # Also process Gemini CLI sessions if configured (Gap 2 fix)
     gemini_cli_dir_cfg = cfg.get("source_dirs", {}).get("gemini_cli", "")
@@ -357,12 +405,25 @@ def run_analysis(
                 if not user_text.strip():
                     continue
                 name = session_info.session_id
-                era = _detect_era(name, user_text)
+                fp_g = str(Path(gemini_cli_dir_cfg) / name)
+                era = _detect_era(name, user_text, filepath=fp_g, timestamp=session_info.timestamp_first)
                 lower_sample = user_text[:5000].lower()
+                prose_text_g = extract_prose(user_text)
+                pf_g = prose_fraction(user_text)
+                user_msgs_g = [m for m in messages if m.type.value == "user"]
+                first_user_g = user_msgs_g[0].content if user_msgs_g else ""
+                is_single_g = len(user_msgs_g) == 1
+                p_role_g = classify_prompt_role(
+                    first_user_g, is_first_in_session=True,
+                    continuation_markers=continuation_markers,
+                    min_initial_len=min_initial_len,
+                )
+                if is_single_g:
+                    p_role_g = "standalone"
                 rec = SessionRecord(
                     name=name,
                     source_dir=gemini_cli_dir_cfg,
-                    filepath=str(Path(gemini_cli_dir_cfg) / name),
+                    filepath=fp_g,
                     source_format="gemini_cli",
                     user_text=user_text,
                     chunk_count=len(messages),
@@ -371,11 +432,13 @@ def run_analysis(
                     has_srt="srt" in lower_sample,
                     has_transcript="transcript" in lower_sample,
                     project_hash=getattr(session_info, "project_hash", ""),
+                    prose_frac=pf_g,
+                    prompt_role=p_role_g,
                 )
                 apply_codes(rec, tech_patterns, role_patterns, keyword_maps, scoring_weights, marker_window=mw)
                 records.append(rec)
-                tri.update(get_ngrams(user_text, 3))
-                quad.update(get_ngrams(user_text, 4))
+                tri.update(get_ngrams(prose_text_g, 3))
+                quad.update(get_ngrams(prose_text_g, 4))
     print(f"Total after all sources: {len(records)} sessions")
 
     compute_descendant_boost(records, scoring_weights.get("descendant_boost", 15))
