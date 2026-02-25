@@ -5493,3 +5493,1382 @@ class TestMultiSourceEngineSignature:
         engine = MultiSourceEngine([])
         result = engine.search_messages("query", "user")
         assert isinstance(result, list)
+
+
+class TestDetectEra:
+    """Test _detect_era(name, user_text, filepath=None, timestamp=None) for all priority levels.
+
+    Priority (highest → lowest):
+    1. 4-digit year at start of name
+    2. 2-digit year prefix (YY-MM-DD or YYMMDD) at start of name
+    3. Standalone 4-digit year anywhere in name
+    4. Authoritative ISO timestamp parameter
+    5. ISO date (YYYY-MM-DD) in first 2000 chars of user_text
+    6. .md extension → "legacy"
+    7. "unknown"
+    """
+
+    def setup_method(self):
+        from ai_session_tools.analysis.analyzer import _detect_era
+        self._detect_era = _detect_era
+
+    # --- Priority 1: 4-digit year at start of name ---
+
+    def test_4digit_year_prefix_2024(self):
+        """Name starting with 2024 returns '2024'."""
+        assert self._detect_era("2024_session_name", "") == "2024"
+
+    def test_4digit_year_prefix_2023(self):
+        """Name starting with 2023 returns '2023'."""
+        assert self._detect_era("2023_transcription_work", "") == "2023"
+
+    def test_4digit_year_prefix_2025(self):
+        """Name starting with 2025 returns '2025'."""
+        assert self._detect_era("2025-meeting-notes", "") == "2025"
+
+    def test_4digit_year_prefix_2026(self):
+        """Name starting with 2026 returns '2026'."""
+        assert self._detect_era("2026_project_alpha", "") == "2026"
+
+    # --- Priority 2: 2-digit year prefix (YY-MM-DD or YYMMDD) ---
+
+    def test_2digit_year_prefix_yy_mm_dd(self):
+        """Name '25-08-27_something' maps to 2025 (2-digit prefix YY-MM-DD)."""
+        result = self._detect_era("25-08-27_something", "")
+        assert result == "2025"
+
+    def test_2digit_year_prefix_yymmdd(self):
+        """Name '250509_session' maps to 2025 (YYMMDD prefix)."""
+        result = self._detect_era("250509_session", "")
+        assert result == "2025"
+
+    def test_2digit_year_prefix_23(self):
+        """Name '23-01-15' maps to 2023."""
+        result = self._detect_era("23-01-15", "")
+        assert result == "2023"
+
+    # --- Priority 3: Standalone 4-digit year anywhere in name ---
+
+    def test_standalone_year_in_parentheses(self):
+        """Name 'session (2023) title' returns '2023' via standalone year search."""
+        result = self._detect_era("session (2023) title", "")
+        assert result == "2023"
+
+    def test_standalone_year_at_end_of_name(self):
+        """Name 'meeting notes 2024' returns '2024' via standalone year search."""
+        result = self._detect_era("meeting notes 2024", "")
+        assert result == "2024"
+
+    # --- Priority 4: Authoritative ISO timestamp parameter ---
+
+    def test_timestamp_iso_used_when_no_name_year(self):
+        """timestamp='2024-03-15T10:00:00Z' → '2024' when name has no year."""
+        result = self._detect_era("my session", "", timestamp="2024-03-15T10:00:00Z")
+        assert result == "2024"
+
+    def test_timestamp_year_2025(self):
+        """timestamp='2025-01-01' → '2025' when name has no year."""
+        result = self._detect_era("some session", "", timestamp="2025-01-01")
+        assert result == "2025"
+
+    # --- Priority 5: ISO date in user_text content ---
+
+    def test_iso_date_in_user_text(self):
+        """'2024-03-15 meeting notes' in user_text → '2024' when name has no year."""
+        result = self._detect_era("my session", "2024-03-15 meeting notes")
+        assert result == "2024"
+
+    def test_year_in_content_no_name_year(self):
+        """Content with ISO date 'discussed in 2024-07-01' → '2024'."""
+        result = self._detect_era("session", "as of 2024-07-01 we discussed this")
+        assert result == "2024"
+
+    def test_plain_year_in_content_without_iso_date_is_not_priority5(self):
+        """'discussed in 2024' (no full ISO date) with .md filepath falls through to legacy."""
+        # Priority 5 only triggers on ISO date (YYYY-MM-DD), not bare year in text.
+        # With .md filepath → legacy (Priority 6).
+        result = self._detect_era("session", "discussed in 2024", filepath="session.md")
+        assert result == "legacy"
+
+    # --- Priority 6: .md extension → "legacy" ---
+
+    def test_md_extension_returns_legacy(self):
+        """File with .md extension and no year signals → 'legacy'."""
+        result = self._detect_era("my session", "hello world", filepath="my session.md")
+        assert result == "legacy"
+
+    def test_md_in_name_returns_legacy(self):
+        """Name ending in .md with no year → 'legacy'."""
+        result = self._detect_era("session.md", "hello world")
+        assert result == "legacy"
+
+    # --- Priority 7: "unknown" ---
+
+    def test_no_signals_returns_unknown(self):
+        """No year in name, no year in text, no .md, no timestamp → 'unknown'."""
+        result = self._detect_era("my session", "hello world", filepath="")
+        assert result == "unknown"
+
+    def test_empty_inputs_returns_unknown(self):
+        """All empty inputs → 'unknown'."""
+        result = self._detect_era("", "", filepath="")
+        assert result == "unknown"
+
+    # --- Priority ordering ---
+
+    def test_name_year_beats_content_year(self):
+        """Name '2024_session' with user_text mentioning 2022 → '2024' (name wins)."""
+        result = self._detect_era("2024_session", "from 2022")
+        assert result == "2024"
+
+    def test_name_year_beats_timestamp(self):
+        """Name '2024_session' with timestamp='2022-01-01' → '2024' (name wins)."""
+        result = self._detect_era("2024_session", "", timestamp="2022-01-01")
+        assert result == "2024"
+
+    def test_timestamp_beats_content_iso_date(self):
+        """Timestamp '2025-06-01' beats ISO date '2023-01-01' in user_text."""
+        result = self._detect_era("session", "2023-01-01 notes", timestamp="2025-06-01")
+        assert result == "2025"
+
+    def test_name_year_beats_md_extension(self):
+        """Name '2024_session.md' → '2024' (name year Priority 1 beats .md Priority 6)."""
+        result = self._detect_era("2024_session.md", "hello world")
+        assert result == "2024"
+
+
+class TestWriteVocabReport:
+    """Test write_vocab_report(tri, quad, output_file, min_freq, stop_words).
+
+    Function signature (from analyzer.py):
+        write_vocab_report(tri: Counter, quad: Counter, output_file: Path,
+                           min_freq: int = 3, stop_words: frozenset | None = None)
+    """
+
+    def setup_method(self):
+        from ai_session_tools.analysis.analyzer import write_vocab_report
+        self.write_vocab_report = write_vocab_report
+
+    def _make_counter(self, items):
+        from collections import Counter
+        return Counter(items)
+
+    # --- File creation ---
+
+    def test_creates_output_file(self, tmp_path):
+        """write_vocab_report creates the file at the specified path."""
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), self._make_counter([]), out)
+        assert out.exists()
+
+    def test_file_starts_with_vocab_analysis_header(self, tmp_path):
+        """Output file starts with '# Vocabulary Analysis' header."""
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), self._make_counter([]), out)
+        content = out.read_text(encoding="utf-8")
+        assert content.startswith("# Vocabulary Analysis")
+
+    # --- Section headers ---
+
+    def test_contains_3word_phrases_section(self, tmp_path):
+        """Output contains '3-Word Phrases' section header."""
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), self._make_counter([]), out)
+        content = out.read_text(encoding="utf-8")
+        assert "3-Word Phrases" in content
+
+    def test_contains_4word_phrases_section(self, tmp_path):
+        """Output contains '4-Word Phrases' section header."""
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), self._make_counter([]), out)
+        content = out.read_text(encoding="utf-8")
+        assert "4-Word Phrases" in content
+
+    # --- Markdown table format ---
+
+    def test_markdown_table_header_present(self, tmp_path):
+        """Output contains '| Count | Phrase |' markdown table header."""
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), self._make_counter([]), out)
+        content = out.read_text(encoding="utf-8")
+        assert "| Count | Phrase |" in content
+
+    # --- Frequency filtering ---
+
+    def test_high_freq_trigram_appears_in_output(self, tmp_path):
+        """Trigram with freq >= min_freq and is_meaningful → appears in output."""
+        from collections import Counter
+        tri = Counter({"prompt engineering techniques": 5})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "prompt engineering techniques" in content
+
+    def test_low_freq_trigram_excluded(self, tmp_path):
+        """Trigram with freq below min_freq is excluded from output."""
+        from collections import Counter
+        tri = Counter({"rare trigram phrase": 1})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "rare trigram phrase" not in content
+
+    def test_exactly_min_freq_trigram_included(self, tmp_path):
+        """Trigram with freq == min_freq is included (boundary condition)."""
+        from collections import Counter
+        tri = Counter({"boundary test phrase": 3})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "boundary test phrase" in content
+
+    # --- Stop word filtering ---
+
+    def test_stop_word_only_phrase_excluded(self, tmp_path):
+        """Phrase consisting entirely of stop words is excluded by is_meaningful."""
+        from collections import Counter
+        # "the and is" — all stop words → is_meaningful returns False
+        tri = Counter({"the and is": 10})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "the and is" not in content
+
+    def test_phrase_starting_with_stop_word_excluded(self, tmp_path):
+        """Phrase starting with a stop word is excluded (is_meaningful rule)."""
+        from collections import Counter
+        # "the quick brown" starts with "the" (stop word) → excluded
+        tri = Counter({"the quick brown": 10})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "the quick brown" not in content
+
+    def test_custom_stop_words_applied(self, tmp_path):
+        """Custom stop_words parameter overrides default, filtering phrase that would otherwise pass."""
+        from collections import Counter
+        # "python machine learning" would normally pass, but "python" as custom stop word blocks it
+        tri = Counter({"python machine learning": 5})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3,
+                                stop_words=frozenset({"python"}))
+        content = out.read_text(encoding="utf-8")
+        assert "python machine learning" not in content
+
+    # --- Empty counters ---
+
+    def test_empty_counters_no_crash(self, tmp_path):
+        """Empty counters write sections with 0 entries without crashing."""
+        from collections import Counter
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(Counter(), Counter(), out)
+        content = out.read_text(encoding="utf-8")
+        assert "0 total" in content
+
+    def test_empty_counters_file_is_valid_markdown(self, tmp_path):
+        """Empty counters still produce a valid markdown file with both sections."""
+        from collections import Counter
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(Counter(), Counter(), out)
+        content = out.read_text(encoding="utf-8")
+        assert "3-Word Phrases" in content
+        assert "4-Word Phrases" in content
+
+    # --- Quadgram-specific ---
+
+    def test_high_freq_quadgram_appears_in_output(self, tmp_path):
+        """Quadgram with freq >= min_freq and is_meaningful → appears in output."""
+        from collections import Counter
+        quad = Counter({"advanced prompt engineering techniques": 4})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), quad, out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "advanced prompt engineering techniques" in content
+
+    def test_low_freq_quadgram_excluded(self, tmp_path):
+        """Quadgram with freq below min_freq is excluded."""
+        from collections import Counter
+        quad = Counter({"rare four word phrase": 2})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), quad, out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "rare four word phrase" not in content
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestOrchestratorTaxonomy  (orchestrator.py coverage)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestOrchestratorTaxonomy:
+    """Tests for ai_session_tools.analysis.orchestrator — all public APIs."""
+
+    # ── 1. make_symlink ──────────────────────────────────────────────────────
+
+    def test_make_symlink_creates_link_when_source_exists(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import make_symlink
+        src = tmp_path / "source.txt"
+        src.write_text("hello")
+        link = tmp_path / "links" / "target.txt"
+        result = make_symlink(str(src), link)
+        assert result is True
+        assert link.is_symlink()
+
+    def test_make_symlink_skips_if_already_exists(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import make_symlink
+        src = tmp_path / "source.txt"
+        src.write_text("hello")
+        link = tmp_path / "target.txt"
+        make_symlink(str(src), link)
+        result = make_symlink(str(src), link)
+        assert result is False
+
+    def test_make_symlink_creates_parent_dirs(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import make_symlink
+        src = tmp_path / "source.txt"
+        src.write_text("hello")
+        link = tmp_path / "a" / "b" / "c" / "target.txt"
+        make_symlink(str(src), link)
+        assert link.parent.is_dir()
+
+    def test_make_symlink_nonexistent_source_still_creates_link(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import make_symlink
+        link = tmp_path / "subdir" / "link.txt"
+        result = make_symlink("/nonexistent/path/file.txt", link)
+        # make_symlink does not check if source exists; link may be dangling
+        # result is True if symlink was created, False if OS refused
+        assert isinstance(result, bool)
+        # If created, verify it is a symlink
+        if result:
+            assert link.is_symlink()
+
+    # ── 2. validate_taxonomy_dimensions (no keyword_maps) ───────────────────
+
+    def test_validate_empty_list_is_valid(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        assert validate_taxonomy_dimensions([]) == []
+
+    def test_validate_missing_name_key(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{"match": "field", "field": "era"}])
+        assert any("missing required key 'name'" in e for e in errors)
+
+    def test_validate_field_match_missing_field_key(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{"name": "dim", "match": "field"}])
+        assert any("match='field' requires 'field' key" in e for e in errors)
+        assert any("example" in e.lower() or '"techniques"' in e for e in errors)
+
+    def test_validate_keyword_match_missing_keyword_map(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{
+            "name": "dim", "match": "keyword",
+            "source_field": "name", "match_type": "substring"
+        }])
+        assert any("'keyword_map'" in e for e in errors)
+
+    def test_validate_keyword_match_missing_source_field(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{
+            "name": "dim", "match": "keyword",
+            "keyword_map": "mymap", "match_type": "substring"
+        }])
+        assert any("'source_field'" in e for e in errors)
+
+    def test_validate_keyword_bad_match_type(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{
+            "name": "dim", "match": "keyword",
+            "keyword_map": "mymap", "source_field": "name",
+            "match_type": "regex"
+        }])
+        # Should mention valid types
+        assert any("set_intersection" in e or "substring" in e for e in errors)
+
+    def test_validate_invalid_match_value_glob(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{"name": "dim", "match": "glob"}])
+        assert any("field" in e and "keyword" in e for e in errors)
+
+    def test_validate_default_taxonomy_dimensions_ok(self):
+        from ai_session_tools.analysis.orchestrator import (
+            validate_taxonomy_dimensions, _DEFAULT_TAXONOMY_DIMENSIONS
+        )
+        errors = validate_taxonomy_dimensions(_DEFAULT_TAXONOMY_DIMENSIONS)
+        assert errors == []
+
+    # ── 3. validate_taxonomy_dimensions with keyword_maps ───────────────────
+
+    def test_validate_keyword_map_not_in_maps_dict(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        dims = [{
+            "name": "dim", "match": "keyword",
+            "keyword_map": "missing_map", "source_field": "name",
+            "match_type": "substring", "fallback": "other"
+        }]
+        errors = validate_taxonomy_dimensions(dims, keyword_maps={})
+        assert any("missing_map" in e for e in errors)
+        assert any("fallback" in e for e in errors)
+        assert any("keyword_maps" in e or "config.json" in e for e in errors)
+
+    def test_validate_keyword_map_present_but_empty(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        dims = [{
+            "name": "dim", "match": "keyword",
+            "keyword_map": "empty_map", "source_field": "name",
+            "match_type": "substring", "fallback": "other"
+        }]
+        errors = validate_taxonomy_dimensions(dims, keyword_maps={"empty_map": {}})
+        assert any("empty_map" in e for e in errors)
+
+    def test_validate_keyword_map_present_and_nonempty_no_error(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        dims = [{
+            "name": "dim", "match": "keyword",
+            "keyword_map": "mymap", "source_field": "name",
+            "match_type": "substring"
+        }]
+        errors = validate_taxonomy_dimensions(dims, keyword_maps={"mymap": {"cat": ["kw"]}})
+        # No error for this dimension specifically
+        assert not any("mymap" in e for e in errors)
+
+    # ── 4. load_taxonomy_dimensions ─────────────────────────────────────────
+
+    def test_load_taxonomy_returns_default_when_no_config(self, monkeypatch):
+        from ai_session_tools.analysis import orchestrator as orch
+        monkeypatch.setattr(orch, "get_config_section", lambda _: None)
+        result = orch.load_taxonomy_dimensions()
+        assert result is orch._DEFAULT_TAXONOMY_DIMENSIONS
+
+    def test_load_taxonomy_returns_custom_valid_config(self, monkeypatch):
+        from ai_session_tools.analysis import orchestrator as orch
+        custom = [{"name": "x", "match": "field", "field": "era"}]
+        monkeypatch.setattr(orch, "get_config_section", lambda _: custom)
+        result = orch.load_taxonomy_dimensions()
+        assert result == custom
+
+    def test_load_taxonomy_raises_value_error_for_invalid_config(self, monkeypatch):
+        from ai_session_tools.analysis import orchestrator as orch
+        bad = [{"name": "x", "match": "field"}]  # missing 'field' key
+        monkeypatch.setattr(orch, "get_config_section", lambda _: bad)
+        import pytest
+        with pytest.raises(ValueError) as exc_info:
+            orch.load_taxonomy_dimensions()
+        assert "field" in str(exc_info.value).lower()
+
+    # ── 5. _dim_label ────────────────────────────────────────────────────────
+
+    def test_dim_label_with_leading_number(self):
+        from ai_session_tools.analysis.orchestrator import _dim_label
+        assert _dim_label("03_by_technique") == "03 By Technique"
+
+    def test_dim_label_no_leading_number(self):
+        from ai_session_tools.analysis.orchestrator import _dim_label
+        assert _dim_label("by_project") == "By Project"
+
+    def test_dim_label_single_word_with_number(self):
+        from ai_session_tools.analysis.orchestrator import _dim_label
+        assert _dim_label("01_era") == "01 Era"
+
+    # ── 6. assign_taxonomy ───────────────────────────────────────────────────
+
+    def test_assign_field_list(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques"}]
+        rec = {"techniques": ["chain_of_thought"]}
+        result = assign_taxonomy(rec, {}, dims)
+        assert result == {"tech": ["chain_of_thought"]}
+
+    def test_assign_field_scalar(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{"name": "era_dim", "match": "field", "field": "era", "scalar": True}]
+        rec = {"era": "2024"}
+        result = assign_taxonomy(rec, {}, dims)
+        assert result == {"era_dim": ["2024"]}
+
+    def test_assign_field_exclude(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques", "exclude": ["unknown"]}]
+        rec = {"techniques": ["chain_of_thought", "unknown"]}
+        result = assign_taxonomy(rec, {}, dims)
+        assert "unknown" not in result["tech"]
+        assert "chain_of_thought" in result["tech"]
+
+    def test_assign_field_missing_from_record(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques"}]
+        rec = {}
+        result = assign_taxonomy(rec, {}, dims)
+        assert "tech" not in result
+
+    def test_assign_keyword_substring_match(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        kmap = {"transcription": ["transcription", "audio"]}
+        dims = [{
+            "name": "proj", "match": "keyword",
+            "keyword_map": "proj_map", "source_field": "name",
+            "match_type": "substring"
+        }]
+        rec = {"name": "my_transcription_session"}
+        result = assign_taxonomy(rec, {"proj_map": kmap}, dims)
+        assert "transcription" in result.get("proj", [])
+
+    def test_assign_keyword_set_intersection(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        kmap = {"workflow_a": ["chain_of_thought", "step_back"]}
+        dims = [{
+            "name": "wf", "match": "keyword",
+            "keyword_map": "wf_map", "source_field": "techniques",
+            "match_type": "set_intersection"
+        }]
+        rec = {"techniques": ["chain_of_thought"]}
+        result = assign_taxonomy(rec, {"wf_map": kmap}, dims)
+        assert "workflow_a" in result.get("wf", [])
+
+    def test_assign_keyword_no_match_uses_fallback(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{
+            "name": "proj", "match": "keyword",
+            "keyword_map": "proj_map", "source_field": "name",
+            "match_type": "substring", "fallback": "misc"
+        }]
+        rec = {"name": "unrelated_session"}
+        result = assign_taxonomy(rec, {"proj_map": {"proj_a": ["specific_keyword"]}}, dims)
+        assert result.get("proj") == ["misc"]
+
+    def test_assign_keyword_no_match_no_fallback_dim_absent(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{
+            "name": "proj", "match": "keyword",
+            "keyword_map": "proj_map", "source_field": "name",
+            "match_type": "substring"
+        }]
+        rec = {"name": "unrelated_session"}
+        result = assign_taxonomy(rec, {"proj_map": {"proj_a": ["specific_keyword"]}}, dims)
+        # No match and no fallback: dim may be absent or empty
+        assert not result.get("proj")
+
+    def test_assign_keyword_empty_kmap_uses_fallback(self, capsys):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy, _warned_missing_maps
+        _warned_missing_maps.clear()
+        dims = [{
+            "name": "proj2", "match": "keyword",
+            "keyword_map": "empty_proj_map", "source_field": "name",
+            "match_type": "substring", "fallback": "misc_research"
+        }]
+        rec = {"name": "any_session"}
+        result = assign_taxonomy(rec, {"empty_proj_map": {}}, dims)
+        assert result.get("proj2") == ["misc_research"]
+
+    # ── 7. build_taxonomy ────────────────────────────────────────────────────
+
+    def test_build_taxonomy_returns_dict_keyed_by_name(self):
+        from ai_session_tools.analysis.orchestrator import build_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques"}]
+        records = [
+            {"name": "session_a", "techniques": ["cot"]},
+            {"name": "session_b", "techniques": ["rag"]},
+        ]
+        result = build_taxonomy(records, {}, dims)
+        assert "session_a" in result
+        assert "session_b" in result
+
+    def test_build_taxonomy_skips_record_without_name(self):
+        from ai_session_tools.analysis.orchestrator import build_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques"}]
+        records = [{"techniques": ["cot"]}]  # no 'name' key
+        result = build_taxonomy(records, {}, dims)
+        assert result == {}
+
+    def test_build_taxonomy_no_filesystem_side_effects(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import build_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques"}]
+        records = [{"name": "s1", "techniques": ["cot"]}]
+        before = list(tmp_path.iterdir())
+        build_taxonomy(records, {}, dims)
+        after = list(tmp_path.iterdir())
+        assert before == after
+
+    # ── 8. taxonomy_to_session_paths ─────────────────────────────────────────
+
+    def test_taxonomy_to_session_paths_single_dim_single_cat(self):
+        from ai_session_tools.analysis.orchestrator import taxonomy_to_session_paths
+        taxonomy = {"session_a": {"dim1": ["cat1"]}}
+        result = taxonomy_to_session_paths(taxonomy)
+        assert result == {"session_a": ["dim1/cat1"]}
+
+    def test_taxonomy_to_session_paths_two_dims(self):
+        from ai_session_tools.analysis.orchestrator import taxonomy_to_session_paths
+        taxonomy = {"session_a": {"dim1": ["cat1"], "dim2": ["cat2"]}}
+        result = taxonomy_to_session_paths(taxonomy)
+        assert "dim1/cat1" in result["session_a"]
+        assert "dim2/cat2" in result["session_a"]
+
+    def test_taxonomy_to_session_paths_multiple_cats(self):
+        from ai_session_tools.analysis.orchestrator import taxonomy_to_session_paths
+        taxonomy = {"session_a": {"dim1": ["cat1", "cat2"]}}
+        result = taxonomy_to_session_paths(taxonomy)
+        assert "dim1/cat1" in result["session_a"]
+        assert "dim1/cat2" in result["session_a"]
+
+    # ── 9. _preferred_link_path ──────────────────────────────────────────────
+
+    def test_preferred_link_path_all_nonpreferred_falls_through(self):
+        from ai_session_tools.analysis.orchestrator import _preferred_link_path
+        dims = [{"name": "07_by_era", "prefer_for_links": False}]
+        paths = ["07_by_era/2024"]
+        result = _preferred_link_path(paths, dims)
+        assert result == "07_by_era/2024"  # last resort: primary_paths[0]
+
+    def test_preferred_link_path_skips_fallback_category(self):
+        from ai_session_tools.analysis.orchestrator import _preferred_link_path
+        dims = [
+            {"name": "01_by_project", "prefer_for_links": True, "fallback": "misc_research"},
+            {"name": "03_by_technique", "prefer_for_links": True},
+        ]
+        paths = ["01_by_project/misc_research", "03_by_technique/chain_of_thought"]
+        result = _preferred_link_path(paths, dims)
+        assert result == "03_by_technique/chain_of_thought"
+
+    def test_preferred_link_path_first_preferred_returned(self):
+        from ai_session_tools.analysis.orchestrator import _preferred_link_path
+        dims = [{"name": "03_by_technique", "prefer_for_links": True}]
+        paths = ["03_by_technique/chain_of_thought"]
+        result = _preferred_link_path(paths, dims)
+        assert result == "03_by_technique/chain_of_thought"
+
+    def test_preferred_link_path_empty_list_returns_empty_string(self):
+        from ai_session_tools.analysis.orchestrator import _preferred_link_path
+        result = _preferred_link_path([], [])
+        assert result == ""
+
+    # ── 10. apply_symlinks ───────────────────────────────────────────────────
+
+    def test_apply_symlinks_creates_symlink_for_existing_file(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import apply_symlinks
+        src = tmp_path / "sessions" / "my_session"
+        src.mkdir(parents=True)
+        (src / "conversation.json").write_text("{}")
+        org_dir = tmp_path / "org"
+        org_dir.mkdir()
+        taxonomy = {"my_session": {"01_by_project": ["proj_a"]}}
+        records = [{"name": "my_session", "filepath": str(src)}]
+        count = apply_symlinks(records, org_dir, taxonomy)
+        assert count == 1
+
+    def test_apply_symlinks_skips_missing_source(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import apply_symlinks
+        org_dir = tmp_path / "org"
+        org_dir.mkdir()
+        taxonomy = {"missing_session": {"01_by_project": ["proj_a"]}}
+        records = [{"name": "missing_session", "filepath": str(tmp_path / "nonexistent")}]
+        count = apply_symlinks(records, org_dir, taxonomy)
+        assert count == 0
+
+    def test_apply_symlinks_not_duplicated_on_second_call(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import apply_symlinks
+        src = tmp_path / "sessions" / "my_session"
+        src.mkdir(parents=True)
+        org_dir = tmp_path / "org"
+        org_dir.mkdir()
+        taxonomy = {"my_session": {"01_by_project": ["proj_a"]}}
+        records = [{"name": "my_session", "filepath": str(src)}]
+        apply_symlinks(records, org_dir, taxonomy)
+        count2 = apply_symlinks(records, org_dir, taxonomy)
+        assert count2 == 0
+
+    # ── 11. write_taxonomy_json ──────────────────────────────────────────────
+
+    def test_write_taxonomy_json_creates_file(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_json
+        taxonomy = {"session_a": {"tech": ["cot"]}}
+        records = [{"name": "session_a", "utility": 42, "era": "2024"}]
+        write_taxonomy_json(taxonomy, records, tmp_path)
+        assert (tmp_path / "SESSION_TAXONOMY.json").exists()
+
+    def test_write_taxonomy_json_valid_json_with_session_key(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_json
+        import json
+        taxonomy = {"session_a": {"tech": ["cot"]}}
+        records = [{"name": "session_a", "utility": 42, "era": "2024"}]
+        write_taxonomy_json(taxonomy, records, tmp_path)
+        data = json.loads((tmp_path / "SESSION_TAXONOMY.json").read_text())
+        assert "session_a" in data
+
+    def test_write_taxonomy_json_entry_has_required_keys(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_json
+        import json
+        taxonomy = {"session_a": {"tech": ["cot"]}}
+        records = [{"name": "session_a", "utility": 42, "era": "2024"}]
+        write_taxonomy_json(taxonomy, records, tmp_path)
+        data = json.loads((tmp_path / "SESSION_TAXONOMY.json").read_text())
+        entry = data["session_a"]
+        assert "taxonomy" in entry
+        assert "utility" in entry
+        assert "era" in entry
+
+    # ── 12. write_taxonomy_markdown ──────────────────────────────────────────
+
+    def test_write_taxonomy_markdown_creates_file(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_markdown
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        taxonomy = {"session_a": {"03_by_technique": ["chain_of_thought"]}}
+        records = [{"name": "session_a", "utility": 50, "era": "2024"}]
+        dims = [{"name": "03_by_technique", "match": "field", "field": "techniques"}]
+        write_taxonomy_markdown(taxonomy, records, tmp_path, dimensions=dims)
+        assert (tmp_path / "TAXONOMY.md").exists()
+
+    def test_write_taxonomy_markdown_contains_dim_label(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_markdown
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        taxonomy = {"session_a": {"03_by_technique": ["chain_of_thought"]}}
+        records = [{"name": "session_a", "utility": 50, "era": "2024"}]
+        dims = [{"name": "03_by_technique", "match": "field", "field": "techniques"}]
+        write_taxonomy_markdown(taxonomy, records, tmp_path, dimensions=dims)
+        content = (tmp_path / "TAXONOMY.md").read_text()
+        assert "03 By Technique" in content
+
+    def test_write_taxonomy_markdown_excludes_low_utility(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_markdown
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 50})
+        taxonomy = {
+            "high_util": {"03_by_technique": ["cot"]},
+            "low_util": {"03_by_technique": ["cot"]},
+        }
+        records = [
+            {"name": "high_util", "utility": 80, "era": "2024"},
+            {"name": "low_util", "utility": 10, "era": "2024"},
+        ]
+        dims = [{"name": "03_by_technique", "match": "field", "field": "techniques"}]
+        write_taxonomy_markdown(taxonomy, records, tmp_path, dimensions=dims)
+        content = (tmp_path / "TAXONOMY.md").read_text()
+        assert "high_util" in content
+        assert "low_util" not in content
+
+    # ── 13. write_index ──────────────────────────────────────────────────────
+
+    def test_write_index_creates_index_md(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        session_paths = {"s1": ["01_by_project/proj_a"]}
+        dims = [{"name": "01_by_project", "prefer_for_links": True}]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        assert (tmp_path / "INDEX.md").exists()
+
+    def test_write_index_creates_sessions_full_md(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        session_paths = {"s1": ["01_by_project/proj_a"]}
+        dims = [{"name": "01_by_project", "prefer_for_links": True}]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        assert (tmp_path / "SESSIONS_FULL.md").exists()
+
+    def test_write_index_starts_with_heading(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        session_paths = {"s1": ["01_by_project/proj_a"]}
+        dims = [{"name": "01_by_project", "prefer_for_links": True}]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        content = (tmp_path / "INDEX.md").read_text()
+        assert content.startswith("# ")
+
+    def test_write_index_contains_table_header(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        session_paths = {"s1": ["01_by_project/proj_a"]}
+        dims = [{"name": "01_by_project", "prefer_for_links": True}]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        content = (tmp_path / "INDEX.md").read_text()
+        assert "| Rank |" in content
+
+    def test_write_index_taxonomy_section_lists_dims(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        session_paths = {"s1": ["03_by_technique/cot"]}
+        dims = [{"name": "03_by_technique", "prefer_for_links": True}]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        content = (tmp_path / "INDEX.md").read_text()
+        assert "03_by_technique" in content
+
+    def test_write_index_uses_preferred_link_path_not_nonpreferred(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        # nonpreferred dim first, preferred dim second
+        session_paths = {"s1": ["07_by_era/2024", "03_by_technique/cot"]}
+        dims = [
+            {"name": "07_by_era", "prefer_for_links": False},
+            {"name": "03_by_technique", "prefer_for_links": True},
+        ]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        content = (tmp_path / "INDEX.md").read_text()
+        # The preferred dim link should appear in the table
+        assert "03_by_technique/cot" in content
+
+    # ── 14. _resolve_formats ─────────────────────────────────────────────────
+
+    def test_resolve_formats_parameter_overrides_config(self):
+        from ai_session_tools.analysis.orchestrator import _resolve_formats
+        result = _resolve_formats({"organize_formats": "markdown"}, ["json"])
+        assert result == ["json"]
+
+    def test_resolve_formats_uses_config_list(self):
+        from ai_session_tools.analysis.orchestrator import _resolve_formats
+        result = _resolve_formats({"organize_formats": ["json"]}, None)
+        assert result == ["json"]
+
+    def test_resolve_formats_config_string_parsed(self):
+        from ai_session_tools.analysis.orchestrator import _resolve_formats
+        result = _resolve_formats({"organize_formats": "json,markdown"}, None)
+        assert "json" in result
+        assert "markdown" in result
+
+    def test_resolve_formats_no_config_no_param_defaults_symlinks(self):
+        from ai_session_tools.analysis.orchestrator import _resolve_formats
+        result = _resolve_formats({}, None)
+        assert result == ["symlinks"]
+
+    def test_resolve_formats_unknown_format_raises_value_error(self):
+        from ai_session_tools.analysis.orchestrator import _resolve_formats
+        import pytest
+        with pytest.raises(ValueError) as exc_info:
+            _resolve_formats({}, ["pdf"])
+        assert "pdf" in str(exc_info.value)
+        assert "symlinks" in str(exc_info.value) or "Valid" in str(exc_info.value)
+
+    # ── 15. --validate CLI flag ──────────────────────────────────────────────
+
+    def test_validate_flag_exits_0_with_default_config(self, monkeypatch):
+        import ai_session_tools.config as cfg_mod
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        monkeypatch.setattr(cfg_mod, "get_config_section", lambda _: None)
+        monkeypatch.setattr(codebook, "load_keyword_maps", lambda: {})
+        result = runner.invoke(app, ["organize", "--validate"])
+        assert result.exit_code == 0
+
+    def test_validate_flag_output_contains_dim_names(self, monkeypatch):
+        import ai_session_tools.config as cfg_mod
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        monkeypatch.setattr(cfg_mod, "get_config_section", lambda _: None)
+        monkeypatch.setattr(codebook, "load_keyword_maps", lambda: {})
+        result = runner.invoke(app, ["organize", "--validate"])
+        # Default dims include "01_by_project", "03_by_technique", etc.
+        assert "by_project" in result.output or "01_by_project" in result.output
+
+    def test_validate_flag_output_contains_ok_message(self, monkeypatch):
+        import ai_session_tools.config as cfg_mod
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        monkeypatch.setattr(cfg_mod, "get_config_section", lambda _: None)
+        # Provide all keyword_maps so dims validate cleanly
+        default_maps = {
+            "project_map": {"proj": ["example"]},
+            "workflow_map": {"wf": ["example"]},
+        }
+        monkeypatch.setattr(codebook, "load_keyword_maps", lambda: default_maps)
+        result = runner.invoke(app, ["organize", "--validate"])
+        assert "All dimensions OK" in result.output or any(
+            dim in result.output for dim in ["01_by_project", "03_by_technique"]
+        )
+
+    # ── 16. --format CLI flag ────────────────────────────────────────────────
+
+    def test_format_flag_json_calls_run_orchestration_with_json(self, monkeypatch):
+        import ai_session_tools.config as cfg_mod
+        from ai_session_tools.analysis import orchestrator as orch
+        called_with = {}
+
+        def fake_run_orchestration(formats=None):
+            called_with["formats"] = formats
+
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {"org_dir": "/tmp/fake_org"})
+        monkeypatch.setattr(orch, "run_orchestration", fake_run_orchestration)
+
+        # Patch _check_step_dep to avoid needing real org dir
+        import ai_session_tools.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "_check_step_dep", lambda *a, **kw: None)
+
+        result = runner.invoke(app, ["organize", "--format", "json"])
+        assert called_with.get("formats") == ["json"]
+
+    def test_format_flag_invalid_format_exits_nonzero(self, monkeypatch):
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {"org_dir": "/tmp/fake_org"})
+        import ai_session_tools.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "_check_step_dep", lambda *a, **kw: None)
+
+        from ai_session_tools.analysis import orchestrator as orch
+
+        def fake_run_orchestration(formats=None):
+            from ai_session_tools.analysis.orchestrator import _resolve_formats
+            _resolve_formats({}, formats)
+
+        monkeypatch.setattr(orch, "run_orchestration", fake_run_orchestration)
+        result = runner.invoke(app, ["organize", "--format", "pdf"])
+        # Should exit non-zero due to ValueError from _resolve_formats
+        assert result.exit_code != 0
+
+
+
+
+class TestCodebookExtended:
+    """Extended tests for ai_session_tools.analysis.codebook functions."""
+
+    # ── helper ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _patch_codebook(monkeypatch, get_config_section_fn=None, load_config_fn=None):
+        """Patch the names as imported into the codebook module namespace."""
+        import ai_session_tools.analysis.codebook as cb
+        if get_config_section_fn is not None:
+            monkeypatch.setattr(cb, "get_config_section", get_config_section_fn)
+        if load_config_fn is not None:
+            monkeypatch.setattr(cb, "load_config", load_config_fn)
+
+    # ── 1. extract_prose ──────────────────────────────────────────────────────
+
+    def test_extract_prose_removes_fenced_code_block(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        text = "Here is some prose.\n```python\ndef foo():\n    pass\n```\nMore prose here."
+        result = extract_prose(text)
+        assert "def foo" not in result
+        assert "Here is some prose" in result
+        assert "More prose here" in result
+
+    def test_extract_prose_removes_indented_block(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        text = "Intro text.\n    indented code line\n    another indented line\nFinal prose."
+        result = extract_prose(text)
+        assert "indented code line" not in result
+        assert "Final prose" in result
+
+    def test_extract_prose_removes_python_syntax_line(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        text = "Some text.\ndef foo(): pass\nMore text."
+        result = extract_prose(text)
+        assert "def foo" not in result
+        assert "Some text" in result
+
+    def test_extract_prose_plain_prose_unchanged(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        text = "This is plain prose with no code whatsoever."
+        result = extract_prose(text)
+        assert "plain prose" in result
+
+    def test_extract_prose_empty_string(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        assert extract_prose("") == ""
+
+    def test_extract_prose_all_code_no_crash(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        text = "```python\ndef foo():\n    return 1\n\nclass Bar:\n    pass\n```"
+        result = extract_prose(text)
+        assert "def foo" not in result
+        assert "class Bar" not in result
+
+    # ── 2. prose_fraction ─────────────────────────────────────────────────────
+
+    def test_prose_fraction_pure_prose(self):
+        from ai_session_tools.analysis.codebook import prose_fraction
+        text = "This is entirely plain prose text without any code."
+        fraction = prose_fraction(text)
+        assert fraction == 1.0
+
+    def test_prose_fraction_pure_fenced_code(self):
+        from ai_session_tools.analysis.codebook import prose_fraction
+        text = "```python\ndef foo():\n    return 42\n\nx = foo()\n```"
+        fraction = prose_fraction(text)
+        assert fraction < 1.0
+
+    def test_prose_fraction_empty_string(self):
+        from ai_session_tools.analysis.codebook import prose_fraction
+        assert prose_fraction("") == 1.0
+
+    def test_prose_fraction_mixed_text(self):
+        from ai_session_tools.analysis.codebook import prose_fraction
+        text = (
+            "This is some real prose explaining the concept.\n"
+            "```python\ndef compute():\n    return 1 + 2\n```\n"
+            "And here is more prose after the block."
+        )
+        fraction = prose_fraction(text)
+        assert 0.0 < fraction < 1.0
+
+    # ── 3. load_continuation_config ───────────────────────────────────────────
+
+    def test_load_continuation_config_no_config_no_org(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_continuation_config
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None,
+                             load_config_fn=lambda: {})
+        markers, min_len = load_continuation_config(org_dir=tmp_path / "nonexistent")
+        assert markers == []
+        assert min_len == 0
+
+    def test_load_continuation_config_from_config_json(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_continuation_config
+        cm_data = {"prefix_markers": ["ok", "continue"], "min_initial_len": 50}
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: cm_data if key == "continuation_markers" else None)
+        markers, min_len = load_continuation_config(org_dir=tmp_path)
+        assert "ok" in markers
+        assert "continue" in markers
+        assert min_len == 50
+
+    def test_load_continuation_config_from_org_dir_file(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_continuation_config
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        data = {"prefix_markers": ["go", "proceed"], "min_initial_len": 30}
+        (tmp_path / "continuation_markers.json").write_text(json.dumps(data))
+        markers, min_len = load_continuation_config(org_dir=tmp_path)
+        assert "go" in markers
+        assert "proceed" in markers
+        assert min_len == 30
+
+    def test_load_continuation_config_config_takes_priority(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_continuation_config
+        config_cm = {"prefix_markers": ["from_config"], "min_initial_len": 99}
+        file_cm = {"prefix_markers": ["from_file"], "min_initial_len": 1}
+        (tmp_path / "continuation_markers.json").write_text(json.dumps(file_cm))
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: config_cm if key == "continuation_markers" else None)
+        markers, min_len = load_continuation_config(org_dir=tmp_path)
+        assert "from_config" in markers
+        assert "from_file" not in markers
+        assert min_len == 99
+
+    def test_load_continuation_config_malformed_json(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_continuation_config
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        (tmp_path / "continuation_markers.json").write_text("NOT VALID JSON {{{{")
+        markers, min_len = load_continuation_config(org_dir=tmp_path)
+        assert markers == []
+        assert min_len == 0
+
+    # ── 4. classify_prompt_role ───────────────────────────────────────────────
+
+    def test_classify_first_in_session_long_no_markers_is_initial(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "Please help me design a distributed system with high availability and fault tolerance."
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=[], min_initial_len=50)
+        assert role == "initial"
+
+    def test_classify_first_in_session_short_text_is_continuation(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "ok"
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=[], min_initial_len=50)
+        assert role == "continuation"
+
+    def test_classify_text_starts_with_ok_marker_is_continuation(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "ok let us keep going with the previous discussion about databases."
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=["ok"], min_initial_len=0)
+        assert role == "continuation"
+
+    def test_classify_text_starts_with_continue_marker_is_continuation(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "continue with the analysis from before."
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=["continue"], min_initial_len=0)
+        assert role == "continuation"
+
+    def test_classify_not_first_in_session_long_no_markers_is_initial(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "This is a long message that goes into great detail about architecture patterns and design."
+        role = classify_prompt_role(text, is_first_in_session=False,
+                                    continuation_markers=[], min_initial_len=0)
+        assert role == "initial"
+
+    def test_classify_none_continuation_markers_uses_length_only(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "A" * 60
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=None, min_initial_len=50)
+        assert role == "initial"
+
+    def test_classify_empty_continuation_markers_uses_length_only(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "A" * 60
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=[], min_initial_len=50)
+        assert role == "initial"
+
+    def test_classify_min_initial_len_zero_disables_length_check(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        # Very short text, min_initial_len=0 means length check is disabled.
+        # "hi" does not start with "continue", so should be "initial".
+        text = "hi"
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=["continue"], min_initial_len=0)
+        assert role == "initial"
+
+    # ── 5. load_stop_words ────────────────────────────────────────────────────
+
+    def test_load_stop_words_defaults_when_no_config(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_stop_words
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None,
+                             load_config_fn=lambda: {})
+        words = load_stop_words(org_dir=tmp_path / "nonexistent")
+        assert "the" in words
+        assert "and" in words
+
+    def test_load_stop_words_from_config_json(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_stop_words
+        custom_words = ["foo", "bar", "baz"]
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: custom_words if key == "stop_words" else None)
+        words = load_stop_words(org_dir=tmp_path)
+        assert words == frozenset({"foo", "bar", "baz"})
+
+    def test_load_stop_words_from_org_dir_file(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_stop_words
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        data = {"stop_words": ["alpha", "beta", "gamma"]}
+        (tmp_path / "stop_words.json").write_text(json.dumps(data))
+        words = load_stop_words(org_dir=tmp_path)
+        assert "alpha" in words
+        assert "beta" in words
+
+    def test_load_stop_words_config_takes_priority_over_file(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_stop_words
+        config_words = ["from_config"]
+        (tmp_path / "stop_words.json").write_text(json.dumps({"stop_words": ["from_file"]}))
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: config_words if key == "stop_words" else None)
+        words = load_stop_words(org_dir=tmp_path)
+        assert "from_config" in words
+        assert "from_file" not in words
+
+    def test_load_stop_words_empty_file_falls_back_to_default(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_stop_words
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        # Empty stop_words list in file — should fall back to module default
+        (tmp_path / "stop_words.json").write_text(json.dumps({"stop_words": []}))
+        words = load_stop_words(org_dir=tmp_path)
+        assert "the" in words  # module default
+
+    def test_load_stop_words_missing_file_returns_default(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_stop_words
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        words = load_stop_words(org_dir=tmp_path)  # no stop_words.json
+        assert "the" in words
+
+    # ── 6. load_scoring_weights ───────────────────────────────────────────────
+
+    def test_load_scoring_weights_no_config_returns_empty(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_scoring_weights
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None,
+                             load_config_fn=lambda: {})
+        result = load_scoring_weights(org_dir=tmp_path / "nonexistent")
+        assert result == {}
+
+    def test_load_scoring_weights_from_config_json(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_scoring_weights
+        weights = {"technical": 2.0, "role": 1.5}
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: weights if key == "scoring_weights" else None)
+        result = load_scoring_weights(org_dir=tmp_path)
+        assert result == {"technical": 2.0, "role": 1.5}
+
+    def test_load_scoring_weights_from_org_dir_file(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_scoring_weights
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        data = {"density": 3.0, "length": 0.5}
+        (tmp_path / "scoring_weights.json").write_text(json.dumps(data))
+        result = load_scoring_weights(org_dir=tmp_path)
+        assert result == {"density": 3.0, "length": 0.5}
+
+    def test_load_scoring_weights_config_takes_priority(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_scoring_weights
+        config_weights = {"source": "config", "value": 1.0}
+        (tmp_path / "scoring_weights.json").write_text(
+            json.dumps({"source": "file", "value": 0.0}))
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: config_weights if key == "scoring_weights" else None)
+        result = load_scoring_weights(org_dir=tmp_path)
+        assert result["source"] == "config"
+
+    def test_load_scoring_weights_malformed_json_returns_empty(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_scoring_weights
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        (tmp_path / "scoring_weights.json").write_text("{{INVALID}}")
+        result = load_scoring_weights(org_dir=tmp_path)
+        assert result == {}
+
+    # ── 7. is_meaningful ──────────────────────────────────────────────────────
+
+    def test_is_meaningful_custom_stop_words_match_false(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        sw = frozenset({"foo", "bar"})
+        assert is_meaningful("foo bar baz", stop_words=sw) is False
+
+    def test_is_meaningful_none_stop_words_uses_default(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        # "the" is in default stop words, so "the quick" starts with stop word
+        assert is_meaningful("the quick brown fox", stop_words=None) is False
+
+    def test_is_meaningful_empty_string_false(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        assert is_meaningful("") is False
+
+    def test_is_meaningful_single_content_word_true(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        # "transcription" is not a default stop word
+        assert is_meaningful("transcription") is True
+
+    def test_is_meaningful_all_stop_words_false(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        assert is_meaningful("the and is") is False
+
+    def test_is_meaningful_starts_with_stop_word_false(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        assert is_meaningful("the quick brown fox") is False
+
+    # ── 8. load_keyword_maps ──────────────────────────────────────────────────
+
+    def test_load_keyword_maps_config_json_returned_directly(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        km = {"task_categories": {"coding": ["write", "implement"]}}
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: km if key == "keyword_maps" else None)
+        result = load_keyword_maps(org_dir=tmp_path)
+        assert result == km
+
+    def test_load_keyword_maps_from_org_dir_file(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        categories = {"coding": ["write", "implement"]}
+        (tmp_path / "task_categories.json").write_text(json.dumps(categories))
+        result = load_keyword_maps(org_dir=tmp_path)
+        assert "task_categories" in result
+        assert result["task_categories"] == categories
+
+    def test_load_keyword_maps_no_config_no_files_returns_empty(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        result = load_keyword_maps(org_dir=tmp_path)
+        assert result == {}
+
+    def test_load_keyword_maps_partial_file_presence(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        categories = {"research": ["read", "analyze"]}
+        (tmp_path / "task_categories.json").write_text(json.dumps(categories))
+        # writing_methods.json, project_map.json, workflow_map.json NOT created
+        result = load_keyword_maps(org_dir=tmp_path)
+        assert "task_categories" in result
+        assert "writing_methods" not in result
+        assert "project_map" not in result
+
+    # ── 9. compile_codes ──────────────────────────────────────────────────────
+
+    def test_compile_codes_short_markers_excluded(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        codes = {"AI": ["ai", "chain-of-thought"]}
+        patterns = compile_codes(codes, min_marker_len=5)
+        assert "AI" in patterns
+        # "ai" is 2 chars < 5, excluded; "chain-of-thought" (16 chars) included
+        assert not patterns["AI"].search("ai")
+        assert patterns["AI"].search("chain-of-thought")
+
+    def test_compile_codes_empty_dict_returns_empty(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        assert compile_codes({}) == {}
+
+    def test_compile_codes_special_regex_chars_escaped(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        codes = {"DOT": ["file.name", "example.com"]}
+        patterns = compile_codes(codes, min_marker_len=5)
+        assert "DOT" in patterns
+        # Should not raise; dot is escaped so it only matches literal dot
+        assert patterns["DOT"].search("file.name")
+        # "filename" should NOT match because dot is literal
+        assert not patterns["DOT"].search("filename")
+
+    def test_compile_codes_case_insensitive_match(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        codes = {"PYTHON": ["python", "django"]}
+        patterns = compile_codes(codes, min_marker_len=5)
+        assert "PYTHON" in patterns
+        assert patterns["PYTHON"].search("Python")
+        assert patterns["PYTHON"].search("PYTHON")
+        assert patterns["PYTHON"].search("Django")
+
+    def test_compile_codes_all_markers_too_short_excluded(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        # All markers shorter than min_marker_len=5 -> code NOT in patterns
+        codes = {"SHORT": ["ai", "ml", "dl"]}
+        patterns = compile_codes(codes, min_marker_len=5)
+        assert "SHORT" not in patterns
+
+    # ── 10. get_ngrams edge cases ─────────────────────────────────────────────
+
+    def test_get_ngrams_json_newline_escape_splits_words(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        # Raw string so \n is a literal backslash-n (JSON escape sequence in input)
+        ngrams = get_ngrams(r"hello\nworld", n=1)
+        assert "hello" in ngrams
+        assert "world" in ngrams
+
+    def test_get_ngrams_unicode_escape_apostrophe(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        # Raw string so \u0027 is a literal backslash-u-0027 sequence
+        ngrams = get_ngrams(r"don\u0027t worry", n=1)
+        flat = " ".join(ngrams)
+        assert "worry" in flat
+
+    def test_get_ngrams_quadgrams(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        text = "one two three four five"
+        ngrams = get_ngrams(text, n=4)
+        assert "one two three four" in ngrams
+        assert "two three four five" in ngrams
+
+    def test_get_ngrams_only_punctuation_returns_empty(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        assert get_ngrams("!!! ??? ---", n=1) == []
+
+    def test_get_ngrams_n_larger_than_word_count_returns_empty(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        assert get_ngrams("one two", n=5) == []
