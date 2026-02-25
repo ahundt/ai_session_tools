@@ -24,8 +24,15 @@ Taxonomy dimensions (config.json["taxonomy_dimensions"]):
     scalar   — true if field holds a single string, not a list  (optional, default false)
 
     Example — add a dimension that groups by source format:
-      {"name": "08_by_source", "match": "field", "field": "source_format",
+      {"name": "09_by_source", "match": "field", "field": "source_format",
        "scalar": true, "prefer_for_links": false}
+
+    Example — group by working directory (only sessions with a cwd are linked):
+      {"name": "08_by_working_dir", "match": "field", "field": "cwd",
+       "scalar": true, "exclude": [""], "prefer_for_links": false,
+       "label": "08 By Working Dir"}
+    Sessions with cwd="" are skipped (no fallback). Populated for Claude Code sessions
+    (from JSONL cwd field); empty for AI Studio and Gemini CLI sessions.
 
   match="keyword"  — classifies by matching keywords from a keyword_map:
     keyword_map  — key into config.json["keyword_maps"]  (required)
@@ -114,6 +121,15 @@ _DEFAULT_TAXONOMY_DIMENSIONS: list[dict] = [
         "scalar": True,
         "exclude": ["unknown"],
         "prefer_for_links": False,
+    },
+    {
+        "name": "08_by_working_dir",
+        "match": "field",
+        "field": "cwd",
+        "scalar": True,
+        "exclude": [""],
+        "prefer_for_links": False,
+        "label": "08 By Working Dir",
     },
 ]
 

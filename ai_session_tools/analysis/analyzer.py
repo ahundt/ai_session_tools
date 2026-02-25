@@ -60,6 +60,7 @@ class SessionRecord:
     project_hash: str = ""
     prose_frac: float = 1.0   # fraction of user_text that is prose (not code/config)
     prompt_role: str = "unknown"  # 'initial' | 'continuation' | 'standalone' | 'unknown'
+    cwd: str = ""              # working directory at session time (Claude Code: from JSONL cwd; others: "")
 
     @property
     def user_text_full(self) -> str:
@@ -73,7 +74,7 @@ class SessionRecord:
         d = asdict(self)
         d.pop("user_text", None)
         home = str(Path.home())
-        for key in ("source_dir", "filepath"):
+        for key in ("source_dir", "filepath", "cwd"):
             val = d.get(key, "")
             if val and val.startswith(home):
                 d[key] = "~" + val[len(home):]

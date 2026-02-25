@@ -6872,3 +6872,132 @@ class TestCodebookExtended:
     def test_get_ngrams_n_larger_than_word_count_returns_empty(self):
         from ai_session_tools.analysis.codebook import get_ngrams
         assert get_ngrams("one two", n=5) == []
+
+
+class TestCwdFieldAndWorkingDirTaxonomy:
+    """Tests for cwd field on SessionRecord and 08_by_working_dir taxonomy dimension."""
+
+    # ── SessionRecord.cwd field ───────────────────────────────────────────────
+
+    def test_session_record_has_cwd_field(self):
+        """SessionRecord has cwd field defaulting to empty string."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="test", source_dir="/tmp", filepath="/tmp/test",
+            source_format="aistudio_json", user_text="hello",
+            chunk_count=1, user_chunk_count=1,
+        )
+        assert hasattr(rec, "cwd")
+        assert rec.cwd == ""
+
+    def test_session_record_cwd_stored(self):
+        """cwd field stores and returns the provided value."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="test", source_dir="/tmp", filepath="/tmp/test",
+            source_format="claude_jsonl", user_text="hello",
+            chunk_count=1, user_chunk_count=1,
+            cwd="/Users/alice/myproject",
+        )
+        assert rec.cwd == "/Users/alice/myproject"
+
+    def test_to_db_dict_normalizes_cwd_tilde(self, tmp_path, monkeypatch):
+        """to_db_dict() replaces home prefix in cwd with ~."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        from pathlib import Path
+        home = str(Path.home())
+        rec = SessionRecord(
+            name="t", source_dir=home + "/src", filepath=home + "/src/t",
+            source_format="claude_jsonl", user_text="hi",
+            chunk_count=1, user_chunk_count=1,
+            cwd=home + "/projects/myapp",
+        )
+        d = rec.to_db_dict()
+        assert d["cwd"] == "~/projects/myapp"
+
+    def test_to_db_dict_empty_cwd_unchanged(self):
+        """to_db_dict() leaves empty cwd as empty string (no tilde expansion)."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="t", source_dir="/tmp", filepath="/tmp/t",
+            source_format="aistudio_json", user_text="hi",
+            chunk_count=1, user_chunk_count=1,
+            cwd="",
+        )
+        d = rec.to_db_dict()
+        assert d["cwd"] == ""
+
+    def test_to_db_dict_excludes_user_text(self):
+        """to_db_dict() still excludes user_text even with cwd field present."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="t", source_dir="/tmp", filepath="/tmp/t",
+            source_format="aistudio_json", user_text="secret",
+            chunk_count=1, user_chunk_count=1,
+            cwd="/tmp/proj",
+        )
+        d = rec.to_db_dict()
+        assert "user_text" not in d
+        assert "cwd" in d
+
+    # ── 08_by_working_dir in _DEFAULT_TAXONOMY_DIMENSIONS ────────────────────
+
+    def test_default_dimensions_include_working_dir(self):
+        """_DEFAULT_TAXONOMY_DIMENSIONS includes 08_by_working_dir dimension."""
+        from ai_session_tools.analysis.orchestrator import _DEFAULT_TAXONOMY_DIMENSIONS
+        names = [d["name"] for d in _DEFAULT_TAXONOMY_DIMENSIONS]
+        assert "08_by_working_dir" in names
+
+    def test_working_dir_dimension_config(self):
+        """08_by_working_dir dimension has correct required config keys."""
+        from ai_session_tools.analysis.orchestrator import _DEFAULT_TAXONOMY_DIMENSIONS
+        dim = next(d for d in _DEFAULT_TAXONOMY_DIMENSIONS if d["name"] == "08_by_working_dir")
+        assert dim["match"] == "field"
+        assert dim["field"] == "cwd"
+        assert dim.get("scalar") is True
+        assert "" in dim.get("exclude", [])
+        assert dim.get("prefer_for_links") is False
+
+    def test_working_dir_dimension_validates(self):
+        """08_by_working_dir config passes validate_taxonomy_dimensions with no errors."""
+        from ai_session_tools.analysis.orchestrator import (
+            validate_taxonomy_dimensions, _DEFAULT_TAXONOMY_DIMENSIONS,
+        )
+        errors = validate_taxonomy_dimensions(_DEFAULT_TAXONOMY_DIMENSIONS)
+        assert errors == [], f"Validation errors: {errors}"
+
+    # ── assign_taxonomy skips sessions with empty cwd ─────────────────────────
+
+    def test_assign_taxonomy_skips_empty_cwd(self):
+        """assign_taxonomy creates no 08_by_working_dir entry for cwd=''."""
+        from ai_session_tools.analysis.orchestrator import (
+            assign_taxonomy, _DEFAULT_TAXONOMY_DIMENSIONS,
+        )
+        rec = {
+            "name": "test", "techniques": [], "roles": [], "task_categories": [],
+            "writing_methods": [], "era": "2025", "source_format": "aistudio_json",
+            "cwd": "",
+        }
+        result = assign_taxonomy(rec, keyword_maps={}, dimensions=_DEFAULT_TAXONOMY_DIMENSIONS)
+        # 08_by_working_dir should be absent or empty
+        assert result.get("08_by_working_dir", []) == []
+
+    def test_assign_taxonomy_uses_cwd_when_present(self):
+        """assign_taxonomy maps cwd value to 08_by_working_dir when non-empty."""
+        from ai_session_tools.analysis.orchestrator import (
+            assign_taxonomy, _DEFAULT_TAXONOMY_DIMENSIONS,
+        )
+        rec = {
+            "name": "test", "techniques": [], "roles": [], "task_categories": [],
+            "writing_methods": [], "era": "2025", "source_format": "claude_jsonl",
+            "cwd": "/Users/alice/myproject",
+        }
+        result = assign_taxonomy(rec, keyword_maps={}, dimensions=_DEFAULT_TAXONOMY_DIMENSIONS)
+        assert "/Users/alice/myproject" in result.get("08_by_working_dir", [])
+
+    def test_assign_taxonomy_no_fallback_for_working_dir(self):
+        """08_by_working_dir has no fallback — sessions without cwd get no entry."""
+        from ai_session_tools.analysis.orchestrator import _DEFAULT_TAXONOMY_DIMENSIONS
+        dim = next(d for d in _DEFAULT_TAXONOMY_DIMENSIONS if d["name"] == "08_by_working_dir")
+        # No fallback key, or fallback is None/absent
+        assert dim.get("fallback") is None

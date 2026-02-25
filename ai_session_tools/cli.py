@@ -2495,6 +2495,17 @@ _CONFIG_INIT_TEMPLATE = {
             "exclude": ["unknown"],
             "prefer_for_links": False,
         },
+        {
+            # Sessions with cwd="" (AI Studio, Gemini CLI) are skipped (no fallback).
+            # Populated for Claude Code sessions from the JSONL cwd field.
+            "name": "08_by_working_dir",
+            "match": "field",
+            "field": "cwd",
+            "scalar": True,
+            "exclude": [""],
+            "prefer_for_links": False,
+            "label": "08 By Working Dir",
+        },
     ],
     # ── Continuation marker detection for prompt role classification ───────
     "continuation_markers": {
