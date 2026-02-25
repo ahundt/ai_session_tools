@@ -1516,16 +1516,30 @@ def _do_stats(engine) -> None:
         versions = stats_data.get("total_versions", 0)
         largest = stats_data.get("largest_file", "—")
         largest_edits = stats_data.get("largest_file_edits", 0)
+        # Collect per-source counts: keys like "aistudio_sessions", "gemini_cli_sessions"
+        per_source = {
+            k.replace("_sessions", ""): v
+            for k, v in stats_data.items()
+            if k.endswith("_sessions") and k != "total_sessions" and isinstance(v, int)
+        }
     else:
         sessions = stats_data.total_sessions
         files = stats_data.total_files
         versions = stats_data.total_versions
         largest = stats_data.largest_file
         largest_edits = stats_data.largest_file_edits
+        per_source = {}
+
+    breakdown = ""
+    if len(per_source) > 1:
+        breakdown = "\n" + "\n".join(
+            f"    {src:<14} {count}" for src, count in sorted(per_source.items())
+        )
+
     console.print(
         f"""
 [bold cyan]Recovery Statistics[/bold cyan]
-  Sessions:      {sessions}
+  Sessions:      {sessions}{breakdown}
   Files:         {files}
   Versions:      {versions}
   Largest File:  {largest} ({largest_edits} edits)
@@ -1538,6 +1552,7 @@ def _do_stats(engine) -> None:
 @export_app.command("session")
 def export_session(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     session_id: str = typer.Argument(..., help="Session ID (prefix match, e.g. ab841016)."),
     output: Optional[str] = typer.Option(
         None, "--output", "-o",
@@ -1556,7 +1571,7 @@ def export_session(
         aise export session ab841016 --output out.md    # write explicitly
         aise export session ab841016 --dry-run          # preview only
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1566,6 +1581,7 @@ def export_session(
 @export_app.command("recent")
 def export_recent(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     days: int = typer.Argument(7, help="Number of days back to include (default: 7)."),
     output: Optional[str] = typer.Option(
         None, "--output", "-o",
@@ -1581,7 +1597,7 @@ def export_recent(
         aise export recent 14 --output week2.md       # last 14 days → file
         aise export recent --project myproject        # filter by project
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1593,6 +1609,7 @@ def export_recent(
 @files_app.command("search")
 def files_search(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     pattern: str = typer.Option("*", "--pattern", "-p", help="Filename glob/regex to match (e.g. '*.py', 'cli*'). Default: * (all files)"),
     min_edits: int = typer.Option(0, "--min-edits", help="Only show files edited at least this many times across all sessions. Default: 0"),
     max_edits: Optional[int] = typer.Option(None, "--max-edits", help="Only show files edited at most this many times. Default: unlimited"),
@@ -1617,7 +1634,7 @@ def files_search(
         aise files search -i py,md --after 2026-01-15      # Python/Markdown since Jan 15
         aise files search --after 2026-01-15T14:30:00      # files modified after specific time
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1631,6 +1648,7 @@ files_app.command("find")(files_search)
 @files_app.command("extract")
 def files_extract(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
     version: Optional[int] = typer.Option(
         None, "--version", "-v",
@@ -1690,7 +1708,7 @@ def files_extract(
         aise files extract cli.py --restore --dry-run    # preview restore
         aise files extract cli.py --output-dir ./backup  # write to ./backup/
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1700,6 +1718,7 @@ def files_extract(
 @files_app.command("history")
 def files_history(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to versions from this session ID (prefix match)."),
     export: bool = typer.Option(False, "--export", help="Write all versions to disk as cli_v1.py, cli_v2.py, etc."),
@@ -1721,7 +1740,7 @@ def files_history(
         aise files history cli.py --export --export-dir ./versions
         aise files history cli.py --stdout                  # all versions to stdout
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1747,6 +1766,7 @@ def files_history(
 @files_app.command("cross-ref")
 def files_cross_ref(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     file: str = typer.Argument(..., help="Path to a file to compare against session edits (e.g. ./cli.py)."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to one session (prefix match)."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
@@ -1758,7 +1778,7 @@ def files_cross_ref(
         aise files cross-ref ./engine.py --session ab841016
         aise files cross-ref ./cli.py --format json
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1771,6 +1791,7 @@ def files_cross_ref(
 
 def _messages_search_cmd(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     query: Optional[str] = typer.Argument(None, help="Text to search for in messages. Use quotes for multi-word queries."),
     query_opt: Optional[str] = typer.Option(None, "--query", "-q", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
@@ -1800,7 +1821,7 @@ def _messages_search_cmd(
     """
     q = query or query_opt
     # Get backend from composition root (ctx.obj injected by app_callback)
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1814,6 +1835,7 @@ _register_alias(messages_app, _messages_search_cmd, "search", "find")
 @messages_app.command("get")
 def messages_get(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016). Find IDs via 'aise list'."),
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
@@ -1830,7 +1852,7 @@ def messages_get(
     """
     sid = session_id or session_opt
     # Get backend from composition root (ctx.obj injected by app_callback)
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1840,6 +1862,7 @@ def messages_get(
 @messages_app.command("corrections")
 def messages_corrections(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
     after: Optional[str] = typer.Option(None, "--after", help="Only corrections after this date."),
     before: Optional[str] = typer.Option(None, "--before"),
@@ -1874,7 +1897,7 @@ def messages_corrections(
         aise messages corrections --pattern 'regression:you deleted' --pattern 'regression:you removed'
         aise messages corrections --pattern 'oops:nono' --pattern 'oops:that.s wrong'
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1885,6 +1908,7 @@ def messages_corrections(
 @messages_app.command("planning")
 def messages_planning(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
     after: Optional[str] = typer.Option(None, "--after", help="Only commands after this date."),
     before: Optional[str] = typer.Option(None, "--before", help="Only commands before this date."),
@@ -1919,7 +1943,7 @@ def messages_planning(
         aise messages planning --commands '/ar:plannew,/ar:pn'
         aise messages planning --commands '/mycommand,/mc,/plan,/p'
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1929,6 +1953,7 @@ def messages_planning(
 @messages_app.command("inspect")
 def messages_inspect(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. ab841016). Find IDs via 'aise list'."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ) -> None:
@@ -1941,7 +1966,7 @@ def messages_inspect(
         aise messages inspect ab841016
         aise messages inspect ab841016 --format json
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -1951,6 +1976,7 @@ def messages_inspect(
 @messages_app.command("timeline")
 def messages_timeline(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. ab841016). Find IDs via 'aise list'."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
     preview_chars: int = typer.Option(
@@ -1968,7 +1994,7 @@ def messages_timeline(
         aise messages timeline ab841016 --format json
         aise messages timeline ab841016 --preview-chars 80
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2016,6 +2042,7 @@ def _do_messages_extract(
 @messages_app.command("extract")
 def messages_extract(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. dddd0001). Find IDs via 'aise list'."),
     content_type: str = typer.Argument(
         ...,
@@ -2046,7 +2073,7 @@ def messages_extract(
 
         aise messages extract dddd0001 pbcopy --format plain
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2057,6 +2084,7 @@ def messages_extract(
 
 def _tools_search_cmd(
     ctx: typer.Context,
+    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     tool: str = typer.Argument(..., help="Tool name (e.g. Bash, Edit, Write, Read, Glob, Grep)."),
     query: Optional[str] = typer.Argument(None, help="Optional text to match in tool input. Omit to list all uses."),
     limit: int = typer.Option(10, "--limit", help="Max results. Default: 10"),
@@ -2073,7 +2101,7 @@ def _tools_search_cmd(
         aise tools find Edit "cli.py"                # find alias
         aise tools search Write --format json        # JSON output
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
