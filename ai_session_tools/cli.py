@@ -1135,15 +1135,30 @@ def _do_messages_search(
     fmt: str = "table",
     tool: Optional[str] = None,
     context: int = 0,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
 ) -> None:
     """Search messages across all sessions. When context > 0, each result includes
-    up to ``context`` surrounding messages from the same session file."""
+    up to ``context`` surrounding messages from the same session file.
+
+    When after/before are given, only sessions whose timestamp_first falls in
+    the specified range are searched (pre-filtering via engine.get_sessions).
+    """
     tag = f" [tool: {tool}]" if tool else ""
+
+    # Pre-filter to sessions in the date range when requested
+    valid_session_ids: Optional[set] = None
+    if after or before:
+        sessions = engine.get_sessions(after=after, before=before)
+        valid_session_ids = {s.session_id for s in sessions}
 
     if context > 0:
         ctx_results = engine.search_messages_with_context(
             query, context=context, message_type=message_type, tool=tool
-        )[:limit]
+        )
+        if valid_session_ids is not None:
+            ctx_results = [r for r in ctx_results if r.match.session_id in valid_session_ids]
+        ctx_results = ctx_results[:limit]
         if not ctx_results:
             console.print(f"[yellow]No messages match query{tag}[/yellow]")
             return
@@ -1166,7 +1181,10 @@ def _do_messages_search(
         console.print(f"\n[bold]Found {len(ctx_results)} matches{tag} (context ±{context})[/bold]")
         return
 
-    results = engine.search_messages(query, message_type, tool=tool)[:limit]
+    all_results = engine.search_messages(query, message_type, tool=tool)
+    if valid_session_ids is not None:
+        all_results = [m for m in all_results if m.session_id in valid_session_ids]
+    results = all_results[:limit]
 
     if not results:
         console.print(f"[yellow]No messages match query{tag}[/yellow]")
@@ -1432,9 +1450,12 @@ def _do_messages_timeline(
     session_id: str,
     fmt: str = "table",
     preview_chars: int = 150,
+    message_type: Optional[str] = None,
 ) -> None:
     """Show chronological event timeline for a session."""
     events = engine.timeline_session(session_id, preview_chars=preview_chars)
+    if message_type:
+        events = [e for e in events if e.get("type") == message_type]
     if not events:
         # Distinguish "session file not found" from "session has no user/assistant events"
         session_files = engine._find_session_files(session_id)
@@ -1630,7 +1651,8 @@ def _do_search(  # noqa: C901
 
     if domain in ("messages", "both"):
         msg_limit = limit if limit is not None else 10
-        _do_messages_search(engine, query or "", message_type, msg_limit, max_chars, fmt, tool=tool)
+        _do_messages_search(engine, query or "", message_type, msg_limit, max_chars, fmt,
+                            tool=tool, after=after, before=before)
 
 
 def _do_get(
@@ -1955,6 +1977,8 @@ def _messages_search_cmd(
         0, "--context", "-c",
         help="Include N messages before and after each match (from the same session). Default: 0.",
     ),
+    after: Optional[str] = typer.Option(None, "--after", help="Only messages from sessions after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
+    before: Optional[str] = typer.Option(None, "--before", help="Only messages from sessions before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
 ) -> None:
     """Search conversation messages across all configured session sources.
 
@@ -1967,6 +1991,7 @@ def _messages_search_cmd(
         aise messages find "error"                              # find is an alias
         aise messages search "*" --tool Write                   # all Write tool calls
         aise messages search "error" --context 3               # show surrounding messages
+        aise messages search "error" --after 2026-01-01        # sessions since Jan 1
     """
     q = query or query_opt
     # Get backend from composition root (ctx.obj injected by app_callback)
@@ -1975,7 +2000,7 @@ def _messages_search_cmd(
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     _do_messages_search(engine, q or "", message_type, limit, max_chars, fmt,
-                        tool=tool, context=context)
+                        tool=tool, context=context, after=after, before=before)
 
 
 _register_alias(messages_app, _messages_search_cmd, "search", "find")
@@ -2132,6 +2157,7 @@ def messages_timeline(
         150, "--preview-chars",
         help="Max characters to show in content preview column. Default: 150",
     ),
+    message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' events. Default: both."),
 ) -> None:
     """Show a chronological timeline of user/assistant events for a session.
 
@@ -2142,12 +2168,14 @@ def messages_timeline(
         aise messages timeline ab841016
         aise messages timeline ab841016 --format json
         aise messages timeline ab841016 --preview-chars 80
+        aise messages timeline ab841016 --type assistant    # AI turns only
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    _do_messages_timeline(engine, session_id, fmt, preview_chars=preview_chars)
+    _do_messages_timeline(engine, session_id, fmt, preview_chars=preview_chars,
+                          message_type=message_type)
 
 
 #: Supported content extraction types for ``messages extract``.
@@ -2170,6 +2198,7 @@ def _do_messages_extract(
     session_id: str,
     content_type: str,
     fmt: str = "table",
+    limit: Optional[int] = None,
 ) -> None:
     """Extract specific content type from a session."""
     if content_type not in _EXTRACT_TYPES:
@@ -2185,6 +2214,8 @@ def _do_messages_extract(
                 f"[red]No session found or no clipboard content for: {session_id!r}[/red]"
             )
             raise typer.Exit(code=1)
+        if limit is not None:
+            results = results[:limit]
         _render_output(results, fmt, _EXTRACT_PBCOPY_SPEC, "No clipboard content found")
 
 
@@ -2199,6 +2230,7 @@ def messages_extract(
         metavar="TYPE",
     ),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Max items to return. Default: unlimited."),
 ) -> None:
     """Extract specific content from a Claude Code session.
 
@@ -2221,12 +2253,14 @@ def messages_extract(
         aise messages extract dddd0001 pbcopy --format json
 
         aise messages extract dddd0001 pbcopy --format plain
+
+        aise messages extract dddd0001 pbcopy --limit 3
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    _do_messages_extract(engine, session_id, content_type, fmt)
+    _do_messages_extract(engine, session_id, content_type, fmt, limit=limit)
 
 
 # ── tools_app commands ────────────────────────────────────────────────────────
@@ -2239,6 +2273,8 @@ def _tools_search_cmd(
     limit: int = typer.Option(10, "--limit", help="Max results. Default: 10"),
     max_chars: int = typer.Option(0, "--max-chars", help="Truncate each result to N chars. 0=full."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
+    after: Optional[str] = typer.Option(None, "--after", help="Only tool calls from sessions after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
+    before: Optional[str] = typer.Option(None, "--before", help="Only tool calls from sessions before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
 ) -> None:
     """Search or find tool invocations from Claude Code sessions.
 
@@ -2249,6 +2285,7 @@ def _tools_search_cmd(
         aise tools search Bash "git commit"          # Bash calls with "git commit"
         aise tools find Edit "cli.py"                # find alias
         aise tools search Write --format json        # JSON output
+        aise tools search Bash --after 2026-01-01    # recent Bash calls only
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
@@ -2257,6 +2294,7 @@ def _tools_search_cmd(
     _do_messages_search(
         engine, query or "", message_type="assistant",
         limit=limit, max_chars=max_chars, fmt=fmt, tool=tool,
+        after=after, before=before,
     )
 
 

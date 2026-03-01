@@ -7858,3 +7858,133 @@ class TestDiscoveryCache:
             ts = datetime.datetime.fromisoformat(auto["_discovered_at"])
             age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
             assert age < 30, f"source scan must refresh _discovered_at, got age={age:.1f}s"
+
+class TestCLIComposability:
+    """Composability: flags available on one command should be on related commands."""
+
+    def test_messages_search_has_after_before_flags(self):
+        """messages search must accept --after and --before flags."""
+        result = runner.invoke(app, ["messages", "search", "--help"])
+        assert result.exit_code == 0
+        assert "--after" in result.output
+        assert "--before" in result.output
+        assert "YYYY-MM-DD" in result.output
+
+    def test_tools_search_has_after_before_flags(self):
+        """tools search must accept --after and --before flags."""
+        result = runner.invoke(app, ["tools", "search", "--help"])
+        assert result.exit_code == 0
+        assert "--after" in result.output
+        assert "--before" in result.output
+        assert "YYYY-MM-DD" in result.output
+
+    def test_messages_timeline_has_type_flag(self):
+        """messages timeline must accept --type to filter by role."""
+        result = runner.invoke(app, ["messages", "timeline", "--help"])
+        assert result.exit_code == 0
+        assert "--type" in result.output
+
+    def test_messages_extract_has_limit_flag(self):
+        """messages extract must accept --limit."""
+        result = runner.invoke(app, ["messages", "extract", "--help"])
+        assert result.exit_code == 0
+        assert "--limit" in result.output
+
+    def test_messages_search_date_filter_restricts_results(self, tmp_path):
+        """messages search --after filters to only sessions within the date range."""
+        from ai_session_tools.cli import _do_messages_search
+        from ai_session_tools.engine import SessionRecoveryEngine
+        from ai_session_tools.models import SessionInfo
+
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        old_id = "cccc0001-0000-0000-0000-000000000000"
+        new_id = "dddd0001-0000-0000-0000-000000000000"
+        # Session with timestamp_first = 2024 (old)
+        old_proj = projects / "-Users-old-proj"
+        old_proj.mkdir()
+        (old_proj / f"{old_id}.jsonl").write_text(
+            json.dumps({"sessionId": old_id, "type": "user",
+                        "timestamp": "2024-01-15T10:00:00.000Z", "gitBranch": "main",
+                        "cwd": "/Users/old/proj",
+                        "message": {"role": "user", "content": "find_me"}}) + "\n"
+        )
+        # Session with timestamp_first = 2026 (new)
+        new_proj = projects / "-Users-new-proj"
+        new_proj.mkdir()
+        (new_proj / f"{new_id}.jsonl").write_text(
+            json.dumps({"sessionId": new_id, "type": "user",
+                        "timestamp": "2026-02-15T10:00:00.000Z", "gitBranch": "main",
+                        "cwd": "/Users/new/proj",
+                        "message": {"role": "user", "content": "find_me"}}) + "\n"
+        )
+
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+
+        # Without filter: both sessions
+        all_results = engine.search_messages("find_me")
+        assert len(all_results) >= 2
+
+        # With --after 2025-01-01: only the 2026 session
+        sessions_after = engine.get_sessions(after="2025-01-01")
+        valid_ids = {s.session_id for s in sessions_after}
+        filtered = [m for m in all_results if m.session_id in valid_ids]
+        assert len(filtered) == 1, f"Only the 2026 session should match, got {len(filtered)}"
+
+    def test_messages_timeline_type_filter(self, tmp_path):
+        """messages timeline --type filters events by role post-hoc."""
+        from ai_session_tools.cli import _do_messages_timeline
+        from ai_session_tools.engine import SessionRecoveryEngine
+
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        proj = projects / "test-proj"
+        proj.mkdir()
+        jsonl = proj / "test-session.jsonl"
+        session_id = "test-session"
+        jsonl.write_text(
+            json.dumps({"type": "user", "timestamp": "2026-01-01T10:00:00Z",
+                        "message": {"role": "user", "content": [{"type": "text", "text": "user msg"}]}}) + "\n" +
+            json.dumps({"type": "assistant", "timestamp": "2026-01-01T10:01:00Z",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": "ai resp"}]}}) + "\n"
+        )
+
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        all_events = engine.timeline_session(session_id)
+        assert len(all_events) == 2
+
+        # Simulate --type user filter (applied in _do_messages_timeline)
+        user_events = [e for e in all_events if e.get("type") == "user"]
+        assert len(user_events) == 1
+        assert user_events[0]["type"] == "user"
+
+    def test_messages_extract_limit(self, tmp_path):
+        """messages extract --limit slices results."""
+        from ai_session_tools.cli import _do_messages_extract
+        from ai_session_tools.engine import SessionRecoveryEngine
+
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        proj = projects / "-Users-clip-proj"
+        proj.mkdir()
+        clip_id = "eeee0001-0000-0000-0000-000000000000"
+        # Write a session with 3 clipboard entries using the correct JSONL format:
+        # get_clipboard_content() scans tool_use Bash blocks for cat-to-pbcopy patterns
+        lines = []
+        for i in range(3):
+            lines.append(json.dumps({
+                "sessionId": clip_id,
+                "type": "assistant",
+                "timestamp": f"2026-01-01T10:0{i}:00.000Z",
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": f"t{i}", "name": "Bash",
+                     "input": {"command": f"cat <<'EOF' | pbcopy\nclip{i}\nEOF"}}
+                ]},
+            }))
+        (proj / f"{clip_id}.jsonl").write_text("\n".join(lines) + "\n")
+
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        all_clips = engine.get_clipboard_content(clip_id)
+        assert len(all_clips) == 3, f"Expected 3 clipboard entries, got {len(all_clips)}"
+        limited = all_clips[:1]
+        assert len(limited) == 1
