@@ -3072,8 +3072,8 @@ def cmd_organize(
     org = Path(org_dir_str).expanduser()
     _check_step_dep("organize", cfg, org)
     formats = [f.strip() for f in fmt.split(",")] if fmt else None
-    from ai_session_tools.analysis.orchestrator import run_orchestration
-    run_orchestration(formats=formats)
+    from ai_session_tools.analysis import orchestrator as _orch
+    _orch.run_orchestration(formats=formats)
 
 
 @app.command("vocab", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")

@@ -6399,20 +6399,20 @@ class TestOrchestratorTaxonomy:
         def fake_run_orchestration(formats=None):
             called_with["formats"] = formats
 
-        monkeypatch.setattr(cfg_mod, "load_config", lambda: {"org_dir": "/tmp/fake_org"})
+        # Patch load_config on cli_mod (cli.py has a local binding from 'from ... import')
+        import ai_session_tools.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "load_config", lambda: {"org_dir": "/tmp/fake_org"})
         monkeypatch.setattr(orch, "run_orchestration", fake_run_orchestration)
 
         # Patch _check_step_dep to avoid needing real org dir
-        import ai_session_tools.cli as cli_mod
         monkeypatch.setattr(cli_mod, "_check_step_dep", lambda *a, **kw: None)
 
         result = runner.invoke(app, ["organize", "--format", "json"])
         assert called_with.get("formats") == ["json"]
 
     def test_format_flag_invalid_format_exits_nonzero(self, monkeypatch):
-        import ai_session_tools.config as cfg_mod
-        monkeypatch.setattr(cfg_mod, "load_config", lambda: {"org_dir": "/tmp/fake_org"})
         import ai_session_tools.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "load_config", lambda: {"org_dir": "/tmp/fake_org"})
         monkeypatch.setattr(cli_mod, "_check_step_dep", lambda *a, **kw: None)
 
         from ai_session_tools.analysis import orchestrator as orch

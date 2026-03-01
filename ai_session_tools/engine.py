@@ -5,6 +5,7 @@ Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 """
 
+import contextlib
 import datetime
 import fnmatch
 import functools
@@ -34,6 +35,7 @@ from .models import (
     SessionInfo,
     SessionMessage,
 )
+from ai_session_tools.config import get_config_path, load_config, write_config
 
 #: Default correction patterns: (category, [regex_keywords...])
 #: Uses \b word boundaries (matching claude_session_tools.py:103-127).
@@ -1659,9 +1661,6 @@ def _discover_sources(config: dict, force: bool = False) -> dict:
     To see config file path: aise config path
     To view config:          aise config show
     """
-    import contextlib
-    import datetime
-
     explicit_sd = config.get("source_dirs", {})
 
     # ── Cache hit: use _auto_discovered if fresh ────────────────────────────
@@ -1720,10 +1719,8 @@ def _discover_sources(config: dict, force: bool = False) -> dict:
     # AND the config file already exists on disk. Avoids creating config files
     # as a side effect of scanning, and avoids corrupting unrelated config files.
     with contextlib.suppress(Exception):  # never fail on write errors
-        if "source_dirs" in config:
-            from ai_session_tools.config import write_config as _wc, get_config_path as _gcp
-            if _gcp().exists():
-                _wc(updated_config)
+        if "source_dirs" in config and get_config_path().exists():
+            write_config(updated_config)
 
     effective["source_dirs"] = sd
     return effective
@@ -1924,8 +1921,6 @@ def get_session_backend(
         source="gemini"  → Gemini CLI only
         source="all"     → all discovered/configured sources via MultiSourceEngine
     """
-    import contextlib
-    from ai_session_tools.config import load_config
     from ai_session_tools.sources.aistudio import AiStudioSource
     from ai_session_tools.sources.gemini_cli import GeminiCliSource
 
