@@ -249,12 +249,20 @@ def source_scan(
 ) -> None:
     """Scan standard locations and report newly discoverable sources.
 
-    Checks Downloads, Google Drive (macOS/Linux/Windows), and other standard
-    locations for directories named 'Google AI Studio' or similar.
+    Forces a full filesystem scan (bypasses the 24-hour auto-discovery cache)
+    and reports any source directories not yet in your explicit config.
 
-    Without --save: shows what would be added. With --save: writes to config.
-    To disable auto-discovery for a type: aise source disable aistudio
-    To re-enable: aise source enable aistudio
+    Providers scanned:
+      gemini_cli  ~/.gemini/tmp/
+      aistudio    ~/Downloads/*Google AI Studio*, ~/Library/CloudStorage/GoogleDrive-*/...
+
+    Without --save: shows what would be added (dry-run).
+    With    --save: writes found paths to config as explicit entries.
+
+    To disable auto-discovery for a provider: aise source disable aistudio
+    To re-enable:                             aise source enable aistudio
+    To view config file path:                 aise config path
+    To view full config:                      aise config show
 
     Example:
         aise source scan
@@ -264,7 +272,8 @@ def source_scan(
     from ai_session_tools.config import load_config
     cfg = load_config()
     explicit_sd = cfg.get("source_dirs", {})
-    discovered = _discover_sources(cfg).get("source_dirs", {})
+    # force=True bypasses the 24-hour cache and always runs the full filesystem scan
+    discovered = _discover_sources(cfg, force=True).get("source_dirs", {})
 
     new_sources: list[tuple[str, str]] = []
     for src_type in ("aistudio", "gemini_cli"):
@@ -451,17 +460,13 @@ def _save_sources_to_config(new_sources: list[tuple[str, str]], cfg: dict) -> No
 
 
 def _resolve_config_path() -> Path:
-    """Return the config file path from the same priority chain as load_config().
+    """Return the config file path — delegates to config.get_config_path().
 
-    Single implementation used by both _write_config() and _get_config_file_path()
+    Single implementation shared by _write_config() and config show/path commands
     so read path == write path in all invocation modes.
     """
-    from ai_session_tools.config import _g_config_path
-    if _g_config_path:
-        return Path(_g_config_path).expanduser()
-    if env_p := os.getenv("AI_SESSION_TOOLS_CONFIG"):
-        return Path(env_p).expanduser()
-    return Path(typer.get_app_dir("ai_session_tools")) / "config.json"
+    from ai_session_tools.config import get_config_path
+    return get_config_path()
 
 
 def _write_config(cfg: dict) -> None:
@@ -472,13 +477,11 @@ def _write_config(cfg: dict) -> None:
     (set_config_path does NOT create files; config_init and source-mutation
     commands call _write_config which creates the file on first write.)
 
-    Always invalidates the in-memory cache so the next load_config() call
-    reads the updated file rather than serving stale data.
+    Delegates to config.write_config() which updates the in-process cache
+    so the next load_config() returns the written dict without a disk re-read.
     """
-    config_path = _resolve_config_path()
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    invalidate_config_cache()
+    from ai_session_tools.config import write_config as _wc
+    _wc(cfg)
 
 
 # ── CLI rendering infrastructure ──────────────────────────────────────────────

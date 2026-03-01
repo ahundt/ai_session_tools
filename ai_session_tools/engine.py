@@ -1616,55 +1616,126 @@ def _aistudio_candidate_dirs(home: Path) -> list[Path]:
     return candidates
 
 
-def _discover_sources(config: dict) -> dict:
+# How long auto-discovered source paths are cached in config.json before a re-scan.
+# Users can force an immediate refresh with: aise source scan
+_DISCOVERY_TTL_SECONDS: int = 86400  # 24 hours
+
+
+def _discover_sources(config: dict, force: bool = False) -> dict:
     """Scan standard install locations and merge discovered sources into config.
 
-    Priority: explicit config > auto-discovered.
+    Priority: explicit config > auto-discovered (cached or freshly scanned).
     Claude Code is always included via SessionRecoveryEngine (not in source_dirs).
-    Returns effective config dict with discovered paths added.
+    Returns effective config dict with discovered paths merged in.
 
-    Auto-discovery is skipped for a source type when that type already has
-    explicit entries in config (explicit config wins, no merging).
+    Caching (config.json["_auto_discovered"]):
+    ─────────────────────────────────────────
+    Auto-discovery runs filesystem globs which are O(entries in Downloads / Drive).
+    Results are cached in config.json under "_auto_discovered" for
+    _DISCOVERY_TTL_SECONDS (24 h). On cache hit the function is O(1).
+    To force an immediate re-scan: aise source scan  (passes force=True).
 
-    Standard auto-discovery locations:
-    - ~/.claude/projects/                           (Claude Code — always)
-    - ~/.gemini/tmp/                               (Gemini CLI if exists + non-empty)
-    - ~/Downloads/*Google AI Studio*/              (AI Studio export — Downloads)
-    - ~/Library/CloudStorage/GoogleDrive-*/...     (AI Studio via Google Drive — macOS)
-    - ~/Google Drive/*Google AI Studio*/           (AI Studio — macOS legacy / Linux / Windows)
-    - Any directory whose name contains 'Google AI Studio' under known Drive mounts
+    The cache stores only auto-discovered values — explicit source_dirs entries
+    are never overwritten. Cache structure (written to config.json):
+        {
+          "_auto_discovered": {
+            "_discovered_at": "2026-03-01T14:23:45+00:00",  # ISO 8601 UTC
+            "gemini_cli": "/Users/you/.gemini/tmp",
+            "aistudio":   ["/Users/you/Downloads/Google AI Studio"]
+          }
+        }
 
-    To disable auto-discovery for a source type, add it to config with an empty list:
-        {"source_dirs": {"aistudio": []}}
-    To add explicit paths use: aise source add <path> --type aistudio
-    To remove: aise source remove <path>
+    Auto-discovery locations probed per provider:
+    ── Claude Code  always included (SessionRecoveryEngine, no source_dirs entry)
+    ── Gemini CLI   ~/.gemini/tmp/          (standard install, all platforms)
+    ── AI Studio    ~/Downloads/*Google AI Studio*/
+                    ~/Library/CloudStorage/GoogleDrive-*/My Drive/*Google AI Studio*/
+                    ~/Google Drive/*Google AI Studio*/  (macOS legacy / Linux / Windows)
+
+    To disable auto-discovery for a provider: aise source disable <type>
+      (writes {"source_dirs": {"aistudio": []}} — empty list blocks auto-discovery)
+    To add explicit paths:   aise source add <path> --type <type>
+    To remove explicit path: aise source remove <path>
+    To see config file path: aise config path
+    To view config:          aise config show
     """
     import contextlib
+    import datetime
+
+    explicit_sd = config.get("source_dirs", {})
+
+    # ── Cache hit: use _auto_discovered if fresh ────────────────────────────
+    if not force:
+        auto = config.get("_auto_discovered", {})
+        discovered_at_str = auto.get("_discovered_at", "")
+        if discovered_at_str:
+            with contextlib.suppress(ValueError, TypeError):
+                ts = datetime.datetime.fromisoformat(discovered_at_str)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=datetime.timezone.utc)
+                age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+                if age < _DISCOVERY_TTL_SECONDS:
+                    # Merge cached auto-discovered values; explicit config always wins
+                    effective = dict(config)
+                    sd = dict(explicit_sd)
+                    if not sd.get("gemini_cli") and auto.get("gemini_cli"):
+                        sd["gemini_cli"] = auto["gemini_cli"]
+                    if "aistudio" not in explicit_sd and auto.get("aistudio"):
+                        sd["aistudio"] = auto["aistudio"]
+                    effective["source_dirs"] = sd
+                    return effective
+
+    # ── Cache miss or forced: run full filesystem scan ───────────────────────
     home = Path.home()
     effective = dict(config)
-    sd = dict(effective.get("source_dirs", {}))
+    sd = dict(explicit_sd)
 
-    # Gemini CLI: standard install at ~/.gemini/tmp/
+    # Gemini CLI: standard install at ~/.gemini/tmp/ (all platforms)
     if not sd.get("gemini_cli"):
         gemini_tmp = home / ".gemini" / "tmp"
         with contextlib.suppress(OSError):
             if gemini_tmp.exists() and any(gemini_tmp.iterdir()):
                 sd["gemini_cli"] = str(gemini_tmp)
 
-    # AI Studio: explicit config wins; auto-discover only when not set.
-    # Explicit config with an empty list disables auto-discovery.
-    if "aistudio" not in sd:
+    # AI Studio: explicit config (incl. empty list) disables auto-discovery.
+    if "aistudio" not in explicit_sd:
         candidates = _aistudio_candidate_dirs(home)
         found = [str(p) for p in candidates if p.exists()]
         if found:
             sd["aistudio"] = found
+
+    # ── Persist cache entry back to config.json ──────────────────────────────
+    new_auto: dict = {
+        "_discovered_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    # Only cache auto-discovered values (never copy explicit config into cache)
+    if sd.get("gemini_cli") and not explicit_sd.get("gemini_cli"):
+        new_auto["gemini_cli"] = sd["gemini_cli"]
+    if sd.get("aistudio") and "aistudio" not in explicit_sd:
+        new_auto["aistudio"] = sd["aistudio"]
+
+    updated_config = dict(config)
+    updated_config["_auto_discovered"] = new_auto
+    # Only persist cache if this looks like an aise config (has source_dirs key)
+    # AND the config file already exists on disk. Avoids creating config files
+    # as a side effect of scanning, and avoids corrupting unrelated config files.
+    with contextlib.suppress(Exception):  # never fail on write errors
+        if "source_dirs" in config:
+            from ai_session_tools.config import write_config as _wc, get_config_path as _gcp
+            if _gcp().exists():
+                _wc(updated_config)
 
     effective["source_dirs"] = sd
     return effective
 
 
 def _detect_default_source(cfg: dict) -> str:
-    """Return 'all' if any non-Claude sources configured or discovered, else 'claude'."""
+    """Return 'all' if any non-Claude sources configured or discovered, else 'claude'.
+
+    Callers should pass effective_cfg (the result of _discover_sources()) rather
+    than the raw config so the TTL cache is hit on this second call, avoiding
+    a redundant filesystem scan within the same process invocation.
+    """
     effective_cfg = _discover_sources(cfg)
     sd = effective_cfg.get("source_dirs", {})
     if sd.get("aistudio") or sd.get("gemini_cli"):
@@ -1863,7 +1934,9 @@ def get_session_backend(
 
     # Merge auto-discovered sources into config (explicit config takes priority)
     effective_cfg = _discover_sources(config)
-    effective_source = source if source is not None else _detect_default_source(config)
+    # Pass effective_cfg (which includes _auto_discovered) so _detect_default_source
+    # hits the TTL cache rather than re-scanning the filesystem.
+    effective_source = source if source is not None else _detect_default_source(effective_cfg)
 
     if effective_source == "claude":
         base: Path

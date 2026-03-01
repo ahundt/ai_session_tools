@@ -76,6 +76,37 @@ def load_config() -> dict:
     return {}
 
 
+def get_config_path() -> Path:
+    """Return the config file path using the same priority chain as load_config().
+
+    Priority: --config CLI flag > AI_SESSION_TOOLS_CONFIG env var > OS default.
+    The returned path may not exist yet (caller creates it on first write).
+    """
+    if _g_config_path:
+        return Path(_g_config_path).expanduser()
+    if env_p := os.getenv("AI_SESSION_TOOLS_CONFIG"):
+        return Path(env_p).expanduser()
+    import typer
+    return Path(typer.get_app_dir("ai_session_tools")) / "config.json"
+
+
+def write_config(cfg: dict) -> None:
+    """Write cfg to the config file and update the in-process cache.
+
+    Creates parent directories if needed. Updates _config_cache so the next
+    load_config() call within this process returns the written dict without
+    an extra disk read.
+
+    Callers that need to persist auto-discovered source paths or clear stale
+    cache entries should use this function rather than writing directly.
+    """
+    global _config_cache
+    path = get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    _config_cache = cfg  # keep in-process cache current without forcing a re-read
+
+
 def get_config_section(key: str, default=None):
     """Return config[key] if present and non-empty, else default.
 

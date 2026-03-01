@@ -7679,3 +7679,182 @@ class TestSourceDisableEnable:
         cfg = json.loads(config_file.read_text())
         sd = cfg.get("source_dirs", {})
         assert "gemini_cli" not in sd, f"gemini_cli key should be removed, got: {sd}"
+
+
+class TestDiscoveryCache:
+    """_discover_sources() TTL cache: hits, misses, force refresh, write-back."""
+
+    def test_cache_hit_skips_filesystem_scan(self, tmp_path, monkeypatch):
+        """Fresh _auto_discovered cache must be returned without re-scanning."""
+        import datetime
+        from ai_session_tools.engine import _discover_sources
+
+        # Create a fake aistudio dir that DOES NOT exist on disk
+        fake_path = str(tmp_path / "FakeAIStudio")
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        config = {
+            "source_dirs": {},
+            "_auto_discovered": {
+                "_discovered_at": now_iso,
+                "aistudio": [fake_path],
+            },
+        }
+        result = _discover_sources(config)
+        # Cache must be returned even though fake_path doesn't exist on disk
+        assert result["source_dirs"].get("aistudio") == [fake_path], (
+            "Cache hit must return cached aistudio without filesystem check"
+        )
+
+    def test_cache_miss_stale_triggers_rescan(self, tmp_path, monkeypatch):
+        """Expired _auto_discovered cache must trigger a fresh filesystem scan."""
+        import datetime
+        from ai_session_tools.engine import _discover_sources
+
+        # Create a real directory so it gets discovered
+        real_dir = tmp_path / "Downloads" / "Google AI Studio"
+        real_dir.mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        stale_ts = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=25)
+        ).isoformat()
+
+        config = {
+            "source_dirs": {},
+            "_auto_discovered": {
+                "_discovered_at": stale_ts,
+                "aistudio": ["/old/stale/path"],
+            },
+        }
+        result = _discover_sources(config)
+        # Stale cache must be ignored; real_dir must appear via fresh scan
+        found = result["source_dirs"].get("aistudio", [])
+        assert str(real_dir) in found, (
+            f"Stale cache should be ignored; fresh scan should find {real_dir}"
+        )
+
+    def test_force_bypasses_fresh_cache(self, tmp_path, monkeypatch):
+        """force=True must bypass a still-valid cache and return fresh results."""
+        import datetime
+        from ai_session_tools.engine import _discover_sources
+
+        # Create a real directory so fresh scan returns something
+        real_dir = tmp_path / "Downloads" / "Google AI Studio"
+        real_dir.mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        config = {
+            "source_dirs": {},
+            "_auto_discovered": {
+                "_discovered_at": now_iso,
+                "aistudio": ["/cached/stale/path"],
+            },
+        }
+        result = _discover_sources(config, force=True)
+        found = result["source_dirs"].get("aistudio", [])
+        assert str(real_dir) in found, (
+            f"force=True must bypass cache; fresh scan should find {real_dir}"
+        )
+        assert "/cached/stale/path" not in found, (
+            "force=True must not return stale cached path"
+        )
+
+    def test_cache_writeback_after_scan(self, tmp_path, monkeypatch):
+        """After a scan, _auto_discovered must be written to config.json."""
+        import datetime
+        import ai_session_tools.config as _cfg_mod
+        from ai_session_tools.engine import _discover_sources
+        from ai_session_tools.config import invalidate_config_cache
+
+        real_dir = tmp_path / "Downloads" / "Google AI Studio"
+        real_dir.mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"source_dirs": {}}))
+        # Reset _g_config_path so env var takes priority (prevents prior-test leakage)
+        monkeypatch.setattr(_cfg_mod, "_g_config_path", None)
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config_file))
+        invalidate_config_cache()
+
+        config = json.loads(config_file.read_text())
+        _discover_sources(config)
+
+        # config.json must now contain _auto_discovered with _discovered_at
+        written = json.loads(config_file.read_text())
+        assert "_auto_discovered" in written, "Cache must be written back to config.json"
+        auto = written["_auto_discovered"]
+        assert "_discovered_at" in auto, "_auto_discovered must contain _discovered_at"
+        # Verify _discovered_at is a valid ISO timestamp
+        ts = datetime.datetime.fromisoformat(auto["_discovered_at"])
+        age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+        assert age < 10, f"_discovered_at must be recent, got age={age:.1f}s"
+
+    def test_explicit_config_not_overwritten_by_cache(self, tmp_path, monkeypatch):
+        """Explicit source_dirs entries must never be replaced by cache or scan."""
+        import datetime
+        from ai_session_tools.engine import _discover_sources
+
+        explicit_path = str(tmp_path / "explicit_aistudio")
+        (tmp_path / "explicit_aistudio").mkdir()
+
+        # Also create a discoverable dir to confirm scan doesn't override explicit
+        (tmp_path / "Downloads" / "Google AI Studio").mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        config = {"source_dirs": {"aistudio": [explicit_path]}}
+
+        # Test with stale/no cache (scan path)
+        result = _discover_sources(config)
+        assert result["source_dirs"]["aistudio"] == [explicit_path], (
+            "Explicit aistudio config must not be overwritten by auto-discovery"
+        )
+
+        # Test with fresh cache that has a different aistudio
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        config_with_cache = {
+            "source_dirs": {"aistudio": [explicit_path]},
+            "_auto_discovered": {
+                "_discovered_at": now_iso,
+                "aistudio": ["/cached/path"],
+            },
+        }
+        result2 = _discover_sources(config_with_cache)
+        assert result2["source_dirs"]["aistudio"] == [explicit_path], (
+            "Cached auto-discovery must not override explicit source_dirs.aistudio"
+        )
+
+    def test_source_scan_cli_force_refreshes_cache(self, tmp_path, monkeypatch):
+        """aise source scan must pass force=True and refresh stale cache."""
+        import datetime, json as _json
+        from ai_session_tools.config import invalidate_config_cache
+
+        # Stale cache in config
+        stale_ts = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=48)
+        ).isoformat()
+        config_file = tmp_path / "config.json"
+        config_file.write_text(_json.dumps({
+            "source_dirs": {},
+            "_auto_discovered": {
+                "_discovered_at": stale_ts,
+                "aistudio": ["/old/stale/path"],
+            },
+        }))
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config_file))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        invalidate_config_cache()
+
+        result = runner.invoke(app, ["source", "scan"])
+        assert result.exit_code == 0
+        # After scan, config.json must have a fresh _discovered_at
+        written = _json.loads(config_file.read_text())
+        auto = written.get("_auto_discovered", {})
+        if "_discovered_at" in auto:
+            ts = datetime.datetime.fromisoformat(auto["_discovered_at"])
+            age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+            assert age < 30, f"source scan must refresh _discovered_at, got age={age:.1f}s"
