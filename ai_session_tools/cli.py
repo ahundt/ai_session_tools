@@ -583,6 +583,113 @@ def _format_ts(ts: str) -> str:
     return s.replace("T", " ") if "T" in s else s
 
 
+# ── DRY date/time filter flags and normalizer ────────────────────────────────
+
+_OPT_SINCE = typer.Option(
+    None, "--since",
+    help=(
+        "Lower bound of date range (inclusive). "
+        "Accepts: ISO date (2026-01-15), partial date (2026-01, 2026), "
+        "EDTF patterns (202X, 19XX, 2026-01-1X), durations (7d, 2w, 1m, 24h, 30min), "
+        "EDTF interval (2026-01/2026-03, sets both bounds). "
+        "Run 'aise dates' for full format reference."
+    ),
+)
+_OPT_UNTIL = typer.Option(
+    None, "--until",
+    help=(
+        "Upper bound of date range (inclusive). "
+        "Same formats as --since (no interval syntax). "
+        "Run 'aise dates' for full format reference."
+    ),
+)
+_OPT_WHEN = typer.Option(
+    None, "--when",
+    help=(
+        "Filter to an entire EDTF period — sets both lower and upper bounds. "
+        "Best for unspecified-digit patterns: --when 202X (whole 2020s decade), "
+        "--when 2026-01-1X (Jan 10-19 2026), --when 2026-01 (all of January). "
+        "Run 'aise dates' for full format reference."
+    ),
+)
+# Hidden backward-compatible aliases (accepted but not shown in --help)
+_OPT_AFTER  = typer.Option(None, "--after",  hidden=True)
+_OPT_BEFORE = typer.Option(None, "--before", hidden=True)
+
+
+def _normalize_date_range(
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    when:  Optional[str] = None,
+    after:  Optional[str] = None,   # hidden alias for --since
+    before: Optional[str] = None,   # hidden alias for --until
+) -> tuple:
+    """Return (resolved_after, resolved_before) ISO strings for engine filtering.
+
+    Priority:
+      --when: sets BOTH bounds from one EDTF expression (lower + upper bound).
+      --since (or --after): lower bound, overrides --when lower if also given.
+      --until (or --before): upper bound, overrides --when upper if also given.
+      EDTF interval in --since (A/B) sets both bounds like --when.
+
+    Raises typer.Exit(1) with Rich stderr on invalid input.
+    """
+    from ai_session_tools.engine import _parse_date_input
+
+    def _fail(label: str, exc: Exception) -> None:
+        Console(stderr=True).print(f"[red]{label}: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    resolved_after: Optional[str] = None
+    resolved_before: Optional[str] = None
+
+    # --when: sets BOTH bounds from one EDTF expression
+    if when:
+        try:
+            result = _parse_date_input(when, "start")
+        except ValueError as exc:
+            _fail("--when", exc)
+            return None, None  # unreachable but satisfies type checker
+        if isinstance(result, tuple):
+            resolved_after, resolved_before = result
+        else:
+            resolved_after = result
+            try:
+                resolved_before = _parse_date_input(when, "end")
+            except ValueError as exc:
+                _fail("--when (upper bound)", exc)
+
+    # --since (or hidden --after): lower bound, overrides --when lower if given
+    since_val = since or after
+    if since_val:
+        try:
+            result = _parse_date_input(since_val, "start")
+        except ValueError as exc:
+            _fail("--since", exc)
+            return None, None
+        if isinstance(result, tuple):
+            resolved_after, resolved_before = result   # interval syntax sets both
+        else:
+            resolved_after = result
+
+    # --until (or hidden --before): upper bound, overrides --when upper if given
+    until_val = until or before
+    if until_val:
+        try:
+            result = _parse_date_input(until_val, "end")
+        except ValueError as exc:
+            _fail("--until", exc)
+            return None, None
+        if isinstance(result, tuple):
+            Console(stderr=True).print(
+                "[red]--until: interval syntax (A/B) not supported here; use --since A/B[/red]"
+            )
+            raise typer.Exit(1)
+        resolved_before = result
+
+    return resolved_after, resolved_before
+
+
 def _project_display(encoded_dir: str) -> str:
     """Return a short human-readable project name from Claude's encoded dir name.
 
@@ -641,7 +748,7 @@ _CORRECTIONS_SPEC = TableSpec(
     ],
     row_fn=lambda d: [
         d["timestamp"][:19],
-        (d["session_id"][:16] + "\u2026") if len(d["session_id"]) > 16 else d["session_id"],
+        d["session_id"][:8],
         d["category"],
         d["matched_pattern"],
         d["content"][:80],
@@ -1015,7 +1122,7 @@ def _do_history_display(engine: SessionRecoveryEngine, name: str, versions: Opti
             delta = f"+{v.line_count - prev_lines}"
         else:
             delta = str(v.line_count - prev_lines)
-        short_session = v.session_id[:16] + "\u2026" if len(v.session_id) > 16 else v.session_id
+        short_session = v.session_id[:8]
         table.add_row(f"v{v.version_num}", str(v.line_count), delta, v.timestamp or "\u2014", short_session)
         prev_lines = v.line_count
     console.print(table)
@@ -1451,11 +1558,17 @@ def _do_messages_timeline(
     fmt: str = "table",
     preview_chars: int = 150,
     message_type: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
 ) -> None:
     """Show chronological event timeline for a session."""
     events = engine.timeline_session(session_id, preview_chars=preview_chars)
     if message_type:
         events = [e for e in events if e.get("type") == message_type]
+    if after:
+        events = [e for e in events if (e.get("timestamp") or "") >= after]
+    if before:
+        events = [e for e in events if (e.get("timestamp") or "") <= before]
     if not events:
         # Distinguish "session file not found" from "session has no user/assistant events"
         session_files = engine._find_session_files(session_id)
@@ -1495,7 +1608,7 @@ def _do_files_cross_ref(
         ],
         row_fn=lambda d: [
             d["timestamp"][:19],
-            (d["session_id"][:16] + "\u2026") if len(d["session_id"]) > 16 else d["session_id"],
+            d["session_id"][:8],
             d["tool"],
             "[green]\u2713[/green]" if d["found_in_current"] else "[red]\u2717[/red]",
             d["content_snippet"][:60],
@@ -1503,7 +1616,7 @@ def _do_files_cross_ref(
         plain_fn=lambda d: (
             "{ts}  {sid}  {tool}  {mark}  {snip}".format(
                 ts=d["timestamp"][:19],
-                sid=d["session_id"][:16],
+                sid=d["session_id"][:8],
                 tool=d["tool"],
                 mark="\u2713" if d["found_in_current"] else "\u2717",
                 snip=d["content_snippet"][:60],
@@ -1788,8 +1901,11 @@ def files_search(
     exclude_extensions: Optional[str] = typer.Option(None, "--exclude-extensions", "-x", help="Skip these file extensions, comma-separated (e.g. pyc,tmp)"),
     include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="Only search these session UUIDs, comma-separated"),
     exclude_sessions: Optional[str] = typer.Option(None, "--exclude-sessions", help="Skip these session UUIDs, comma-separated"),
-    after: Optional[str] = typer.Option(None, "--after", help="Only files modified after this datetime (e.g. 2026-01-15 or 2026-01-15T14:30:00)"),
-    before: Optional[str] = typer.Option(None, "--before", help="Only files modified before this datetime (e.g. 2026-12-31 or 2026-12-31T23:59:59)"),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
     limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited"),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ) -> None:
@@ -1802,13 +1918,14 @@ def files_search(
         aise files search                                  # all files
         aise files search --pattern "*.py"                 # Python files only
         aise files search --min-edits 3                    # files edited 3+ times across sessions
-        aise files search -i py,md --after 2026-01-15      # Python/Markdown since Jan 15
-        aise files search --after 2026-01-15T14:30:00      # files modified after specific time
+        aise files search -i py,md --since 2026-01-15      # Python/Markdown since Jan 15
+        aise files search --when 202X                      # files edited in the 2020s decade
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
+    after, before = _normalize_date_range(since, until, when, after, before)
     _do_files_search(engine, pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, after, before, limit, fmt)
 
 
@@ -1977,8 +2094,11 @@ def _messages_search_cmd(
         0, "--context", "-c",
         help="Include N messages before and after each match (from the same session). Default: 0.",
     ),
-    after: Optional[str] = typer.Option(None, "--after", help="Only messages from sessions after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
-    before: Optional[str] = typer.Option(None, "--before", help="Only messages from sessions before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Search conversation messages across all configured session sources.
 
@@ -1991,7 +2111,8 @@ def _messages_search_cmd(
         aise messages find "error"                              # find is an alias
         aise messages search "*" --tool Write                   # all Write tool calls
         aise messages search "error" --context 3               # show surrounding messages
-        aise messages search "error" --after 2026-01-01        # sessions since Jan 1
+        aise messages search "error" --since 2026-01-01        # sessions since Jan 1
+        aise messages search "error" --when 202X               # sessions in the 2020s decade
     """
     q = query or query_opt
     # Get backend from composition root (ctx.obj injected by app_callback)
@@ -1999,6 +2120,7 @@ def _messages_search_cmd(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
+    after, before = _normalize_date_range(since, until, when, after, before)
     _do_messages_search(engine, q or "", message_type, limit, max_chars, fmt,
                         tool=tool, context=context, after=after, before=before)
 
@@ -2038,8 +2160,11 @@ def messages_corrections(
     ctx: typer.Context,
     provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
-    after: Optional[str] = typer.Option(None, "--after", help="Only corrections after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
-    before: Optional[str] = typer.Option(None, "--before", help="Only corrections before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
     limit: int = typer.Option(20, "--limit", help="Max corrections to return. Default: 20"),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
     pattern: Optional[List[str]] = typer.Option(
@@ -2075,6 +2200,7 @@ def messages_corrections(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
+    after, before = _normalize_date_range(since, until, when, after, before)
     _do_messages_corrections(engine, project, after, before, limit, fmt,
                               pattern_overrides=pattern)
 
@@ -2084,8 +2210,11 @@ def messages_planning(
     ctx: typer.Context,
     provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
-    after: Optional[str] = typer.Option(None, "--after", help="Only commands after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
-    before: Optional[str] = typer.Option(None, "--before", help="Only commands before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
     commands: Optional[str] = typer.Option(
         None, "--commands",
@@ -2121,6 +2250,7 @@ def messages_planning(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
+    after, before = _normalize_date_range(since, until, when, after, before)
     _do_messages_planning(engine, project, after, before, fmt, commands_raw=commands)
 
 
@@ -2158,6 +2288,11 @@ def messages_timeline(
         help="Max characters to show in content preview column. Default: 150",
     ),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' events. Default: both."),
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Show a chronological timeline of user/assistant events for a session.
 
@@ -2169,13 +2304,15 @@ def messages_timeline(
         aise messages timeline ab841016 --format json
         aise messages timeline ab841016 --preview-chars 80
         aise messages timeline ab841016 --type assistant    # AI turns only
+        aise messages timeline ab841016 --since 14:00       # events after 2pm
     """
+    since, until = _normalize_date_range(since, until, when, after, before)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     _do_messages_timeline(engine, session_id, fmt, preview_chars=preview_chars,
-                          message_type=message_type)
+                          message_type=message_type, after=since, before=until)
 
 
 #: Supported content extraction types for ``messages extract``.
@@ -2273,8 +2410,11 @@ def _tools_search_cmd(
     limit: int = typer.Option(10, "--limit", help="Max results. Default: 10"),
     max_chars: int = typer.Option(0, "--max-chars", help="Truncate each result to N chars. 0=full."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
-    after: Optional[str] = typer.Option(None, "--after", help="Only tool calls from sessions after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
-    before: Optional[str] = typer.Option(None, "--before", help="Only tool calls from sessions before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Search or find tool invocations from Claude Code sessions.
 
@@ -2285,8 +2425,10 @@ def _tools_search_cmd(
         aise tools search Bash "git commit"          # Bash calls with "git commit"
         aise tools find Edit "cli.py"                # find alias
         aise tools search Write --format json        # JSON output
-        aise tools search Bash --after 2026-01-01    # recent Bash calls only
+        aise tools search Bash --since 7d            # recent Bash calls only
+        aise tools search Bash --when 202X           # Bash calls in the 2020s decade
     """
+    since, until = _normalize_date_range(since, until, when, after, before)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
@@ -2294,7 +2436,7 @@ def _tools_search_cmd(
     _do_messages_search(
         engine, query or "", message_type="assistant",
         limit=limit, max_chars=max_chars, fmt=fmt, tool=tool,
-        after=after, before=before,
+        after=since, before=until,
     )
 
 
@@ -2303,13 +2445,93 @@ _register_alias(tools_app, _tools_search_cmd, "search", "find")
 
 # ── Root commands ─────────────────────────────────────────────────────────────
 
+@app.command("dates")
+def dates_reference() -> None:
+    """Show full date/time format reference for --since, --until, and --when flags."""
+    from rich.markdown import Markdown
+    Console().print(Markdown("""\
+# Date/Time Format Reference
+
+All date flags (`--since`, `--until`, `--when`) accept the following formats:
+
+## ISO 8601 Dates
+| Input | Meaning |
+|-------|---------|
+| `2026-01-15` | Any time on January 15, 2026 |
+| `2026-01-15T14:30:00` | Specific date and time |
+
+## Partial Dates (EDTF Level 0)
+| Input | Meaning |
+|-------|---------|
+| `2026-01` | All of January 2026 |
+| `2026` | All of year 2026 |
+
+## Unspecified Digits (EDTF Level 1)
+| Input | Meaning |
+|-------|---------|
+| `202X` or `202x` | The 2020s decade (2020-01-01 to 2029-12-31) |
+| `19XX` | The 1900s century (1900-01-01 to 1999-12-31) |
+| `2026-01-1X` | January 10-19, 2026 |
+
+## EDTF Intervals (--since only, sets both lower and upper bounds)
+| Input | Meaning |
+|-------|---------|
+| `2026-01/2026-03` | January through March 2026 |
+
+## Durations (relative to now)
+| Input | Meaning |
+|-------|---------|
+| `7d` | 7 days ago |
+| `2w` | 2 weeks ago |
+| `1m` | ~30 days ago |
+| `24h` | 24 hours ago |
+| `30min` | 30 minutes ago |
+
+## Natural Language (via python-dateutil)
+| Input | Meaning |
+|-------|---------|
+| `yesterday` | Yesterday at midnight |
+| `3 days ago` | 3 days ago |
+
+## Flag Semantics
+
+| Flag | Lower bound | Upper bound | Best for |
+|------|------------|------------|---------|
+| `--since VALUE` | lower_strict(VALUE) | — | "from this date onward" |
+| `--until VALUE` | — | upper_strict(VALUE) | "up to this date" |
+| `--when VALUE` | lower_strict(VALUE) | upper_strict(VALUE) | EDTF periods: `202X`, `2026-01-1X`, `2026-01` |
+
+**Key difference:** `--when 202X` filters to exactly the 2020s decade.
+`--since 202X` means "from 2020 onward" with no upper limit.
+
+## Examples
+
+```
+aise list --since 7d
+aise list --when 202X
+aise list --when 2026-01-1X
+aise list --since 2026-01 --until 2026-03
+aise list --since 2026-01/2026-03
+aise search messages --query "bug" --since 2w
+aise messages corrections --when 2026
+```
+
+## EDTF Specification
+
+Full specification: https://www.loc.gov/standards/datetime/
+"""))
+
+
 @app.command("list")
 def list_sessions(
     ctx: typer.Context,
     provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
-    after: Optional[str] = typer.Option(None, "--after", help="Only sessions after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
-    before: Optional[str] = typer.Option(None, "--before", help="Only sessions before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
     limit: Optional[int] = typer.Option(None, "--limit", help="Max sessions to return. Default: unlimited."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ) -> None:
@@ -2319,13 +2541,16 @@ def list_sessions(
         aise list                              # all configured sessions
         aise list --provider aistudio          # AI Studio sessions only
         aise list --project myproject          # filter by project
-        aise list --after 2026-01-01           # sessions since Jan 1
+        aise list --since 7d                   # sessions in the last 7 days
+        aise list --when 202X                  # all sessions in the 2020s decade
+        aise list --since 2026-01 --until 2026-03  # January through March 2026
         aise list --format json                # JSON output
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
+    after, before = _normalize_date_range(since, until, when, after, before)
     _do_list_sessions(engine, project, after, before, limit, fmt)
 
 
@@ -2341,8 +2566,11 @@ def _root_search_cmd(
     exclude_extensions: Optional[str] = typer.Option(None, "--exclude-extensions", "-x", help="[files] Skip these file extensions, comma-separated (e.g. pyc,tmp)"),
     include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="[files] Only search these session UUIDs, comma-separated"),
     exclude_sessions: Optional[str] = typer.Option(None, "--exclude-sessions", help="[files] Skip these session UUIDs, comma-separated"),
-    after: Optional[str] = typer.Option(None, "--after", help="[files/messages] Only results after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
-    before: Optional[str] = typer.Option(None, "--before", help="[files/messages] Only results before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="[messages] Show only 'user' or 'assistant' messages. Default: both"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited for files, 10 for messages"),
     max_chars: int = typer.Option(0, "--max-chars", help="[messages] Truncate each message to this many characters. 0 = full message. Default: 0"),
@@ -2361,11 +2589,13 @@ def _root_search_cmd(
         aise search files --pattern "*.py"                   # Python files edited by Claude
         aise search tools --tool Write --query "login"       # Write calls with "login"
         aise search --tool Bash --query "git commit"         # auto-routes to messages
+        aise search messages --query "bug" --since 2w        # last 2 weeks
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
+    after, before = _normalize_date_range(since, until, when, after, before)
     _do_search(
         engine, domain, pattern, query, min_edits, max_edits,
         include_extensions, exclude_extensions, include_sessions, exclude_sessions,
@@ -2482,14 +2712,24 @@ def get(
 def stats(
     ctx: typer.Context,
     provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Show session, file, and version counts per source.
+
+    Note: date filtering (--since/--until/--when) is parsed and validated but
+    not yet applied to aggregate statistics. Full counts are shown regardless.
+    Date-filtered statistics are planned for a future release.
 
     Examples:
         aise stats                        # all configured sources
         aise stats --provider aistudio    # AI Studio only
         aise stats --provider claude      # Claude Code only
     """
+    _normalize_date_range(since, until, when, after, before)   # validate flags; not yet applied
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")

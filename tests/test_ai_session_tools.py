@@ -1784,15 +1784,16 @@ class TestCLIDualOrdering:
         assert "max-chars" in result.output.lower()
 
     def test_cli_search_files_has_datetime_flags(self):
-        """File search should have --after and --before flags."""
+        """File search should have --since, --until, --when flags (--after/--before are hidden aliases)."""
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
-        assert "--after" in result.output
-        assert "--before" in result.output
+        assert "--since" in result.output
+        assert "--until" in result.output
+        assert "--when" in result.output
 
     def test_cli_search_files_has_session_flags(self):
         """File search should have --include-sessions and --exclude-sessions."""
@@ -7496,7 +7497,7 @@ class TestBug6GeminiTimestamp:
 
 
 class TestBug7HelpTextDateFormat:
-    """Bug 7 (Medium): Help text for date flags must include YYYY-MM-DD format."""
+    """Bug 7 (Medium): Help text for date flags must include ISO date format example and --since/--until/--when."""
 
     @pytest.mark.parametrize("cmd", [
         ["search", "messages", "--help"],
@@ -7504,11 +7505,16 @@ class TestBug7HelpTextDateFormat:
         ["messages", "corrections", "--help"],
     ])
     def test_help_includes_date_format(self, cmd):
-        """--after/--before options must show YYYY-MM-DD format in help."""
+        """--since/--until/--when options must be present and show an ISO date example in help."""
         result = runner.invoke(app, cmd)
         assert result.exit_code == 0
-        assert "YYYY-MM-DD" in result.output, (
-            f"Date format 'YYYY-MM-DD' missing from '{' '.join(cmd)}' help.\n{result.output}"
+        # Primary date flags must appear
+        assert "--since" in result.output, f"--since missing from '{' '.join(cmd)}' help"
+        assert "--until" in result.output, f"--until missing from '{' '.join(cmd)}' help"
+        assert "--when" in result.output, f"--when missing from '{' '.join(cmd)}' help"
+        # The --since help shows a concrete example like 2026-01-15 (or abstract YYYY-MM-DD)
+        assert "2026-01-15" in result.output or "YYYY-MM-DD" in result.output, (
+            f"ISO date format example missing from '{' '.join(cmd)}' help.\n{result.output}"
         )
 
 
@@ -7862,21 +7868,22 @@ class TestDiscoveryCache:
 class TestCLIComposability:
     """Composability: flags available on one command should be on related commands."""
 
-    def test_messages_search_has_after_before_flags(self):
-        """messages search must accept --after and --before flags."""
+    def test_messages_search_has_since_until_flags(self):
+        """messages search must accept --since, --until, --when flags (--after/--before are hidden aliases)."""
         result = runner.invoke(app, ["messages", "search", "--help"])
         assert result.exit_code == 0
-        assert "--after" in result.output
-        assert "--before" in result.output
-        assert "YYYY-MM-DD" in result.output
+        assert "--since" in result.output
+        assert "--until" in result.output
+        assert "--when" in result.output
+        assert "2026-01-15" in result.output or "YYYY-MM-DD" in result.output
 
-    def test_tools_search_has_after_before_flags(self):
-        """tools search must accept --after and --before flags."""
+    def test_tools_search_has_since_until_flags(self):
+        """tools search must accept --since, --until, --when flags (--after/--before are hidden aliases)."""
         result = runner.invoke(app, ["tools", "search", "--help"])
         assert result.exit_code == 0
-        assert "--after" in result.output
-        assert "--before" in result.output
-        assert "YYYY-MM-DD" in result.output
+        assert "--since" in result.output
+        assert "--until" in result.output
+        assert "--when" in result.output
 
     def test_messages_timeline_has_type_flag(self):
         """messages timeline must accept --type to filter by role."""
@@ -7988,3 +7995,220 @@ class TestCLIComposability:
         assert len(all_clips) == 3, f"Expected 3 clipboard entries, got {len(all_clips)}"
         limited = all_clips[:1]
         assert len(limited) == 1
+
+
+class TestParseDateInput:
+    """TDD tests for _parse_date_input() and the --since/--until/--when CLI flags.
+
+    Tests are written before implementation (TDD). All cases must pass after
+    implementing _parse_date_input() in engine.py and the DRY CLI helpers.
+    """
+
+    import datetime as _dt
+
+    @pytest.mark.parametrize("s,mode,expected_prefix", [
+        # ISO 8601 pass-through (validated by edtf)
+        ("2026-01-15",           "start", "2026-01-15"),
+        ("2026-01-15T14:30:00",  "start", "2026-01-15"),
+        # Month expansion
+        ("2026-01",  "start", "2026-01-01"),
+        ("2026-01",  "end",   "2026-01-31"),
+        ("2026-02",  "end",   "2026-02-28"),   # Feb non-leap year
+        ("2024-02",  "end",   "2024-02-29"),   # Feb leap year
+        # Year expansion
+        ("2026", "start", "2026-01-01"),
+        ("2026", "end",   "2026-12-31"),
+        # EDTF Level 1: unspecified digit (uppercase)
+        ("202X", "start", "2020-01-01"),
+        ("202X", "end",   "2029-12-31"),
+        # EDTF Level 1: unspecified digit (lowercase — both must work)
+        ("202x", "start", "2020-01-01"),
+        # EDTF Level 1: century
+        ("19XX", "start", "1900-01-01"),
+        # EDTF Level 1: partial day range
+        ("2026-01-1X", "start", "2026-01-10"),
+        ("2026-01-1X", "end",   "2026-01-19"),
+    ])
+    def test_expansion(self, s, mode, expected_prefix):
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input(s, mode)
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert result.startswith(expected_prefix), (
+            f"_parse_date_input({s!r}, {mode!r}) = {result!r}, "
+            f"expected prefix {expected_prefix!r}"
+        )
+
+    @pytest.mark.parametrize("s,expected_lo_prefix,expected_hi_prefix", [
+        # --when semantics: both bounds must be correct for EDTF range expressions
+        ("202X",       "2020-01-01", "2029-12-31"),   # whole decade
+        ("2026-01-1X", "2026-01-10", "2026-01-19"),   # 10 specific days
+        ("2026-01",    "2026-01-01", "2026-01-31"),   # whole month
+        ("2026",       "2026-01-01", "2026-12-31"),   # whole year
+    ])
+    def test_when_semantics_both_bounds(self, s, expected_lo_prefix, expected_hi_prefix):
+        """lower_strict and upper_strict give correct bounds for --when usage."""
+        from ai_session_tools.engine import _parse_date_input
+        lo = _parse_date_input(s, "start")
+        hi = _parse_date_input(s, "end")
+        assert lo.startswith(expected_lo_prefix), (
+            f"lower({s!r}) = {lo!r}, expected prefix {expected_lo_prefix!r}"
+        )
+        assert hi.startswith(expected_hi_prefix), (
+            f"upper({s!r}) = {hi!r}, expected prefix {expected_hi_prefix!r}"
+        )
+
+    def test_duration_7d(self):
+        import datetime
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input("7d", "start")
+        dt = datetime.datetime.fromisoformat(result)
+        age = (datetime.datetime.now(datetime.timezone.utc)
+               - dt.replace(tzinfo=datetime.timezone.utc)).total_seconds()
+        assert 6.9 * 86400 < age < 7.1 * 86400, f"7d age={age:.0f}s, expected ~604800s"
+
+    def test_duration_2w(self):
+        import datetime
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input("2w", "start")
+        dt = datetime.datetime.fromisoformat(result)
+        age = (datetime.datetime.now(datetime.timezone.utc)
+               - dt.replace(tzinfo=datetime.timezone.utc)).total_seconds()
+        assert 13.9 * 86400 < age < 14.1 * 86400, f"2w age={age:.0f}s, expected ~1209600s"
+
+    def test_duration_30min(self):
+        import datetime
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input("30min", "start")
+        dt = datetime.datetime.fromisoformat(result)
+        age = (datetime.datetime.now(datetime.timezone.utc)
+               - dt.replace(tzinfo=datetime.timezone.utc)).total_seconds()
+        assert 29.9 * 60 < age < 30.1 * 60, f"30min age={age:.0f}s, expected ~1800s"
+
+    def test_duration_24h(self):
+        import datetime
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input("24h", "start")
+        dt = datetime.datetime.fromisoformat(result)
+        age = (datetime.datetime.now(datetime.timezone.utc)
+               - dt.replace(tzinfo=datetime.timezone.utc)).total_seconds()
+        assert 23.9 * 3600 < age < 24.1 * 3600, f"24h age={age:.0f}s, expected ~86400s"
+
+    def test_interval_returns_tuple(self):
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input("2026-01/2026-03", "start")
+        assert isinstance(result, tuple) and len(result) == 2, (
+            f"Expected 2-tuple, got {type(result)}: {result!r}"
+        )
+        assert result[0].startswith("2026-01-01"), f"interval start: {result[0]!r}"
+        assert result[1].startswith("2026-03-31"), f"interval end: {result[1]!r}"
+
+    def test_invalid_raises_value_error(self):
+        from ai_session_tools.engine import _parse_date_input
+        with pytest.raises(ValueError, match="(?i)unrecogni"):
+            _parse_date_input("not-a-date", "start")
+
+    def test_invalid_error_mentions_aise_dates(self):
+        """Error message should hint at 'aise dates' for format reference."""
+        from ai_session_tools.engine import _parse_date_input
+        with pytest.raises(ValueError) as exc_info:
+            _parse_date_input("not-a-date", "start")
+        assert "aise dates" in str(exc_info.value)
+
+    # ── CLI integration tests ────────────────────────────────────────────────
+
+    def test_since_flag_in_list_help(self):
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--since" in result.output, "Expected --since in list --help"
+
+    def test_until_flag_in_list_help(self):
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--until" in result.output, "Expected --until in list --help"
+
+    def test_when_flag_in_list_help(self):
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--when" in result.output, "Expected --when in list --help"
+
+    def test_after_not_in_list_help(self):
+        """--after is a hidden alias and must NOT appear in --help output."""
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--after" not in result.output, "--after should be hidden from --help"
+
+    def test_before_not_in_list_help(self):
+        """--before is a hidden alias and must NOT appear in --help output."""
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--before" not in result.output, "--before should be hidden from --help"
+
+    def test_after_hidden_alias_still_accepted(self):
+        """--after still accepted for backward compat even though hidden from help."""
+        result = runner.invoke(app, ["list", "--after", "2020-01-01", "--format", "json"])
+        assert result.exit_code == 0, f"--after should be accepted: {result.output}"
+
+    def test_before_hidden_alias_still_accepted(self):
+        result = runner.invoke(app, ["list", "--before", "2030-01-01", "--format", "json"])
+        assert result.exit_code == 0, f"--before should be accepted: {result.output}"
+
+    def test_when_decade_202X_accepted(self):
+        result = runner.invoke(app, ["list", "--when", "202X", "--format", "json"])
+        assert result.exit_code == 0, (
+            f"--when 202X should succeed: exit={result.exit_code}\n{result.output}"
+        )
+
+    def test_since_duration_7d_accepted(self):
+        result = runner.invoke(app, ["list", "--since", "7d", "--format", "json"])
+        assert result.exit_code == 0, f"--since 7d should succeed: {result.output}"
+
+    def test_since_interval_accepted(self):
+        result = runner.invoke(app, ["list", "--since", "2026-01/2026-03", "--format", "json"])
+        assert result.exit_code == 0, (
+            f"--since interval should succeed: {result.output}"
+        )
+
+    def test_since_invalid_exits_nonzero(self):
+        result = runner.invoke(app, ["list", "--since", "not-a-date"])
+        assert result.exit_code != 0, "Invalid --since should exit nonzero"
+
+    def test_when_invalid_exits_nonzero(self):
+        result = runner.invoke(app, ["list", "--when", "not-a-date"])
+        assert result.exit_code != 0, "Invalid --when should exit nonzero"
+
+    def test_aise_dates_subcommand_exists(self):
+        result = runner.invoke(app, ["dates"])
+        assert result.exit_code == 0, f"aise dates failed: {result.output}"
+
+    def test_aise_dates_shows_spec_link(self):
+        result = runner.invoke(app, ["dates"])
+        assert "loc.gov/standards/datetime" in result.output, (
+            "aise dates should show the EDTF spec link"
+        )
+
+    def test_aise_dates_mentions_202X(self):
+        result = runner.invoke(app, ["dates"])
+        assert "202X" in result.output, "aise dates should document 202X patterns"
+
+    def test_aise_dates_mentions_when(self):
+        result = runner.invoke(app, ["dates"])
+        assert "--when" in result.output, "aise dates should explain --when"
+
+    def test_since_flag_in_messages_search_help(self):
+        result = runner.invoke(app, ["messages", "search", "--help"])
+        assert "--since" in result.output
+
+    def test_when_flag_in_messages_search_help(self):
+        result = runner.invoke(app, ["messages", "search", "--help"])
+        assert "--when" in result.output
+
+    def test_since_flag_in_messages_corrections_help(self):
+        result = runner.invoke(app, ["messages", "corrections", "--help"])
+        assert "--since" in result.output
+
+    def test_when_flag_in_messages_corrections_help(self):
+        result = runner.invoke(app, ["messages", "corrections", "--help"])
+        assert "--when" in result.output
+
+    def test_since_flag_in_messages_timeline_help(self):
+        result = runner.invoke(app, ["messages", "timeline", "--help"])
+        assert "--since" in result.output
+
+    def test_since_flag_in_stats_help(self):
+        result = runner.invoke(app, ["stats", "--help"])
+        assert "--since" in result.output

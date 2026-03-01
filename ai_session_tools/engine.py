@@ -37,6 +37,125 @@ from .models import (
 )
 from ai_session_tools.config import get_config_path, load_config, write_config
 
+
+def _parse_date_input(s: str, mode: str = "start") -> "str | tuple[str, str]":
+    """Normalize flexible date/EDTF input to ISO 8601 for lexicographic comparison.
+
+    mode="start" → lower_strict() bound (earliest date in period)
+    mode="end"   → upper_strict() bound (latest date in period)
+
+    Accepted formats:
+      Any valid EDTF (Level 0-2):
+        YYYY-MM-DDTHH:MM:SS    full ISO 8601 datetime
+        YYYY-MM-DD             date-only
+        YYYY-MM, YYYY          month/year precision (expanded to period bounds)
+        202X, 19XX             EDTF Level 1 unspecified digits (decade/century)
+        2026-01-1X             EDTF Level 1 unspecified day digit
+        2026-01/2026-03        EDTF interval — returns (start_iso, end_iso) 2-tuple
+      Duration shorthands (not EDTF, handled before library):
+        7d, 2w, 1m, 24h, 30min   time ago from now
+      NLP via python-dateutil (transitive dep of edtf):
+        "yesterday", "3 days ago", "last Monday"
+
+    Returns str for single date bound, tuple[str, str] for EDTF interval (A/B).
+    Raises ValueError with user-friendly message on invalid/unrecognised input.
+    """
+    import re as _re
+    import time as _time
+
+    s = s.strip()
+
+    # ── Duration shorthand (7d, 2w, 1m, 24h, 30min) ─────────────────────────
+    # Handled before edtf: "1m" is not valid EDTF and would fail parsing.
+    _dur = _re.fullmatch(r"(\d+)(min|[dwmh])", s, _re.IGNORECASE)
+    if _dur:
+        n, unit = int(_dur.group(1)), _dur.group(2).lower()
+        _deltas = {
+            "d":   datetime.timedelta(days=n),
+            "w":   datetime.timedelta(weeks=n),
+            "h":   datetime.timedelta(hours=n),
+            "m":   datetime.timedelta(days=n * 30),   # 1m ≈ 30 days (approximate)
+            "min": datetime.timedelta(minutes=n),
+        }
+        dt = datetime.datetime.now(datetime.timezone.utc) - _deltas[unit]
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    # ── Normalize case: EDTF library requires uppercase X for unspecified digits ──
+    # Uppercase only date-like strings (digits, X, x, T, t, hyphens, colons, slash).
+    # NLP strings like "yesterday" contain other letters and are left unchanged.
+    if _re.fullmatch(r"[\dXxTt:/\-]+", s):
+        s = s.upper()
+
+    # ── Day-level unspecified digits: edtf library bug workaround ────────────
+    # parse_edtf("2026-01-1X") succeeds, but lower_strict()/upper_strict() crash
+    # with ValueError because they try int("1X"). We handle these manually.
+    _day_x = _re.fullmatch(r"(\d{4})-(\d{2})-([0-3X])([0-9X])", s)
+    if _day_x and ("X" in _day_x.group(3) or "X" in _day_x.group(4)):
+        import calendar as _cal
+        year_s, month_s, tens_c, units_c = _day_x.groups()
+        year, month = int(year_s), int(month_s)
+        max_day = _cal.monthrange(year, month)[1]
+        if tens_c == "X" and units_c == "X":
+            # XX = all days in the month
+            lo_day, hi_day = 1, max_day
+        elif units_c == "X":
+            # e.g. "1X" = days 10–19; "2X" = 20–29; "3X" = 30–31
+            tens = int(tens_c)
+            lo_day = tens * 10
+            hi_day = min(tens * 10 + 9, max_day)
+        else:
+            # e.g. "X5" = days 5, 15, 25 (tens unspecified, units fixed)
+            # Use the full span that digit could appear in
+            units = int(units_c)
+            lo_day = units if units >= 1 else 10   # day 0 is invalid; X0 → 10
+            hi_day = min(units + 20, max_day)
+        return (
+            f"{year_s}-{month_s}-{lo_day:02d}T00:00:00"
+            if mode == "start"
+            else f"{year_s}-{month_s}-{hi_day:02d}T23:59:59"
+        )
+
+    # ── EDTF parsing ─────────────────────────────────────────────────────────
+    try:
+        from edtf import parse_edtf  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError(
+            "Package 'edtf' is required. Run: pip install aise"
+        ) from exc
+
+    def _st(st: "_time.struct_time") -> str:
+        """Convert struct_time to ISO 8601 string for lexicographic comparison."""
+        return _time.strftime("%Y-%m-%dT%H:%M:%S", st)
+
+    try:
+        parsed = parse_edtf(s)
+        lo = _st(parsed.lower_strict())
+        hi = _st(parsed.upper_strict())
+        # EDTF interval syntax contains "/": return 2-tuple so caller splits after+before
+        if "/" in s:
+            return (lo, hi)
+        return lo if mode == "start" else hi
+
+    except Exception as edtf_exc:
+        # Fallback: python-dateutil NLP ("yesterday", "3 days ago")
+        # — installed as transitive dep of edtf, so always available
+        try:
+            from dateutil import parser as _du  # noqa: PLC0415
+            dt = _du.parse(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%S")
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        raise ValueError(
+            f"Unrecognised date/time: {s!r}. Run 'aise dates' for full format reference.\n"
+            "Quick formats: 2026-01-15, 2026-01, 2026, 202X, 2026-01-1X, 7d, 2w, 1m, 24h"
+        ) from edtf_exc
+
+
 #: Default correction patterns: (category, [regex_keywords...])
 #: Uses \b word boundaries (matching claude_session_tools.py:103-127).
 DEFAULT_CORRECTION_PATTERNS: List[tuple] = [
