@@ -591,12 +591,25 @@ def _project_display(encoded_dir: str) -> str:
     return (decoded[-30:] if len(decoded) > 30 else decoded)
 
 
+def _session_path_display(d: dict) -> str:
+    """Best available working path for a session row.
+
+    Priority: cwd (actual filesystem path) > project_display > project_dir.
+    cwd is the real path Claude was running in — most useful for navigation.
+    AI Studio/Gemini sessions typically have empty cwd; fall back to decoded name.
+    """
+    cwd = d.get("cwd", "")
+    if cwd:
+        return cwd
+    return _project_display(d.get("project_display") or d.get("project_dir", ""))
+
+
 _LIST_SPEC = TableSpec(
     title_template="Sessions ({n} found)",
     columns=[
         ColumnSpec("Session", style="cyan", no_wrap=True, min_width=36),   # full UUID (36 chars)
         ColumnSpec("Provider", style="magenta", no_wrap=True),             # source provider
-        ColumnSpec("Project", style="blue"),
+        ColumnSpec("Path", style="blue"),                                   # cwd or decoded project
         ColumnSpec("Branch", style="green"),
         ColumnSpec("Date", style="dim", no_wrap=True, min_width=16),       # "YYYY-MM-DD HH:MM"
         ColumnSpec("Messages", justify="right"),
@@ -605,7 +618,7 @@ _LIST_SPEC = TableSpec(
     row_fn=lambda d: [
         d["session_id"],                                                    # full 36-char UUID
         d.get("provider", "claude"),                                        # source provider
-        _project_display(d.get("project_display") or d.get("project_dir", "")),
+        _session_path_display(d),                                           # cwd > project_display
         d.get("git_branch", ""),
         _format_ts(d.get("timestamp_first", "")),                          # "YYYY-MM-DD HH:MM"
         str(d.get("message_count", 0)),
