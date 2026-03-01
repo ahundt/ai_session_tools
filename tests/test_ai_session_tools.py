@@ -7404,9 +7404,12 @@ class TestBug6GeminiTimestamp:
 
     def test_gemini_source_timestamp_via_source(self, tmp_path):
         """GeminiCliSource must produce valid ISO timestamps (not 2026:02:23...)."""
+        import hashlib
         from ai_session_tools.sources.gemini_cli import GeminiCliSource
-        # Create fake Gemini session dir structure
-        hash_dir = tmp_path / "abc123"
+        # Create fake Gemini session dir structure using real SHA-256 of project path
+        project_path = str(tmp_path / "myproject")
+        project_hash = hashlib.sha256(project_path.encode()).hexdigest()
+        hash_dir = tmp_path / "tmp" / project_hash
         chats_dir = hash_dir / "chats"
         chats_dir.mkdir(parents=True)
         session_data = {
@@ -7415,7 +7418,16 @@ class TestBug6GeminiTimestamp:
         session_file = chats_dir / "session-2026-02-23T04-07-bd7e3697.json"
         session_file.write_text(json.dumps(session_data))
 
-        source = GeminiCliSource(tmp_path)
+        # Write trusted folders so hash-to-path lookup can resolve the hash
+        import json as _json
+        gemini_dir = tmp_path
+        (gemini_dir / "trustedFolders.json").write_text(
+            _json.dumps({project_path: "TRUST_FOLDER"})
+        )
+
+        source = GeminiCliSource(tmp_path / "tmp")
+        # Patch gemini_tmp_dir's parent to be tmp_path so lookup finds our files
+        source.gemini_tmp_dir = tmp_path / "tmp"
         sessions = source.list_sessions()
         assert len(sessions) == 1
         ts = sessions[0].timestamp_first
@@ -7424,6 +7436,63 @@ class TestBug6GeminiTimestamp:
         # Must start with "2026-" if it has content
         if ts:
             assert ts.startswith("2026-"), f"Expected ISO date, got: {ts!r}"
+
+    def test_gemini_hash_to_path_lookup(self, tmp_path):
+        """GeminiCliSource must resolve projectHash to real path via SHA-256 reverse map."""
+        import hashlib, json as _json
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+
+        # Create a real project path and compute its hash
+        project_path = str(tmp_path / "myproject")
+        project_hash = hashlib.sha256(project_path.encode()).hexdigest()
+
+        # Set up gemini dir structure
+        gemini_dir = tmp_path / "gemini"
+        gemini_tmp = gemini_dir / "tmp"
+        hash_dir = gemini_tmp / project_hash
+        chats_dir = hash_dir / "chats"
+        chats_dir.mkdir(parents=True)
+
+        session_data = {"messages": [{"type": "user", "content": "test"}]}
+        (chats_dir / "session-2026-02-23T04-07-abc12345.json").write_text(
+            _json.dumps(session_data)
+        )
+
+        # Write trustedFolders.json so hash resolves to project_path
+        (gemini_dir / "trustedFolders.json").write_text(
+            _json.dumps({project_path: "TRUST_FOLDER"})
+        )
+
+        source = GeminiCliSource(gemini_tmp)
+        sessions = source.list_sessions()
+        assert len(sessions) == 1
+        # cwd must be the resolved real path, not the hash or empty string
+        assert sessions[0].cwd == project_path, (
+            f"Expected cwd={project_path!r}, got {sessions[0].cwd!r}"
+        )
+
+    def test_gemini_hash_unknown_cwd_is_empty(self, tmp_path):
+        """When projectHash can't be resolved, cwd must be '' (not the raw hash)."""
+        import json as _json
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+
+        # Hash dir with no corresponding path in trustedFolders/projects
+        hash_dir = tmp_path / "tmp" / ("a" * 64)
+        chats_dir = hash_dir / "chats"
+        chats_dir.mkdir(parents=True)
+        session_data = {"messages": [{"type": "user", "content": "hello"}]}
+        (chats_dir / "session-2026-02-23T04-07-bd7e3697.json").write_text(
+            _json.dumps(session_data)
+        )
+
+        # No trustedFolders.json or projects.json → hash can't be resolved
+        source = GeminiCliSource(tmp_path / "tmp")
+        sessions = source.list_sessions()
+        assert len(sessions) == 1
+        # cwd must be empty string, not the raw 64-char hex hash
+        assert sessions[0].cwd == "", (
+            f"Expected empty cwd, got {sessions[0].cwd!r}"
+        )
 
 
 class TestBug7HelpTextDateFormat:

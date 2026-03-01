@@ -10,6 +10,7 @@ Licensed under the Apache License, Version 2.0
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -38,6 +39,8 @@ class GeminiCliSource:
             gc = cfg.get("source_dirs", {}).get("gemini_cli")
             gemini_tmp_dir = Path(gc) if gc else Path.home() / ".gemini" / "tmp"
         self.gemini_tmp_dir = Path(gemini_tmp_dir)
+        # Lazy-initialised reverse map: projectHash → real project path
+        self._hash_to_path: dict[str, str] | None = None
 
     # ── Storage protocol ────────────────────────────────────────────────────
 
@@ -121,6 +124,38 @@ class GeminiCliSource:
 
     # ── Private helpers ──────────────────────────────────────────────────────
 
+    def _get_hash_to_path(self) -> dict[str, str]:
+        """Return (and cache) a mapping of projectHash → real project path.
+
+        Reads ~/.gemini/trustedFolders.json and ~/.gemini/projects.json to
+        collect all known project paths, then computes SHA-256 of each (the
+        same algorithm used by Gemini CLI's Storage.getFilePathHash()).
+        Unresolvable hashes remain absent from the map — callers fall back to "".
+        """
+        if self._hash_to_path is not None:
+            return self._hash_to_path
+
+        all_paths: set[str] = set()
+        gemini_dir = self.gemini_tmp_dir.parent  # ~/.gemini
+
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            tf = gemini_dir / "trustedFolders.json"
+            if tf.exists():
+                for p in json.loads(tf.read_text(encoding="utf-8")).keys():
+                    all_paths.add(p)
+
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            pf = gemini_dir / "projects.json"
+            if pf.exists():
+                for p in json.loads(pf.read_text(encoding="utf-8")).get("projects", {}).keys():
+                    all_paths.add(p)
+
+        self._hash_to_path = {
+            hashlib.sha256(p.encode()).hexdigest(): p
+            for p in all_paths
+        }
+        return self._hash_to_path
+
     def _iter_chat_files(self) -> Generator[Path, None, None]:
         """Yield all Gemini CLI chat JSON files."""
         if not self.gemini_tmp_dir.exists():
@@ -149,6 +184,9 @@ class GeminiCliSource:
         if m:
             timestamp = f"{m.group(1)}T{m.group(2)}:{m.group(3)}"
 
+        # Resolve hash → real project path (best-effort; "" if unknown)
+        cwd = self._get_hash_to_path().get(project_hash, "")
+
         # Read just enough to get session metadata
         with contextlib.suppress(OSError, json.JSONDecodeError):
             raw = path.read_text(encoding="utf-8", errors="ignore")
@@ -158,7 +196,7 @@ class GeminiCliSource:
             return SessionInfo(
                 session_id=session_id,
                 project_dir=str(path.parent),
-                cwd=project_hash,
+                cwd=cwd,
                 git_branch="",
                 timestamp_first=data.get("startTime", timestamp),
                 timestamp_last=data.get("lastUpdated", ""),
@@ -170,7 +208,7 @@ class GeminiCliSource:
         return SessionInfo(
             session_id=session_id,
             project_dir=str(path.parent),
-            cwd=project_hash,
+            cwd=cwd,
             git_branch="",
             timestamp_first=timestamp,
             timestamp_last="",
