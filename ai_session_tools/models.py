@@ -362,6 +362,7 @@ class SessionInfo:
     timestamp_last: str    # ISO 8601, latest message timestamp
     message_count: int     # count of lines where type == "user" or "assistant"
     has_compact_summary: bool  # True if any line has isCompactSummary == true
+    provider: str = ""     # "claude" | "aistudio" | "gemini_cli" | ""
 
     @property
     def project_display(self) -> str:
@@ -391,6 +392,7 @@ class SessionInfo:
             "timestamp_last": self.timestamp_last,
             "message_count": self.message_count,
             "has_compact_summary": self.has_compact_summary,
+            "provider": self.provider,
         }
 
 

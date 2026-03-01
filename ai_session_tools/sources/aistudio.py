@@ -179,6 +179,7 @@ class AiStudioSource:
             timestamp_last=ts,
             message_count=message_count,
             has_compact_summary=False,
+            provider="aistudio",
         )
 
     def _parse_messages(self, path: Path, raw: str, session_id: str) -> list[SessionMessage]:

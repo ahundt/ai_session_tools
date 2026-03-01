@@ -145,9 +145,9 @@ class GeminiCliSource:
         session_id = path.stem  # filename without .json extension
         project_hash = path.parent.parent.name
         timestamp = ""
-        m = re.search(r"session-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2})", path.name)
+        m = re.search(r"session-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})", path.name)
         if m:
-            timestamp = m.group(1).replace("T", "T").replace("-", ":", 2)
+            timestamp = f"{m.group(1)}T{m.group(2)}:{m.group(3)}"
 
         # Read just enough to get session metadata
         with contextlib.suppress(OSError, json.JSONDecodeError):
@@ -164,6 +164,7 @@ class GeminiCliSource:
                 timestamp_last=data.get("lastUpdated", ""),
                 message_count=user_count,
                 has_compact_summary=False,
+                provider="gemini_cli",
             )
 
         return SessionInfo(
@@ -175,6 +176,7 @@ class GeminiCliSource:
             timestamp_last="",
             message_count=0,
             has_compact_summary=False,
+            provider="gemini_cli",
         )
 
     def _parse_messages(self, data: dict, session_id: str) -> list[SessionMessage]:

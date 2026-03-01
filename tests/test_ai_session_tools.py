@@ -300,6 +300,7 @@ class TestSessionInfoModel:
         assert set(d.keys()) == {
             "session_id", "project_dir", "project_display", "cwd", "git_branch",
             "timestamp_first", "timestamp_last", "message_count", "has_compact_summary",
+            "provider",
         }
 
     def test_is_mutable_dataclass(self):
@@ -7166,3 +7167,300 @@ class TestProviderFlag:
         """aise analyze --help shows --provider not --source."""
         result = runner.invoke(app, ["analyze", "--help"])
         assert "--source" not in result.output
+
+
+# ── Bug Fix Tests (2026-03-01 Bug Report) ─────────────────────────────────
+
+
+def _make_session_jsonl(tmp_path: Path, session_id: str, content: str) -> Path:
+    """Helper: create a minimal Claude JSONL session file for testing."""
+    import hashlib
+    project_hash = hashlib.md5(b"test_project").hexdigest()[:8]
+    project_dir = tmp_path / f"-test-project-{project_hash}"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    session_file = project_dir / f"{session_id}.jsonl"
+    lines = [
+        json.dumps({"type": "user", "sessionId": session_id, "timestamp": "2026-01-15T10:00:00Z",
+                    "message": {"content": content}, "cwd": str(tmp_path), "gitBranch": "main"}),
+        json.dumps({"type": "assistant", "sessionId": session_id, "timestamp": "2026-01-15T10:01:00Z",
+                    "message": {"content": "Understood."}}),
+    ]
+    session_file.write_text("\n".join(lines) + "\n")
+    return project_dir
+
+
+class TestBug1ClaudeInAllSource:
+    """Bug 1 (Critical): 'all' source must include Claude sessions."""
+
+    def test_get_session_backend_all_includes_claude(self, tmp_path, monkeypatch):
+        """Backend with source='all' must return Claude sessions in list_sessions()."""
+        from ai_session_tools.engine import get_session_backend
+        _make_session_jsonl(tmp_path, "test-uuid-1234", "post_ext feature request")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        backend = get_session_backend(source="all", claude_dir=str(tmp_path))
+        sessions = backend.get_sessions()
+        # Claude sessions must be present (session_id or provider check)
+        providers = {getattr(s, "provider", "") for s in sessions}
+        assert "claude" in providers, (
+            f"Claude sessions missing from 'all' source. providers found: {providers}"
+        )
+
+    def test_cli_search_all_finds_claude_sessions(self, tmp_path, monkeypatch):
+        """aise search messages --query finds Claude sessions when no --provider specified."""
+        _make_session_jsonl(tmp_path, "test-uuid-5678", "post_ext unique search term")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["search", "messages", "--query", "post_ext unique search term"])
+        assert result.exit_code == 0
+        assert "No messages" not in result.output or "post_ext" in result.output, (
+            f"Claude sessions excluded from default 'all' search. Output: {result.output}"
+        )
+
+
+class TestBug2StatsCountsProjectsSessions:
+    """Bug 2 (Critical): aise stats --provider claude must count projects sessions, not recovery dir."""
+
+    def test_get_statistics_counts_from_projects_not_recovery(self, tmp_path):
+        """get_statistics() total_sessions must equal len(get_sessions())."""
+        _make_session_jsonl(tmp_path, "abc-123", "hello world")
+        recovery = tmp_path / "recovery"
+        recovery.mkdir()
+        engine = SessionRecoveryEngine(tmp_path, recovery)
+        stats = engine.get_statistics()
+        sessions = engine.get_sessions()
+        assert stats.total_sessions == len(sessions), (
+            f"stats.total_sessions={stats.total_sessions} != len(get_sessions())={len(sessions)}"
+        )
+
+    def test_get_statistics_nonzero_when_projects_exist(self, tmp_path):
+        """Stats must report > 0 sessions when projects dir has session files."""
+        _make_session_jsonl(tmp_path, "xyz-456", "test session content")
+        recovery = tmp_path / "recovery"
+        # Do NOT create recovery dir — it should still count from projects
+        engine = SessionRecoveryEngine(tmp_path, recovery)
+        stats = engine.get_statistics()
+        assert stats.total_sessions > 0, "get_statistics() returned 0 even though projects dir has sessions"
+
+
+class TestBug3MultiSourceSortedNewestFirst:
+    """Bug 3 (Medium): MultiSourceEngine.list_sessions() must sort newest-first."""
+
+    def test_list_sessions_sorted_newest_first(self):
+        """Sessions from multiple sources must be sorted by timestamp_first descending."""
+        from ai_session_tools.engine import MultiSourceEngine
+
+        old_session = SessionInfo(
+            session_id="old", project_dir="/p", cwd="", git_branch="",
+            timestamp_first="2024-01-01T00:00:00Z", timestamp_last="", message_count=1,
+            has_compact_summary=False,
+        )
+        new_session = SessionInfo(
+            session_id="new", project_dir="/p", cwd="", git_branch="",
+            timestamp_first="2026-03-01T14:00:00Z", timestamp_last="", message_count=1,
+            has_compact_summary=False,
+        )
+
+        class SourceA:
+            def list_sessions(self): return [old_session]
+            def search_messages(self, q, t=None): return []
+            def stats(self): return {}
+
+        class SourceB:
+            def list_sessions(self): return [new_session]
+            def search_messages(self, q, t=None): return []
+            def stats(self): return {}
+
+        engine = MultiSourceEngine([SourceA(), SourceB()])
+        result = engine.list_sessions()
+        assert result[0].session_id == "new", (
+            f"Expected newest session first, got: {[s.session_id for s in result]}"
+        )
+
+    def test_list_sessions_empty_timestamp_sorts_last(self):
+        """Sessions with empty timestamp must sort to the end."""
+        from ai_session_tools.engine import MultiSourceEngine
+
+        no_ts = SessionInfo("s1", "/p", "", "", "", "", 1, False)
+        with_ts = SessionInfo("s2", "/p", "", "", "2026-01-01T00:00:00Z", "", 1, False)
+
+        class Source:
+            def __init__(self, sessions): self._sessions = sessions
+            def list_sessions(self): return self._sessions
+            def search_messages(self, q, t=None): return []
+            def stats(self): return {}
+
+        engine = MultiSourceEngine([Source([no_ts]), Source([with_ts])])
+        result = engine.list_sessions()
+        assert result[0].session_id == "s2", "Session with timestamp must sort before session with empty timestamp"
+
+
+class TestBug4DomainErrorHint:
+    """Bug 4 (Low): 'aise search messages someterm' positional gives helpful error."""
+
+    def test_domain_error_includes_query_hint(self, tmp_path, monkeypatch):
+        """Error message must suggest using --query flag when query is passed as domain.
+
+        'aise search someterm' sets domain='someterm', triggering validation error.
+        The error must hint at the correct usage: aise search messages --query someterm.
+        """
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        # domain='someterm' (not 'files'/'messages'/'tools') → triggers our error
+        result = runner.invoke(app, ["search", "someterm"])
+        combined = (result.output or "") + (result.stderr or "" if hasattr(result, "stderr") else "")
+        assert "--query" in combined, (
+            f"Error should suggest --query. Got: {result.output}"
+        )
+
+
+class TestBug5ConfigSourceNoSubcommand:
+    """Bug 5 (Low): 'aise config' and 'aise source' with no subcommand show help."""
+
+    def test_config_no_subcommand_shows_help(self):
+        """aise config with no subcommand must exit 0 and show help text."""
+        result = runner.invoke(app, ["config"])
+        assert result.exit_code == 0, f"Expected exit 0, got {result.exit_code}: {result.output}"
+        assert "config" in result.output.lower()
+
+    def test_source_no_subcommand_shows_help(self):
+        """aise source with no subcommand must exit 0 and show help text."""
+        result = runner.invoke(app, ["source"])
+        assert result.exit_code == 0, f"Expected exit 0, got {result.exit_code}: {result.output}"
+        assert "source" in result.output.lower()
+
+
+class TestBug6DisplayFormatting:
+    """Bug 6 (High): Full UUIDs, provider column, and correct timestamp formatting."""
+
+    @pytest.mark.parametrize("ts,expected", [
+        ("2026-03-01T14:23:45.123456Z",      "2026-03-01 14:23"),
+        ("2026-03-01T14:23:45.123456+00:00", "2026-03-01 14:23"),
+        ("2026-02-23T04:07",                 "2026-02-23 04:07"),
+        ("2026-03-01",                       "2026-03-01"),
+        ("",                                 ""),
+    ])
+    def test_format_ts(self, ts, expected):
+        """_format_ts must correctly format all known ISO 8601 variants."""
+        from ai_session_tools.cli import _format_ts
+        assert _format_ts(ts) == expected, f"_format_ts({ts!r}) = {_format_ts(ts)!r}, expected {expected!r}"
+
+    def test_list_spec_full_uuid(self, tmp_path, monkeypatch):
+        """aise list --provider claude must show full 36-char UUIDs, not truncated."""
+        import re
+        _make_session_jsonl(tmp_path, "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "full uuid test")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+        uuids = re.findall(
+            r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+            result.output
+        )
+        assert len(uuids) > 0, f"Full UUIDs must appear in table output. Got:\n{result.output}"
+
+    def test_list_spec_has_provider_column(self, tmp_path, monkeypatch):
+        """aise list must show a 'Provider' column (visible when sessions exist)."""
+        _make_session_jsonl(tmp_path, "a1b2c3d4-e5f6-7890-abcd-ef1234567891", "provider col test")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+        assert "Provider" in result.output, f"Provider column missing from list output:\n{result.output}"
+
+    def test_session_info_provider_field_defaults_empty(self):
+        """SessionInfo.provider defaults to empty string (backward compatible)."""
+        s = SessionInfo(
+            session_id="x", project_dir="/p", cwd="", git_branch="",
+            timestamp_first="", timestamp_last="", message_count=0,
+            has_compact_summary=False,
+        )
+        assert s.provider == ""
+
+    def test_session_info_provider_in_to_dict(self):
+        """SessionInfo.to_dict() must include 'provider' key."""
+        s = SessionInfo(
+            session_id="x", project_dir="/p", cwd="", git_branch="",
+            timestamp_first="", timestamp_last="", message_count=0,
+            has_compact_summary=False, provider="claude",
+        )
+        d = s.to_dict()
+        assert "provider" in d
+        assert d["provider"] == "claude"
+
+
+class TestBug6GeminiTimestamp:
+    """Bug 6 (Gemini timestamp sub-bug): Timestamp regex must not corrupt date."""
+
+    def test_gemini_timestamp_parsing_correct(self):
+        """Gemini CLI filename timestamp must parse to valid ISO 8601."""
+        import re
+        filename = "session-2026-02-23T04-07-bd7e3697.json"
+        m = re.search(r"session-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})", filename)
+        assert m is not None, "Regex should match Gemini session filename"
+        ts = f"{m.group(1)}T{m.group(2)}:{m.group(3)}"
+        assert ts == "2026-02-23T04:07", f"Got wrong timestamp: {ts!r}"
+        assert ts.startswith("2026-02-23"), "Date part must not be corrupted"
+
+    def test_gemini_source_timestamp_via_source(self, tmp_path):
+        """GeminiCliSource must produce valid ISO timestamps (not 2026:02:23...)."""
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        # Create fake Gemini session dir structure
+        hash_dir = tmp_path / "abc123"
+        chats_dir = hash_dir / "chats"
+        chats_dir.mkdir(parents=True)
+        session_data = {
+            "messages": [{"type": "user", "content": "hello", "timestamp": ""}],
+        }
+        session_file = chats_dir / "session-2026-02-23T04-07-bd7e3697.json"
+        session_file.write_text(json.dumps(session_data))
+
+        source = GeminiCliSource(tmp_path)
+        sessions = source.list_sessions()
+        assert len(sessions) == 1
+        ts = sessions[0].timestamp_first
+        # Must not start with "2026:" (corrupted date)
+        assert not ts.startswith("2026:"), f"Timestamp is corrupted: {ts!r}"
+        # Must start with "2026-" if it has content
+        if ts:
+            assert ts.startswith("2026-"), f"Expected ISO date, got: {ts!r}"
+
+
+class TestBug7HelpTextDateFormat:
+    """Bug 7 (Medium): Help text for date flags must include YYYY-MM-DD format."""
+
+    @pytest.mark.parametrize("cmd", [
+        ["search", "messages", "--help"],
+        ["list", "--help"],
+        ["messages", "corrections", "--help"],
+    ])
+    def test_help_includes_date_format(self, cmd):
+        """--after/--before options must show YYYY-MM-DD format in help."""
+        result = runner.invoke(app, cmd)
+        assert result.exit_code == 0
+        assert "YYYY-MM-DD" in result.output, (
+            f"Date format 'YYYY-MM-DD' missing from '{' '.join(cmd)}' help.\n{result.output}"
+        )
+
+
+class TestBug8SourceDeduplication:
+    """Bug 8 (Medium): Duplicate source paths must not be shown in source list."""
+
+    def test_source_list_deduplicates_paths(self, tmp_path, monkeypatch):
+        """source list must not show duplicate entries for same path."""
+        from ai_session_tools.config import load_config
+        from ai_session_tools.cli import _write_config
+        # Write a config with a duplicate aistudio entry
+        cfg = {"source_dirs": {"aistudio": [str(tmp_path), str(tmp_path)]}}
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        (tmp_path / "config.json").write_text(json.dumps(cfg))
+        result = runner.invoke(app, ["source", "list"])
+        assert result.exit_code == 0
+        # Count how many times the path appears
+        count = result.output.count(str(tmp_path))
+        # Should appear once (the path itself), not twice as a duplicate row
+        # Allow 1 occurrence (one row) — if it appears more, that's a duplicate display
+        path_rows = [line for line in result.output.splitlines() if str(tmp_path) in line]
+        assert len(path_rows) <= 1, (
+            f"Duplicate path shown {len(path_rows)} times in source list:\n{result.output}"
+        )

@@ -152,9 +152,26 @@ config_app = typer.Typer(
     ),
 )
 
+
+@config_app.callback(invoke_without_command=True)
+def config_callback(ctx: typer.Context) -> None:
+    """View and manage the ai_session_tools config file."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+
+
 source_app = typer.Typer(
     help="Add, remove, or list session source directories.",
 )
+
+
+@source_app.callback(invoke_without_command=True)
+def source_callback(ctx: typer.Context) -> None:
+    """Add, remove, or list session source directories."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
 
 app.add_typer(files_app, name="files", rich_help_panel="Domain Groups")
 app.add_typer(messages_app, name="messages", rich_help_panel="Domain Groups")
@@ -196,12 +213,17 @@ def source_list(fmt: str = typer.Option("table", "--format", "-f", help="Output 
         explicit = explicit_sd.get(src_type, [])
         if isinstance(explicit, str):
             explicit = [explicit]
+        # Deduplicate paths while preserving order
+        seen_paths: set = set()
         for p in paths:
+            if p in seen_paths:
+                continue
+            seen_paths.add(p)
             rows.append({
                 "source": src_type,
                 "type": src_type,
                 "path": p,
-                "configured": "explicit" if p in (explicit if isinstance(explicit, list) else [explicit]) else "auto-discovered",
+                "configured": "explicit" if p in explicit else "auto-discovered",
                 "exists": Path(p).exists(),
             })
 
@@ -398,6 +420,8 @@ class ColumnSpec:
     style: str = ""
     no_wrap: bool = False
     justify: str = "left"
+    overflow: str = "fold"          # Rich overflow mode: fold, crop, ellipsis, ignore
+    min_width: Optional[int] = None  # Minimum column width in chars (prevents Rich collapsing)
 
 
 @dataclass
@@ -448,6 +472,8 @@ def _render_output(
             style=col.style or None,
             no_wrap=col.no_wrap,
             justify=col.justify,
+            overflow=col.overflow,
+            min_width=col.min_width,
         )
     for d in dicts:
         table.add_row(*[str(v) for v in spec.row_fn(d)])
@@ -464,34 +490,55 @@ def _register_alias(sub_app: "typer.Typer", func: _Callable, *names: str) -> Non
 
 # ── Module-level TableSpec constants ─────────────────────────────────────────
 
+def _format_ts(ts: str) -> str:
+    """Format ISO 8601 timestamp for display as 'YYYY-MM-DD HH:MM'. Never raises.
+
+    Handles all known variants (Z suffix, +00:00, bare prefix, empty string)
+    by slicing the first 16 chars then replacing 'T' with a space. Safe on any input.
+
+    Examples:
+        "2026-03-01T14:23:45.123456Z"     -> "2026-03-01 14:23"
+        "2026-03-01T14:23:45.123+00:00"   -> "2026-03-01 14:23"
+        "2026-02-23T04:07"                -> "2026-02-23 04:07"
+        "2026-03-01"                      -> "2026-03-01"   (date-only fallback)
+        ""                                -> ""
+    """
+    if not ts:
+        return ""
+    s = ts[:16]
+    return s.replace("T", " ") if "T" in s else s
+
+
 def _project_display(encoded_dir: str) -> str:
     """Return a short human-readable project name from Claude's encoded dir name.
 
     Delegates to SessionRecoveryEngine.extract_project_name(), then truncates
-    to 20 characters for table display.  The raw ``project_dir`` value is still
+    to 30 characters for table display.  The raw ``project_dir`` value is still
     stored in the to_dict() output so JSON consumers can access it.
     """
     decoded = SessionRecoveryEngine.extract_project_name(encoded_dir)
-    return (decoded[-20:] if len(decoded) > 20 else decoded)
+    return (decoded[-30:] if len(decoded) > 30 else decoded)
 
 
 _LIST_SPEC = TableSpec(
     title_template="Sessions ({n} found)",
     columns=[
-        ColumnSpec("Session", style="cyan", no_wrap=True),
+        ColumnSpec("Session", style="cyan", no_wrap=True, min_width=36),   # full UUID (36 chars)
+        ColumnSpec("Provider", style="magenta", no_wrap=True),             # source provider
         ColumnSpec("Project", style="blue"),
         ColumnSpec("Branch", style="green"),
-        ColumnSpec("Date", style="dim"),
+        ColumnSpec("Date", style="dim", no_wrap=True, min_width=16),       # "YYYY-MM-DD HH:MM"
         ColumnSpec("Messages", justify="right"),
         ColumnSpec("Summary", style="dim"),
     ],
     row_fn=lambda d: [
-        (d["session_id"][:16] + "\u2026") if len(d["session_id"]) > 16 else d["session_id"],
-        _project_display(d.get("project_display") or d["project_dir"]),
-        d["git_branch"],
-        d["timestamp_first"][:10],
-        str(d["message_count"]),
-        "\u2713" if d["has_compact_summary"] else "",
+        d["session_id"],                                                    # full 36-char UUID
+        d.get("provider", "claude"),                                        # source provider
+        _project_display(d.get("project_display") or d.get("project_dir", "")),
+        d.get("git_branch", ""),
+        _format_ts(d.get("timestamp_first", "")),                          # "YYYY-MM-DD HH:MM"
+        str(d.get("message_count", 0)),
+        "\u2713" if d.get("has_compact_summary") else "",
     ],
     summary_template="Found {n} sessions",
 )
@@ -1454,7 +1501,12 @@ def _do_search(  # noqa: C901
 
     # Validate domain (after "tools"→"messages" normalization)
     if domain is not None and domain not in ("files", "messages"):
-        typer.echo(f"Error: domain must be 'files', 'messages', or 'tools', got '{domain}'", err=True)
+        typer.echo(
+            f"Error: domain must be 'files', 'messages', or 'tools', got {domain!r}.\n"
+            f"  Hint: To search messages use:  aise search messages --query {domain!r}\n"
+            f"  Or:                            aise messages search {domain!r}",
+            err=True,
+        )
         raise typer.Exit(1)
 
     # Validate flag/domain conflicts
@@ -1874,8 +1926,8 @@ def messages_corrections(
     ctx: typer.Context,
     provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
-    after: Optional[str] = typer.Option(None, "--after", help="Only corrections after this date."),
-    before: Optional[str] = typer.Option(None, "--before"),
+    after: Optional[str] = typer.Option(None, "--after", help="Only corrections after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
+    before: Optional[str] = typer.Option(None, "--before", help="Only corrections before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
     limit: int = typer.Option(20, "--limit", help="Max corrections to return. Default: 20"),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
     pattern: Optional[List[str]] = typer.Option(
@@ -1920,8 +1972,8 @@ def messages_planning(
     ctx: typer.Context,
     provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
-    after: Optional[str] = typer.Option(None, "--after", help="Only commands after this date."),
-    before: Optional[str] = typer.Option(None, "--before", help="Only commands before this date."),
+    after: Optional[str] = typer.Option(None, "--after", help="Only commands after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
+    before: Optional[str] = typer.Option(None, "--before", help="Only commands before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
     commands: Optional[str] = typer.Option(
         None, "--commands",
@@ -2131,8 +2183,8 @@ def list_sessions(
     ctx: typer.Context,
     provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
-    after: Optional[str] = typer.Option(None, "--after", help="Only sessions after this date (e.g. 2026-01-15)."),
-    before: Optional[str] = typer.Option(None, "--before", help="Only sessions before this date."),
+    after: Optional[str] = typer.Option(None, "--after", help="Only sessions after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
+    before: Optional[str] = typer.Option(None, "--before", help="Only sessions before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
     limit: Optional[int] = typer.Option(None, "--limit", help="Max sessions to return. Default: unlimited."),
     fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
 ) -> None:
@@ -2164,8 +2216,8 @@ def _root_search_cmd(
     exclude_extensions: Optional[str] = typer.Option(None, "--exclude-extensions", "-x", help="[files] Skip these file extensions, comma-separated (e.g. pyc,tmp)"),
     include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="[files] Only search these session UUIDs, comma-separated"),
     exclude_sessions: Optional[str] = typer.Option(None, "--exclude-sessions", help="[files] Skip these session UUIDs, comma-separated"),
-    after: Optional[str] = typer.Option(None, "--after", help="[files/messages] Only results after this date."),
-    before: Optional[str] = typer.Option(None, "--before", help="[files/messages] Only results before this date."),
+    after: Optional[str] = typer.Option(None, "--after", help="[files/messages] Only results after this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-01-15)."),
+    before: Optional[str] = typer.Option(None, "--before", help="[files/messages] Only results before this date. Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (e.g. 2026-12-31)."),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="[messages] Show only 'user' or 'assistant' messages. Default: both"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited for files, 10 for messages"),
     max_chars: int = typer.Option(0, "--max-chars", help="[messages] Truncate each message to this many characters. 0 = full message. Default: 0"),

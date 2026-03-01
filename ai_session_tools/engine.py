@@ -727,6 +727,7 @@ class SessionRecoveryEngine:
                 timestamp_last=ts_last,
                 message_count=message_count,
                 has_compact_summary=has_compact,
+                provider="claude",
             ))
         sessions.sort(key=lambda s: s.timestamp_first, reverse=True)
         return sessions
@@ -1285,46 +1286,48 @@ class SessionRecoveryEngine:
         return results
 
     def get_statistics(self) -> RecoveryStatistics:
-        """Get recovery statistics across all sessions."""
-        session_ids: Set[str] = set()
+        """Get recovery statistics across all sessions.
+
+        total_sessions is counted from projects_dir via _iter_all_jsonl() — the same
+        data source as get_sessions(). The recovery_dir scan (for total_files and
+        total_versions) is kept for backward compatibility but does not gate the
+        session count.
+        """
+        # Count sessions from projects_dir — same as get_sessions()
+        total_sessions = sum(1 for _ in self._iter_all_jsonl())
+
         total_files = 0
         total_versions = 0
         largest_file = None
         largest_edits = 0
 
-        if not self.recovery_dir.exists():
-            return RecoveryStatistics()
+        # Files and versions remain recovery-dir-specific (unchanged logic)
+        if self.recovery_dir.exists():
+            for session_dir in self.recovery_dir.glob("session_*"):
+                if not session_dir.is_dir() or "all_versions" in session_dir.name:
+                    continue
+                for file_path in session_dir.glob("*"):
+                    if file_path.is_file():
+                        total_files += 1
 
-        # Count sessions and files from session_*/ dirs
-        for session_dir in self.recovery_dir.glob("session_*"):
-            if not session_dir.is_dir() or "all_versions" in session_dir.name:
-                continue
+            # Count versions globally (accumulate across all sessions before comparing)
+            file_version_totals: Dict[str, int] = defaultdict(int)
+            for session_dir in self._version_dirs:
+                version_files = list(session_dir.glob("*_v*_line_*.txt"))
+                total_versions += len(version_files)
 
-            session_id = session_dir.name.replace("session_", "")
-            session_ids.add(session_id)
+                for v_file in version_files:
+                    filename = self._extract_filename(v_file.name)
+                    file_version_totals[filename] += 1
 
-            for file_path in session_dir.glob("*"):
-                if file_path.is_file():
-                    total_files += 1
-
-        # Count versions globally (accumulate across all sessions before comparing)
-        file_version_totals: Dict[str, int] = defaultdict(int)
-        for session_dir in self._version_dirs:
-            version_files = list(session_dir.glob("*_v*_line_*.txt"))
-            total_versions += len(version_files)
-
-            for v_file in version_files:
-                filename = self._extract_filename(v_file.name)
-                file_version_totals[filename] += 1
-
-        # Find globally largest file after accumulating all sessions
-        for filename, edits in file_version_totals.items():
-            if edits > largest_edits:
-                largest_edits = edits
-                largest_file = filename
+            # Find globally largest file after accumulating all sessions
+            for filename, edits in file_version_totals.items():
+                if edits > largest_edits:
+                    largest_edits = edits
+                    largest_file = filename
 
         return RecoveryStatistics(
-            total_sessions=len(session_ids),
+            total_sessions=total_sessions,
             total_files=total_files,
             total_versions=total_versions,
             largest_file=largest_file,
@@ -1444,12 +1447,18 @@ class MultiSourceEngine:
         return sorted(results, key=lambda m: m.timestamp or "", reverse=True)
 
     def list_sessions(self) -> list:
-        """List all sessions from all sources."""
+        """List all sessions from all sources, sorted newest-first.
+
+        ISO 8601 strings are lexicographically sortable, so string comparison
+        is correct for all known timestamp formats. Sessions with no timestamp
+        (empty string) sort to the end (oldest).
+        """
         import contextlib
         all_sessions = []
         for source in self._sources:
             with contextlib.suppress(Exception):
                 all_sessions.extend(source.list_sessions())
+        all_sessions.sort(key=lambda s: s.timestamp_first or "", reverse=True)
         return all_sessions
 
     def read_session(self, session_info) -> list:
@@ -1471,6 +1480,30 @@ class MultiSourceEngine:
                 for k, v in source.stats().items():
                     total[k] = total.get(k, 0) + v
         return total
+
+
+class ClaudeSource:
+    """Adapter: wraps SessionRecoveryEngine so Claude participates in MultiSourceEngine.
+
+    Provides the same interface as AiStudioSource/GeminiCliSource so that
+    MultiSourceEngine can aggregate Claude sessions alongside other providers.
+    """
+
+    def __init__(self, engine: "SessionRecoveryEngine") -> None:
+        self._engine = engine
+
+    def search_messages(self, query: str, message_type: str | None = None) -> list:
+        return self._engine.search_messages(query, message_type)
+
+    def list_sessions(self) -> list:
+        return self._engine.get_sessions()
+
+    def read_session(self, session_info) -> list:
+        return self._engine.get_messages(session_info.session_id)
+
+    def stats(self) -> dict:
+        s = self._engine.get_statistics()
+        return {"claude_sessions": s.total_sessions}
 
 
 def get_multi_engine(config: dict | None = None):
@@ -1780,6 +1813,25 @@ def get_session_backend(
             gc = sd.get("gemini_cli")
             if gc:
                 sources.append(GeminiCliSource(Path(gc)))
+
+    # Include Claude as a source when source="all" (it is the default provider).
+    # Claude sessions live in projects_dir, not in source_dirs, so they must be
+    # added explicitly as a ClaudeSource adapter wrapping SessionRecoveryEngine.
+    if effective_source == "all":
+        with contextlib.suppress(Exception):
+            if claude_dir:
+                _base = Path(claude_dir).expanduser()
+            elif _env_d := os.getenv("CLAUDE_CONFIG_DIR"):
+                _base = Path(_env_d).expanduser()
+            else:
+                _base = Path.home() / ".claude"
+            _projects = Path(os.getenv(
+                "AI_SESSION_TOOLS_PROJECTS", str(_base / "projects")
+            )).expanduser()
+            _recovery = Path(os.getenv(
+                "AI_SESSION_TOOLS_RECOVERY", str(_base / "recovery")
+            )).expanduser()
+            sources.insert(0, ClaudeSource(SessionRecoveryEngine(_projects, _recovery)))
 
     if not sources:
         # Nothing configured/discovered — fall back to Claude
