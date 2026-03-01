@@ -7464,3 +7464,149 @@ class TestBug8SourceDeduplication:
         assert len(path_rows) <= 1, (
             f"Duplicate path shown {len(path_rows)} times in source list:\n{result.output}"
         )
+
+
+class TestAiStudioDiscovery:
+    """AI Studio auto-discovery: Google Drive + Downloads paths across platforms."""
+
+    def test_discover_sources_finds_downloads_google_ai_studio(self, tmp_path):
+        """_discover_sources finds 'Google AI Studio' dir under Downloads."""
+        from ai_session_tools.engine import _discover_sources
+        # Simulate ~/Downloads/Google AI Studio/
+        downloads = tmp_path / "Downloads"
+        ai_dir = downloads / "Google AI Studio"
+        ai_dir.mkdir(parents=True)
+        # Monkeypatch home dir by patching _aistudio_candidate_dirs
+        import ai_session_tools.engine as eng_mod
+        original_home = eng_mod.Path.home
+        try:
+            eng_mod.Path.home = staticmethod(lambda: tmp_path)
+            result = _discover_sources({})
+        finally:
+            eng_mod.Path.home = original_home
+        found = result.get("source_dirs", {}).get("aistudio", [])
+        if isinstance(found, str):
+            found = [found]
+        assert str(ai_dir) in found, (
+            f"Expected to discover {ai_dir}, got: {found}"
+        )
+
+    def test_discover_sources_finds_glob_pattern(self, tmp_path):
+        """_discover_sources finds dirs matching '*Google AI Studio*' in Downloads."""
+        from ai_session_tools.engine import _discover_sources
+        downloads = tmp_path / "Downloads"
+        # Variant name with prefix
+        ai_dir = downloads / "My Google AI Studio Sessions"
+        ai_dir.mkdir(parents=True)
+        import ai_session_tools.engine as eng_mod
+        original_home = eng_mod.Path.home
+        try:
+            eng_mod.Path.home = staticmethod(lambda: tmp_path)
+            result = _discover_sources({})
+        finally:
+            eng_mod.Path.home = original_home
+        found = result.get("source_dirs", {}).get("aistudio", [])
+        if isinstance(found, str):
+            found = [found]
+        assert str(ai_dir) in found, (
+            f"Expected to discover {ai_dir} via glob, got: {found}"
+        )
+
+    def test_discover_sources_explicit_config_wins(self, tmp_path):
+        """Explicit aistudio config prevents auto-discovery (explicit wins)."""
+        from ai_session_tools.engine import _discover_sources
+        explicit_path = str(tmp_path / "my_sessions")
+        # Auto-discovery should be skipped because "aistudio" key exists in sd
+        cfg = {"source_dirs": {"aistudio": [explicit_path]}}
+        # Even if Google AI Studio exists in Downloads, it should not be added
+        downloads = tmp_path / "Downloads" / "Google AI Studio"
+        downloads.mkdir(parents=True)
+        import ai_session_tools.engine as eng_mod
+        original_home = eng_mod.Path.home
+        try:
+            eng_mod.Path.home = staticmethod(lambda: tmp_path)
+            result = _discover_sources(cfg)
+        finally:
+            eng_mod.Path.home = original_home
+        found = result.get("source_dirs", {}).get("aistudio", [])
+        if isinstance(found, str):
+            found = [found]
+        # Only explicit path, not auto-discovered
+        assert found == [explicit_path], (
+            f"Expected only explicit config path, got: {found}"
+        )
+
+    def test_discover_sources_empty_list_disables_autodiscovery(self, tmp_path):
+        """Empty list in config disables auto-discovery for that type."""
+        from ai_session_tools.engine import _discover_sources
+        cfg = {"source_dirs": {"aistudio": []}}
+        downloads = tmp_path / "Downloads" / "Google AI Studio"
+        downloads.mkdir(parents=True)
+        import ai_session_tools.engine as eng_mod
+        original_home = eng_mod.Path.home
+        try:
+            eng_mod.Path.home = staticmethod(lambda: tmp_path)
+            result = _discover_sources(cfg)
+        finally:
+            eng_mod.Path.home = original_home
+        found = result.get("source_dirs", {}).get("aistudio", [])
+        # Empty list means disabled — should stay empty, not auto-discover
+        assert found == [], (
+            f"Auto-discovery should be disabled by empty list, got: {found}"
+        )
+
+    def test_aistudio_candidate_dirs_no_crash_nonexistent(self, tmp_path):
+        """_aistudio_candidate_dirs must not crash when no Drive dirs exist."""
+        from ai_session_tools.engine import _aistudio_candidate_dirs
+        import ai_session_tools.engine as eng_mod
+        original_home = eng_mod.Path.home
+        try:
+            # tmp_path has no Downloads, no Google Drive — should return []
+            result = _aistudio_candidate_dirs(tmp_path)
+        finally:
+            pass
+        assert isinstance(result, list), "Must return a list"
+
+
+class TestSourceDisableEnable:
+    """source disable / source enable commands for auto-discovery control."""
+
+    def test_source_disable_blocks_autodiscovery(self, tmp_path, monkeypatch):
+        """aise source disable aistudio writes [] to config."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["source", "disable", "aistudio"])
+        assert result.exit_code == 0
+        cfg = json.loads((tmp_path / "config.json").read_text())
+        sd = cfg.get("source_dirs", {})
+        assert "aistudio" in sd
+        assert sd["aistudio"] == [], f"Expected empty list, got: {sd['aistudio']}"
+
+    def test_source_enable_removes_disable_block(self, tmp_path, monkeypatch):
+        """aise source enable aistudio removes the [] block from config."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"source_dirs": {"aistudio": []}}))
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config_file))
+        result = runner.invoke(app, ["source", "enable", "aistudio"])
+        assert result.exit_code == 0
+        cfg = json.loads(config_file.read_text())
+        sd = cfg.get("source_dirs", {})
+        assert "aistudio" not in sd, (
+            f"aistudio key should be removed after enable, got: {sd}"
+        )
+
+    def test_source_disable_invalid_type(self, tmp_path, monkeypatch):
+        """aise source disable with unknown type exits with error."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["source", "disable", "unknowntype"])
+        assert result.exit_code != 0
+
+    def test_source_enable_gemini_alias(self, tmp_path, monkeypatch):
+        """aise source disable gemini works as alias for gemini_cli."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"source_dirs": {"gemini_cli": []}}))
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config_file))
+        result = runner.invoke(app, ["source", "enable", "gemini"])
+        assert result.exit_code == 0
+        cfg = json.loads(config_file.read_text())
+        sd = cfg.get("source_dirs", {})
+        assert "gemini_cli" not in sd, f"gemini_cli key should be removed, got: {sd}"

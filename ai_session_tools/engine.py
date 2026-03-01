@@ -1529,6 +1529,93 @@ def get_multi_engine(config: dict | None = None):
     return MultiSourceEngine(sources)
 
 
+def _aistudio_candidate_dirs(home: Path) -> list[Path]:
+    """Return ordered list of candidate directories to probe for AI Studio sessions.
+
+    Checks Downloads folder and Google Drive mount points across macOS, Linux,
+    and Windows. Any directory whose name contains 'Google AI Studio' is included.
+    Results are deduplicated while preserving discovery order.
+
+    Candidates (in priority order):
+    - ~/Downloads/Google AI Studio/                              (direct export)
+    - ~/Downloads/*Google AI Studio*/                            (variant names)
+    - ~/Downloads/drive-download-*/Google AI Studio/             (Drive bulk exports)
+    - ~/Downloads/aistudio_sessions/Google AI Studio/            (custom subfolder)
+    - ~/Downloads/aistudio_sessions/*Google AI Studio*/          (variant names)
+    - macOS Google Drive: ~/Library/CloudStorage/GoogleDrive-*/My Drive/
+    - macOS Google Drive legacy: ~/Google Drive/
+    - Linux Google Drive: ~/GoogleDrive/, ~/google-drive/
+    - Windows Google Drive: C:/Users/<user>/Google Drive/
+    - Any of the above / *Google AI Studio*                      (glob within Drive)
+    """
+    import contextlib
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        key = str(p.resolve()) if p.exists() else str(p)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(p)
+
+    def _glob_aistudio(base: Path) -> None:
+        """Add all *Google AI Studio* matches under base."""
+        with contextlib.suppress(OSError):
+            for d in sorted(base.glob("*Google AI Studio*")):
+                if d.is_dir():
+                    _add(d)
+
+    downloads = home / "Downloads"
+
+    # ── Downloads folder ────────────────────────────────────────────────────
+    with contextlib.suppress(OSError):
+        direct = downloads / "Google AI Studio"
+        if direct.is_dir():
+            _add(direct)
+        _glob_aistudio(downloads)
+        for drive_export in sorted(downloads.glob("drive-download-*")):
+            if drive_export.is_dir():
+                _glob_aistudio(drive_export)
+        for subfolder in ("aistudio_sessions", "aistudio"):
+            base = downloads / subfolder
+            if base.is_dir():
+                _glob_aistudio(base)
+
+    # ── macOS Google Drive (modern: CloudStorage) ────────────────────────────
+    cloud_storage = home / "Library" / "CloudStorage"
+    with contextlib.suppress(OSError):
+        for drive_mount in sorted(cloud_storage.glob("GoogleDrive-*")):
+            if not drive_mount.is_dir():
+                continue
+            for sub in ("My Drive", "MyDrive", ""):
+                root = drive_mount / sub if sub else drive_mount
+                _glob_aistudio(root)
+
+    # ── macOS Google Drive (legacy: ~/Google Drive/) ────────────────────────
+    legacy_mac = home / "Google Drive"
+    with contextlib.suppress(OSError):
+        if legacy_mac.is_dir():
+            _glob_aistudio(legacy_mac)
+
+    # ── Linux Google Drive mount points ─────────────────────────────────────
+    for linux_drive in ("GoogleDrive", "google-drive", "Google Drive"):
+        candidate = home / linux_drive
+        with contextlib.suppress(OSError):
+            if candidate.is_dir():
+                _glob_aistudio(candidate)
+
+    # ── Windows Google Drive (C:\Users\<user>\Google Drive\) ─────────────────
+    # Path.home() on Windows returns C:\Users\<user>, so ~/Google Drive works there too.
+    # Additional Windows variant: OneDrive / Google Drive synced folder.
+    for win_drive in ("Google Drive", "Google Drive (My Drive)"):
+        candidate = home / win_drive
+        with contextlib.suppress(OSError):
+            if candidate.is_dir():
+                _glob_aistudio(candidate)
+
+    return candidates
+
+
 def _discover_sources(config: dict) -> dict:
     """Scan standard install locations and merge discovered sources into config.
 
@@ -1536,12 +1623,21 @@ def _discover_sources(config: dict) -> dict:
     Claude Code is always included via SessionRecoveryEngine (not in source_dirs).
     Returns effective config dict with discovered paths added.
 
+    Auto-discovery is skipped for a source type when that type already has
+    explicit entries in config (explicit config wins, no merging).
+
     Standard auto-discovery locations:
-    - ~/.claude/projects/                                  (Claude Code — always)
-    - ~/.gemini/tmp/                                      (Gemini CLI if exists + non-empty)
-    - ~/Downloads/Google AI Studio/                       (AI Studio if exists)
-    - ~/Downloads/drive-download-*/Google AI Studio/      (AI Studio glob match)
-    - ~/Downloads/aistudio_sessions/Google AI Studio/     (AI Studio if exists)
+    - ~/.claude/projects/                           (Claude Code — always)
+    - ~/.gemini/tmp/                               (Gemini CLI if exists + non-empty)
+    - ~/Downloads/*Google AI Studio*/              (AI Studio export — Downloads)
+    - ~/Library/CloudStorage/GoogleDrive-*/...     (AI Studio via Google Drive — macOS)
+    - ~/Google Drive/*Google AI Studio*/           (AI Studio — macOS legacy / Linux / Windows)
+    - Any directory whose name contains 'Google AI Studio' under known Drive mounts
+
+    To disable auto-discovery for a source type, add it to config with an empty list:
+        {"source_dirs": {"aistudio": []}}
+    To add explicit paths use: aise source add <path> --type aistudio
+    To remove: aise source remove <path>
     """
     import contextlib
     home = Path.home()
@@ -1555,24 +1651,13 @@ def _discover_sources(config: dict) -> dict:
             if gemini_tmp.exists() and any(gemini_tmp.iterdir()):
                 sd["gemini_cli"] = str(gemini_tmp)
 
-    # AI Studio: scan ~/Downloads for standard export patterns
-    if not sd.get("aistudio"):
-        downloads = home / "Downloads"
-        found: list[str] = []
-        with contextlib.suppress(OSError):
-            # Pattern 1: ~/Downloads/Google AI Studio/
-            p1 = downloads / "Google AI Studio"
-            if p1.exists():
-                found.append(str(p1))
-            # Pattern 2: ~/Downloads/drive-download-*/Google AI Studio/
-            for d in sorted(downloads.glob("drive-download-*/Google AI Studio")):
-                found.append(str(d))
-            # Pattern 3: ~/Downloads/aistudio_sessions/Google AI Studio/
-            p3 = downloads / "aistudio_sessions" / "Google AI Studio"
-            if p3.exists():
-                found.append(str(p3))
+    # AI Studio: explicit config wins; auto-discover only when not set.
+    # Explicit config with an empty list disables auto-discovery.
+    if "aistudio" not in sd:
+        candidates = _aistudio_candidate_dirs(home)
+        found = [str(p) for p in candidates if p.exists()]
         if found:
-            sd["aistudio"] = found  # list of all found dirs
+            sd["aistudio"] = found
 
     effective["source_dirs"] = sd
     return effective

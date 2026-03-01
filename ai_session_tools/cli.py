@@ -249,7 +249,12 @@ def source_scan(
 ) -> None:
     """Scan standard locations and report newly discoverable sources.
 
+    Checks Downloads, Google Drive (macOS/Linux/Windows), and other standard
+    locations for directories named 'Google AI Studio' or similar.
+
     Without --save: shows what would be added. With --save: writes to config.
+    To disable auto-discovery for a type: aise source disable aistudio
+    To re-enable: aise source enable aistudio
 
     Example:
         aise source scan
@@ -299,8 +304,14 @@ def source_add(
 ) -> None:
     """Add a session directory to config.
 
+    Adding an explicit path locks that source type to only use your specified
+    paths — auto-discovery is skipped once any explicit path exists for that type.
+    To re-enable auto-discovery alongside explicit paths, remove all explicit paths
+    for the type, or use 'aise source enable <type>'.
+
     Example:
         aise source add ~/Downloads/aistudio_sessions/Google\\ AI\\ Studio
+        aise source add "~/Library/CloudStorage/GoogleDrive-me@gmail.com/My Drive/Google AI Studio"
         aise source add ~/.gemini/tmp --type gemini
     """
     from ai_session_tools.config import load_config
@@ -363,6 +374,66 @@ def source_remove(
         console.print(f"[green]Removed: {resolved}[/green]")
     else:
         console.print(f"[yellow]Not found in config: {resolved}[/yellow]")
+
+
+_VALID_SOURCE_TYPES = ("aistudio", "gemini_cli", "gemini")
+
+
+@source_app.command("disable")
+def source_disable(
+    src_type: str = typer.Argument(..., help="Source type to disable auto-discovery for: aistudio, gemini_cli"),
+) -> None:
+    """Disable auto-discovery for a source type.
+
+    Writes an empty list to config so aise no longer auto-discovers this source
+    type on startup. Existing explicit paths are removed too.
+    To re-enable, run: aise source enable <type>
+
+    Example:
+        aise source disable aistudio
+        aise source disable gemini_cli
+    """
+    from ai_session_tools.config import load_config
+    effective_type = "gemini_cli" if src_type in ("gemini", "gemini_cli") else src_type
+    if effective_type not in ("aistudio", "gemini_cli"):
+        err_console.print(f"[red]Unknown type {src_type!r}. Use: aistudio, gemini_cli[/red]")
+        raise typer.Exit(code=1)
+    cfg = load_config()
+    sd = dict(cfg.get("source_dirs", {}))
+    sd[effective_type] = []  # empty list disables auto-discovery
+    cfg["source_dirs"] = sd
+    _write_config(cfg)
+    console.print(f"[yellow]Auto-discovery disabled for [{effective_type}]. "
+                  f"Run 'aise source enable {effective_type}' to re-enable.[/yellow]")
+
+
+@source_app.command("enable")
+def source_enable(
+    src_type: str = typer.Argument(..., help="Source type to re-enable auto-discovery for: aistudio, gemini_cli"),
+) -> None:
+    """Re-enable auto-discovery for a source type.
+
+    Removes the config entry that was blocking auto-discovery so aise will
+    scan standard locations again. To add an explicit path instead, use:
+        aise source add <path> --type <type>
+
+    Example:
+        aise source enable aistudio
+        aise source enable gemini_cli
+    """
+    from ai_session_tools.config import load_config
+    effective_type = "gemini_cli" if src_type in ("gemini", "gemini_cli") else src_type
+    if effective_type not in ("aistudio", "gemini_cli"):
+        err_console.print(f"[red]Unknown type {src_type!r}. Use: aistudio, gemini_cli[/red]")
+        raise typer.Exit(code=1)
+    cfg = load_config()
+    sd = dict(cfg.get("source_dirs", {}))
+    # Remove the key entirely so _discover_sources will auto-discover again
+    sd.pop(effective_type, None)
+    cfg["source_dirs"] = {k: v for k, v in sd.items() if v is not None}
+    _write_config(cfg)
+    console.print(f"[green]Auto-discovery enabled for [{effective_type}]. "
+                  f"Run 'aise source scan' to preview discovered paths.[/green]")
 
 
 def _save_sources_to_config(new_sources: list[tuple[str, str]], cfg: dict) -> None:
