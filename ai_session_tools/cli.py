@@ -18,47 +18,127 @@ from pathlib import Path
 from typing import Callable as _Callable, List, Optional, Set
 
 import typer
+import click
 from rich.console import Console
+from collections import defaultdict
+from typer.core import TyperGroup, HAS_RICH
+import typer.rich_utils as _ru
 
 from .engine import SessionRecoveryEngine
 from .formatters import MessageFormatter, get_formatter
 from .models import FileVersion, FilterSpec
 
+
+class _CommandsFirstGroup(TyperGroup):
+    """TyperGroup that renders Commands panels BEFORE Options panel in --help output."""
+
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        if not HAS_RICH or self.rich_markup_mode is None:
+            return super().format_help(ctx, formatter)
+
+        console = _ru._get_rich_console()
+
+        # Usage line
+        console.print(
+            _ru.Padding(_ru.highlighter(self.get_usage(ctx)), 1),
+            style=_ru.STYLE_USAGE_COMMAND,
+        )
+
+        # Help text
+        if self.help:
+            console.print(
+                _ru.Padding(
+                    _ru.Align(
+                        _ru._get_help_text(obj=self, markup_mode=self.rich_markup_mode),
+                        pad=False,
+                    ),
+                    (0, 1, 1, 1),
+                )
+            )
+
+        # Collect params into panels
+        panel_to_arguments: defaultdict = defaultdict(list)
+        panel_to_options: defaultdict = defaultdict(list)
+        for param in self.get_params(ctx):
+            if getattr(param, "hidden", False):
+                continue
+            panel_name = getattr(param, _ru._RICH_HELP_PANEL_NAME, None)
+            if isinstance(param, click.Argument):
+                panel_to_arguments[panel_name or _ru.ARGUMENTS_PANEL_TITLE].append(param)
+            elif isinstance(param, click.Option):
+                panel_to_options[panel_name or _ru.OPTIONS_PANEL_TITLE].append(param)
+
+        # Arguments panels
+        for panel_name, args in panel_to_arguments.items():
+            _ru._print_options_panel(
+                name=panel_name, params=args, ctx=ctx,
+                markup_mode=self.rich_markup_mode, console=console,
+            )
+
+        # ── Commands panels FIRST ─────────────────────────────────────────────
+        panel_to_commands: defaultdict = defaultdict(list)
+        for command_name in self.list_commands(ctx):
+            command = self.get_command(ctx, command_name)
+            if command and not command.hidden:
+                panel_name = (
+                    getattr(command, _ru._RICH_HELP_PANEL_NAME, None)
+                    or _ru.COMMANDS_PANEL_TITLE
+                )
+                panel_to_commands[panel_name].append(command)
+
+        max_cmd_len = max(
+            (len(cmd.name or "") for cmds in panel_to_commands.values() for cmd in cmds),
+            default=0,
+        )
+        # Default commands panel first, then named panels
+        for panel_name, commands in sorted(
+            panel_to_commands.items(),
+            key=lambda kv: (kv[0] != _ru.COMMANDS_PANEL_TITLE, kv[0]),
+        ):
+            _ru._print_commands_panel(
+                name=panel_name, commands=commands,
+                markup_mode=self.rich_markup_mode,
+                console=console, cmd_len=max_cmd_len,
+            )
+
+        # ── Options panels AFTER commands ─────────────────────────────────────
+        # Default options panel first, then named panels
+        for panel_name, options in sorted(
+            panel_to_options.items(),
+            key=lambda kv: (kv[0] != _ru.OPTIONS_PANEL_TITLE, kv[0]),
+        ):
+            _ru._print_options_panel(
+                name=panel_name, params=options, ctx=ctx,
+                markup_mode=self.rich_markup_mode, console=console,
+            )
+
+        # Epilogue
+        if self.epilog:
+            lines = self.epilog.split("\n\n")
+            epilogue = "\n".join([x.replace("\n", " ").strip() for x in lines])
+            epilogue_text = _ru._make_rich_text(text=epilogue, markup_mode=self.rich_markup_mode)
+            console.print(_ru.Padding(_ru.Align(epilogue_text, pad=False), 1))
+
+
 app = typer.Typer(
+    cls=_CommandsFirstGroup,
     help=(
-        "Analyze and extract data from Claude Code sessions stored in ~/.claude/projects/.\n\n"
-        "Claude Code stores each conversation as a session — a folder of JSONL files containing "
-        "user/assistant messages and source code snapshots. This tool searches those sessions to "
-        "find source files that were written or edited, and to search conversation messages.\n\n"
-        "Override default paths with environment variables:\n\n"
-        "  CLAUDE_CONFIG_DIR          Path to Claude config dir (default: ~/.claude)\n\n"
-        "  AI_SESSION_TOOLS_PROJECTS  Path to Claude projects dir (default: ~/.claude/projects)\n\n"
-        "  AI_SESSION_TOOLS_RECOVERY  Path to recovery output dir (default: ~/.claude/recovery)"
+        "Search and analyze AI sessions and conversations from Claude Code, AI Studio, and Gemini CLI.\n\n"
+        "Sources auto-detected from standard locations. Run 'aise source list' to see what's active.\n"
+        "Use --provider to filter: 'aise list --provider claude'  'aise stats --provider aistudio'"
     ),
 )
 files_app = typer.Typer(
-    help=(
-        "Search, extract, and inspect source files (*.py, *.md, *.rs, etc.) found in Claude Code session data.\n\n"
-        "These are files that Claude wrote or edited during sessions — not the JSONL session files themselves."
-    ),
+    help="Search, extract, and track files that Claude wrote or edited across sessions.",
 )
 messages_app = typer.Typer(
-    help=(
-        "Search and read user/assistant conversation messages stored in Claude Code session JSONL files.\n\n"
-        "Each session contains timestamped messages with a type (user or assistant) and text content."
-    ),
+    help="Search and read user/assistant conversation messages.",
 )
 export_app = typer.Typer(
-    help=(
-        "Export Claude Code session messages to markdown.\n\n"
-        "Use 'export session' for a single session, 'export recent' for bulk export."
-    ),
+    help="Export session messages to markdown. Use 'session' for one session, 'recent' for bulk.",
 )
 tools_app = typer.Typer(
-    help=(
-        "Search tool invocations (Bash, Edit, Write, Read, etc.) from Claude Code sessions.\n\n"
-        "Tool calls are stored inside assistant messages in session JSONL files."
-    ),
+    help="Search tool invocations (Bash, Edit, Write, Read, etc.) from Claude Code sessions.",
 )
 
 config_app = typer.Typer(
@@ -72,14 +152,336 @@ config_app = typer.Typer(
     ),
 )
 
+
+@config_app.callback(invoke_without_command=True)
+def config_callback(ctx: typer.Context) -> None:
+    """View and manage the ai_session_tools config file."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+
+
+source_app = typer.Typer(
+    help="Add, remove, or list session source directories.",
+)
+
+
+@source_app.callback(invoke_without_command=True)
+def source_callback(ctx: typer.Context) -> None:
+    """Add, remove, or list session source directories."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+
 app.add_typer(files_app, name="files", rich_help_panel="Domain Groups")
 app.add_typer(messages_app, name="messages", rich_help_panel="Domain Groups")
 app.add_typer(export_app, name="export", rich_help_panel="Domain Groups")
 app.add_typer(tools_app, name="tools", rich_help_panel="Domain Groups")
 app.add_typer(config_app, name="config", rich_help_panel="Configuration")
+app.add_typer(source_app, name="source", rich_help_panel="Source Management")
 
 console = Console()
 err_console = Console(stderr=True)
+
+
+# ── aise source CRUD commands ──────────────────────────────────────────────
+
+@source_app.command("list")
+def source_list(fmt: str = typer.Option("table", "--format", "-f", help="Output format: table or json")) -> None:
+    """Show all active sources (auto-detected + configured).
+
+    Example:
+        aise source list
+        aise source list --format json
+    """
+    from ai_session_tools.engine import _discover_sources
+    from ai_session_tools.config import load_config
+    cfg = load_config()
+    effective = _discover_sources(cfg)
+    sd = effective.get("source_dirs", {})
+    explicit_sd = cfg.get("source_dirs", {})
+
+    rows: list[dict] = [
+        {"source": "claude", "type": "claude",
+         "path": str(Path.home() / ".claude" / "projects"),
+         "configured": "auto", "exists": (Path.home() / ".claude" / "projects").exists()}
+    ]
+    for src_type in ("aistudio", "gemini_cli"):
+        paths = sd.get(src_type, [])
+        if isinstance(paths, str):
+            paths = [paths]
+        explicit = explicit_sd.get(src_type, [])
+        if isinstance(explicit, str):
+            explicit = [explicit]
+        # Deduplicate paths while preserving order
+        seen_paths: set = set()
+        for p in paths:
+            if p in seen_paths:
+                continue
+            seen_paths.add(p)
+            rows.append({
+                "source": src_type,
+                "type": src_type,
+                "path": p,
+                "configured": "explicit" if p in explicit else "auto-discovered",
+                "exists": Path(p).exists(),
+            })
+
+    if fmt == "json":
+        console.print(json.dumps(rows, indent=2))
+        return
+
+    from rich.table import Table
+    table = Table(title="Active Session Sources")
+    table.add_column("Type", style="cyan")
+    table.add_column("Path")
+    table.add_column("How Added", style="dim")
+    table.add_column("Exists")
+    for r in rows:
+        exists_str = "[green]yes[/green]" if r["exists"] else "[red]no[/red]"
+        table.add_row(r["type"], r["path"], r["configured"], exists_str)
+    console.print(table)
+
+
+@source_app.command("scan")
+def source_scan(
+    save: bool = typer.Option(False, "--save", help="Save all found sources to config automatically."),
+) -> None:
+    """Scan standard locations and report newly discoverable sources.
+
+    Forces a full filesystem scan (bypasses the 24-hour auto-discovery cache)
+    and reports any source directories not yet in your explicit config.
+
+    Providers scanned:
+      gemini_cli  ~/.gemini/tmp/
+      aistudio    ~/Downloads/*Google AI Studio*, ~/Library/CloudStorage/GoogleDrive-*/...
+
+    Without --save: shows what would be added (dry-run).
+    With    --save: writes found paths to config as explicit entries.
+
+    To disable auto-discovery for a provider: aise source disable aistudio
+    To re-enable:                             aise source enable aistudio
+    To view config file path:                 aise config path
+    To view full config:                      aise config show
+
+    Example:
+        aise source scan
+        aise source scan --save
+    """
+    from ai_session_tools.engine import _discover_sources
+    from ai_session_tools.config import load_config
+    cfg = load_config()
+    explicit_sd = cfg.get("source_dirs", {})
+    # force=True bypasses the 24-hour cache and always runs the full filesystem scan
+    discovered = _discover_sources(cfg, force=True).get("source_dirs", {})
+
+    new_sources: list[tuple[str, str]] = []
+    for src_type in ("aistudio", "gemini_cli"):
+        discovered_paths = discovered.get(src_type, [])
+        explicit_paths = explicit_sd.get(src_type, [])
+        if isinstance(discovered_paths, str):
+            discovered_paths = [discovered_paths]
+        if isinstance(explicit_paths, str):
+            explicit_paths = [explicit_paths]
+        for p in discovered_paths:
+            if p not in explicit_paths:
+                new_sources.append((src_type, p))
+
+    if not new_sources:
+        console.print("[green]No new sources found. Config is up to date.[/green]")
+        return
+
+    console.print(f"[bold]Found {len(new_sources)} new source(s):[/bold]")
+    for src_type, path in new_sources:
+        console.print(f"  [{src_type}] {path}")
+
+    if save:
+        _save_sources_to_config(new_sources, cfg)
+        console.print("[green]Saved to config.[/green]")
+    else:
+        console.print("\nRun [bold]aise source scan --save[/bold] to add all, "
+                      "or [bold]aise source add <path>[/bold] to add individually.")
+
+
+@source_app.command("add")
+def source_add(
+    path: str = typer.Argument(..., help="Path to session directory to add."),
+    src_type: str = typer.Option(
+        "", "--type", "-t",
+        help="Source type: aistudio, gemini. Auto-detected if not specified."
+    ),
+) -> None:
+    """Add a session directory to config.
+
+    Adding an explicit path locks that source type to only use your specified
+    paths — auto-discovery is skipped once any explicit path exists for that type.
+    To re-enable auto-discovery alongside explicit paths, remove all explicit paths
+    for the type, or use 'aise source enable <type>'.
+
+    Example:
+        aise source add ~/Downloads/aistudio_sessions/Google\\ AI\\ Studio
+        aise source add "~/Library/CloudStorage/GoogleDrive-me@gmail.com/My Drive/Google AI Studio"
+        aise source add ~/.gemini/tmp --type gemini
+    """
+    from ai_session_tools.config import load_config
+    resolved = str(Path(path).expanduser().resolve())
+    if not Path(resolved).exists():
+        err_console.print(f"[red]Path does not exist: {resolved}[/red]")
+        raise typer.Exit(code=1)
+
+    # Auto-detect type if not specified
+    effective_type = src_type
+    if not effective_type:
+        if ".gemini" in resolved or "gemini" in resolved.lower():
+            effective_type = "gemini_cli"
+        else:
+            effective_type = "aistudio"  # default for unknown paths
+
+    cfg = load_config()
+    sd = dict(cfg.get("source_dirs", {}))
+    existing = sd.get(effective_type, [])
+    if isinstance(existing, str):
+        existing = [existing]
+    if resolved not in existing:
+        existing.append(resolved)
+        sd[effective_type] = existing
+        cfg["source_dirs"] = sd
+        _write_config(cfg)
+        console.print(f"[green]Added [{effective_type}] {resolved}[/green]")
+    else:
+        console.print(f"[yellow]Already in config: {resolved}[/yellow]")
+
+
+@source_app.command("remove")
+def source_remove(
+    path: str = typer.Argument(..., help="Path or partial path to remove from config."),
+) -> None:
+    """Remove a session directory from config.
+
+    Example:
+        aise source remove ~/Downloads/old_sessions
+    """
+    from ai_session_tools.config import load_config
+    # Use resolve() for exact path match — prevents substring collisions
+    # e.g. removing /data would NOT accidentally remove /data_backup
+    resolved = str(Path(path).expanduser().resolve())
+    cfg = load_config()
+    sd = dict(cfg.get("source_dirs", {}))
+    removed = False
+    for src_type in list(sd.keys()):
+        paths = sd[src_type]
+        if isinstance(paths, str):
+            paths = [paths]
+        # Exact match only (both resolved to absolute): no substring matching
+        new_paths = [p for p in paths if Path(p).expanduser().resolve() != Path(resolved)]
+        if len(new_paths) != len(paths):
+            sd[src_type] = new_paths if new_paths else None
+            removed = True
+    cfg["source_dirs"] = {k: v for k, v in sd.items() if v}
+    if removed:
+        _write_config(cfg)
+        console.print(f"[green]Removed: {resolved}[/green]")
+    else:
+        console.print(f"[yellow]Not found in config: {resolved}[/yellow]")
+
+
+_VALID_SOURCE_TYPES = ("aistudio", "gemini_cli", "gemini")
+
+
+@source_app.command("disable")
+def source_disable(
+    src_type: str = typer.Argument(..., help="Source type to disable auto-discovery for: aistudio, gemini_cli"),
+) -> None:
+    """Disable auto-discovery for a source type.
+
+    Writes an empty list to config so aise no longer auto-discovers this source
+    type on startup. Existing explicit paths are removed too.
+    To re-enable, run: aise source enable <type>
+
+    Example:
+        aise source disable aistudio
+        aise source disable gemini_cli
+    """
+    from ai_session_tools.config import load_config
+    effective_type = "gemini_cli" if src_type in ("gemini", "gemini_cli") else src_type
+    if effective_type not in ("aistudio", "gemini_cli"):
+        err_console.print(f"[red]Unknown type {src_type!r}. Use: aistudio, gemini_cli[/red]")
+        raise typer.Exit(code=1)
+    cfg = load_config()
+    sd = dict(cfg.get("source_dirs", {}))
+    sd[effective_type] = []  # empty list disables auto-discovery
+    cfg["source_dirs"] = sd
+    _write_config(cfg)
+    console.print(f"[yellow]Auto-discovery disabled for [{effective_type}]. "
+                  f"Run 'aise source enable {effective_type}' to re-enable.[/yellow]")
+
+
+@source_app.command("enable")
+def source_enable(
+    src_type: str = typer.Argument(..., help="Source type to re-enable auto-discovery for: aistudio, gemini_cli"),
+) -> None:
+    """Re-enable auto-discovery for a source type.
+
+    Removes the config entry that was blocking auto-discovery so aise will
+    scan standard locations again. To add an explicit path instead, use:
+        aise source add <path> --type <type>
+
+    Example:
+        aise source enable aistudio
+        aise source enable gemini_cli
+    """
+    from ai_session_tools.config import load_config
+    effective_type = "gemini_cli" if src_type in ("gemini", "gemini_cli") else src_type
+    if effective_type not in ("aistudio", "gemini_cli"):
+        err_console.print(f"[red]Unknown type {src_type!r}. Use: aistudio, gemini_cli[/red]")
+        raise typer.Exit(code=1)
+    cfg = load_config()
+    sd = dict(cfg.get("source_dirs", {}))
+    # Remove the key entirely so _discover_sources will auto-discover again
+    sd.pop(effective_type, None)
+    cfg["source_dirs"] = {k: v for k, v in sd.items() if v is not None}
+    _write_config(cfg)
+    console.print(f"[green]Auto-discovery enabled for [{effective_type}]. "
+                  f"Run 'aise source scan' to preview discovered paths.[/green]")
+
+
+def _save_sources_to_config(new_sources: list[tuple[str, str]], cfg: dict) -> None:
+    """Helper: save discovered sources to config.json."""
+    sd = dict(cfg.get("source_dirs", {}))
+    for src_type, path in new_sources:
+        existing = sd.get(src_type, [])
+        if isinstance(existing, str):
+            existing = [existing]
+        if path not in existing:
+            existing.append(path)
+        sd[src_type] = existing
+    cfg["source_dirs"] = sd
+    _write_config(cfg)
+
+
+def _resolve_config_path() -> Path:
+    """Return the config file path — delegates to config.get_config_path().
+
+    Single implementation shared by _write_config() and config show/path commands
+    so read path == write path in all invocation modes.
+    """
+    from ai_session_tools.config import get_config_path
+    return get_config_path()
+
+
+def _write_config(cfg: dict) -> None:
+    """Write config dict to the same path load_config() reads from.
+
+    Creates parent directories if needed. Safe to call even if the file
+    does not exist yet — this is the only correct place to create it.
+    (set_config_path does NOT create files; config_init and source-mutation
+    commands call _write_config which creates the file on first write.)
+
+    Delegates to config.write_config() which updates the in-process cache
+    so the next load_config() returns the written dict without a disk re-read.
+    """
+    from ai_session_tools.config import write_config as _wc
+    _wc(cfg)
 
 
 # ── CLI rendering infrastructure ──────────────────────────────────────────────
@@ -92,6 +494,8 @@ class ColumnSpec:
     style: str = ""
     no_wrap: bool = False
     justify: str = "left"
+    overflow: str = "fold"          # Rich overflow mode: fold, crop, ellipsis, ignore
+    min_width: Optional[int] = None  # Minimum column width in chars (prevents Rich collapsing)
 
 
 @dataclass
@@ -107,11 +511,13 @@ class TableSpec:
 
 def _render_output(
     items: list,
-    fmt: str,
+    fmt: Optional[str],
     spec: "TableSpec",
     empty_msg: str = "No results found",
 ) -> None:
     """Render items in the requested format — eliminates repeated json/csv/table branching."""
+    if fmt is None:
+        fmt = _cfg_default("format", "table")
     if not items:
         console.print(f"[yellow]{empty_msg}[/yellow]")
         return
@@ -142,6 +548,8 @@ def _render_output(
             style=col.style or None,
             no_wrap=col.no_wrap,
             justify=col.justify,
+            overflow=col.overflow,
+            min_width=col.min_width,
         )
     for d in dicts:
         table.add_row(*[str(v) for v in spec.row_fn(d)])
@@ -158,34 +566,217 @@ def _register_alias(sub_app: "typer.Typer", func: _Callable, *names: str) -> Non
 
 # ── Module-level TableSpec constants ─────────────────────────────────────────
 
+def _format_ts(ts: str) -> str:
+    """Format ISO 8601 timestamp for display as 'YYYY-MM-DD HH:MM'. Never raises.
+
+    Handles all known variants (Z suffix, +00:00, bare prefix, empty string)
+    by slicing the first 16 chars then replacing 'T' with a space. Safe on any input.
+
+    Examples:
+        "2026-03-01T14:23:45.123456Z"     -> "2026-03-01 14:23"
+        "2026-03-01T14:23:45.123+00:00"   -> "2026-03-01 14:23"
+        "2026-02-23T04:07"                -> "2026-02-23 04:07"
+        "2026-03-01"                      -> "2026-03-01"   (date-only fallback)
+        ""                                -> ""
+    """
+    if not ts:
+        return ""
+    s = ts[:16]
+    return s.replace("T", " ") if "T" in s else s
+
+
+# ── DRY date/time filter flags and normalizer ────────────────────────────────
+
+_OPT_SINCE = typer.Option(
+    None, "--since",
+    help=(
+        "Lower bound of date range (inclusive). "
+        "Accepts: ISO date (2026-01-15), partial date (2026-01, 2026), "
+        "EDTF patterns (202X, 19XX, 2026-01-1X), durations (7d, 2w, 1m, 24h, 30min), "
+        "EDTF interval (2026-01/2026-03, sets both bounds). "
+        "Run 'aise dates' for full format reference."
+    ),
+)
+_OPT_UNTIL = typer.Option(
+    None, "--until",
+    help=(
+        "Upper bound of date range (inclusive). "
+        "Same formats as --since (no interval syntax). "
+        "Run 'aise dates' for full format reference."
+    ),
+)
+_OPT_WHEN = typer.Option(
+    None, "--when",
+    help=(
+        "Filter to an entire EDTF period — sets both lower and upper bounds. "
+        "Best for unspecified-digit patterns: --when 202X (whole 2020s decade), "
+        "--when 2026-01-1X (Jan 10-19 2026), --when 2026-01 (all of January). "
+        "Run 'aise dates' for full format reference."
+    ),
+)
+# Hidden backward-compatible aliases for --since/--until (not shown in --help).
+# ``--since`` and ``--until`` are the CANONICAL date options; ``--after``/``--before``
+# are kept only for scripts/users who adopted the old names and will be retired in a
+# future major release. New code must use --since/--until exclusively.
+_OPT_AFTER  = typer.Option(None, "--after",  hidden=True)
+_OPT_BEFORE = typer.Option(None, "--before", hidden=True)
+
+# ── DRY shared option constants ───────────────────────────────────────────────
+# Single source of truth for common options used across many commands.
+
+_OPT_PROVIDER = typer.Option(
+    None, "--provider",
+    help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider.",
+)
+
+#: Standard output format option for commands that support table/json/csv/plain.
+_OPT_FORMAT = typer.Option(
+    None, "--format", "-f",
+    help="Output format: table, json, csv, plain. Default: table (or config 'defaults.format')",
+)
+
+#: Max-chars truncation option for message/result content preview.
+_OPT_MAX_CHARS = typer.Option(
+    None, "--max-chars",
+    help="Truncate content to this many characters. 0 = full. Default: 0 (or config 'defaults.max_chars')",
+)
+
+
+def _cfg_default(key: str, fallback):
+    """Read user preference from config 'defaults' section, returning fallback if absent.
+
+    Lazy-imports config to avoid circular imports and import-time side effects.
+    Config key: 'defaults' → {key: value}
+    Example: {"defaults": {"format": "json", "max_chars": 500, "provider": "claude"}}
+    """
+    from ai_session_tools.config import get_config_section  # lazy: config imported later in file
+    return get_config_section("defaults", {}).get(key, fallback)
+
+
+def _normalize_date_range(
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    when:  Optional[str] = None,
+    after:  Optional[str] = None,   # hidden alias for --since
+    before: Optional[str] = None,   # hidden alias for --until
+) -> tuple:
+    """Return (resolved_after, resolved_before) ISO strings for engine filtering.
+
+    Priority:
+      --when: sets BOTH bounds from one EDTF expression (lower + upper bound).
+      --since (or --after): lower bound, overrides --when lower if also given.
+      --until (or --before): upper bound, overrides --when upper if also given.
+      EDTF interval in --since (A/B) sets both bounds like --when.
+
+    Raises typer.Exit(1) with Rich stderr on invalid input.
+    """
+    from ai_session_tools.engine import _parse_date_input
+
+    def _fail(label: str, exc: Exception) -> None:
+        Console(stderr=True).print(f"[red]{label}: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    resolved_after: Optional[str] = None
+    resolved_before: Optional[str] = None
+
+    # --when: sets BOTH bounds from one EDTF expression
+    if when:
+        try:
+            result = _parse_date_input(when, "start")
+        except ValueError as exc:
+            _fail("--when", exc)
+            return None, None  # unreachable but satisfies type checker
+        if isinstance(result, tuple):
+            resolved_after, resolved_before = result
+        else:
+            resolved_after = result
+            try:
+                resolved_before = _parse_date_input(when, "end")
+            except ValueError as exc:
+                _fail("--when (upper bound)", exc)
+
+    # --since (or hidden --after): lower bound, overrides --when lower if given
+    since_val = since or after
+    if since_val:
+        try:
+            result = _parse_date_input(since_val, "start")
+        except ValueError as exc:
+            _fail("--since", exc)
+            return None, None
+        if isinstance(result, tuple):
+            resolved_after, resolved_before = result   # interval syntax sets both
+        else:
+            resolved_after = result
+
+    # --until (or hidden --before): upper bound, overrides --when upper if given
+    until_val = until or before
+    if until_val:
+        try:
+            result = _parse_date_input(until_val, "end")
+        except ValueError as exc:
+            _fail("--until", exc)
+            return None, None
+        if isinstance(result, tuple):
+            Console(stderr=True).print(
+                "[red]--until: interval syntax (A/B) not supported here; use --since A/B[/red]"
+            )
+            raise typer.Exit(1)
+        resolved_before = result
+
+    # Warn if the range is inverted (after > before) — no sessions will match.
+    if resolved_after and resolved_before and resolved_after > resolved_before:
+        Console(stderr=True).print(
+            f"[yellow]Warning: --since/--after ({resolved_after[:10]}) is later than "
+            f"--until/--before ({resolved_before[:10]}); the date range is inverted and "
+            "no sessions will match.[/yellow]"
+        )
+
+    return resolved_after, resolved_before
+
+
 def _project_display(encoded_dir: str) -> str:
     """Return a short human-readable project name from Claude's encoded dir name.
 
     Delegates to SessionRecoveryEngine.extract_project_name(), then truncates
-    to 20 characters for table display.  The raw ``project_dir`` value is still
+    to 30 characters for table display.  The raw ``project_dir`` value is still
     stored in the to_dict() output so JSON consumers can access it.
     """
     decoded = SessionRecoveryEngine.extract_project_name(encoded_dir)
-    return (decoded[-20:] if len(decoded) > 20 else decoded)
+    return (decoded[-30:] if len(decoded) > 30 else decoded)
+
+
+def _session_path_display(d: dict) -> str:
+    """Best available working path for a session row.
+
+    Priority: cwd (actual filesystem path) > project_display > project_dir.
+    cwd is the real path Claude was running in — most useful for navigation.
+    AI Studio/Gemini sessions typically have empty cwd; fall back to decoded name.
+    """
+    cwd = d.get("cwd", "")
+    if cwd:
+        return cwd
+    return _project_display(d.get("project_display") or d.get("project_dir", ""))
 
 
 _LIST_SPEC = TableSpec(
     title_template="Sessions ({n} found)",
     columns=[
-        ColumnSpec("Session", style="cyan", no_wrap=True),
-        ColumnSpec("Project", style="blue"),
+        ColumnSpec("Session", style="cyan", no_wrap=True, min_width=36),   # full UUID (36 chars)
+        ColumnSpec("Provider", style="magenta", no_wrap=True),             # source provider
+        ColumnSpec("Path", style="blue"),                                   # cwd or decoded project
         ColumnSpec("Branch", style="green"),
-        ColumnSpec("Date", style="dim"),
+        ColumnSpec("Date", style="dim", no_wrap=True, min_width=16),       # "YYYY-MM-DD HH:MM"
         ColumnSpec("Messages", justify="right"),
         ColumnSpec("Summary", style="dim"),
     ],
     row_fn=lambda d: [
-        (d["session_id"][:16] + "\u2026") if len(d["session_id"]) > 16 else d["session_id"],
-        _project_display(d.get("project_display") or d["project_dir"]),
-        d["git_branch"],
-        d["timestamp_first"][:10],
-        str(d["message_count"]),
-        "\u2713" if d["has_compact_summary"] else "",
+        d["session_id"],                                                    # full 36-char UUID
+        d.get("provider", "claude"),                                        # source provider
+        _session_path_display(d),                                           # cwd > project_display
+        d.get("git_branch", ""),
+        _format_ts(d.get("timestamp_first", "")),                          # "YYYY-MM-DD HH:MM"
+        str(d.get("message_count", 0)),
+        "\u2713" if d.get("has_compact_summary") else "",
     ],
     summary_template="Found {n} sessions",
 )
@@ -201,7 +792,7 @@ _CORRECTIONS_SPEC = TableSpec(
     ],
     row_fn=lambda d: [
         d["timestamp"][:19],
-        (d["session_id"][:16] + "\u2026") if len(d["session_id"]) > 16 else d["session_id"],
+        d["session_id"][:8],
         d["category"],
         d["matched_pattern"],
         d["content"][:80],
@@ -228,111 +819,88 @@ _PLANNING_SPEC = TableSpec(
 
 # Module-level overrides set by global options
 _g_claude_dir: Optional[str] = None
-_g_config_path: Optional[str] = None
-_config_cache: Optional[dict] = None  # lazily loaded, reset per process
+
+# Import config loading and session backend from shared modules
+from ai_session_tools.config import load_config, set_config_path, get_config_section, invalidate_config_cache  # noqa: E402
+from ai_session_tools.engine import get_session_backend  # noqa: E402
 
 
-def load_config() -> dict:
-    """Load app config from JSON file. Returns empty dict if not found or unreadable.
+# ── Root app callback (global options + composition root) ────────────────────────
 
-    Config file location priority:
-      1. ``--config`` CLI flag (set on the root app callback)
-      2. ``AI_SESSION_TOOLS_CONFIG`` environment variable
-      3. OS-appropriate default via ``typer.get_app_dir("ai_session_tools")``:
-           - macOS: ``~/Library/Application Support/ai_session_tools/config.json``
-           - Linux: ``~/.config/ai_session_tools/config.json``
-           - Windows: ``%APPDATA%/ai_session_tools/config.json``
+def _version_callback(value: bool) -> None:
+    """Eager --version callback: prints 'aise X.Y.Z' and exits before engine builds."""
+    if value:
+        from ai_session_tools import __version__
+        typer.echo(f"aise {__version__}")
+        raise typer.Exit()
 
-    Supported keys (all optional):
-
-    - ``correction_patterns`` (list of strings): correction patterns in
-      ``"CATEGORY:REGEX"`` format; replaces built-in defaults when present.
-      Example: ``["regression:you deleted", "skip_step:you forgot"]``
-    - ``planning_commands`` (list of strings): slash-command regex patterns
-      to count; replaces built-in defaults when present.
-      Example: ``["/ar:plannew", "/ar:pn", "/mycommand"]``
-
-    Example ``config.json``::
-
-        {
-            "correction_patterns": [
-                "regression:you deleted",
-                "regression:you removed",
-                "skip_step:you forgot",
-                "skip_step:you missed"
-            ],
-            "planning_commands": [
-                "/ar:plannew",
-                "/ar:pn",
-                "/mycommand"
-            ]
-        }
-    """
-    global _config_cache
-    if _config_cache is not None:
-        return _config_cache
-
-    # Priority: --config flag > AI_SESSION_TOOLS_CONFIG env > typer.get_app_dir default
-    if _g_config_path:
-        config_file = Path(_g_config_path).expanduser()
-    else:
-        env_val = os.getenv("AI_SESSION_TOOLS_CONFIG")
-        if env_val:
-            config_file = Path(env_val).expanduser()
-        else:
-            app_dir = typer.get_app_dir("ai_session_tools")
-            config_file = Path(app_dir) / "config.json"
-
-    if config_file.exists():
-        try:
-            with open(config_file, encoding="utf-8") as f:
-                _config_cache = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            err_console.print(f"[yellow]Warning: could not load config {config_file}: {exc}[/yellow]")
-            _config_cache = {}
-    else:
-        _config_cache = {}
-
-    return _config_cache
-
-
-# ── Root app callback (global options) ────────────────────────────────────────
 
 @app.callback(invoke_without_command=True)
 def app_callback(
     ctx: typer.Context,
+    version: Optional[bool] = typer.Option(
+        None, "--version", "-V",
+        is_eager=True,
+        callback=_version_callback,
+        help="Show version and exit.",
+    ),
     claude_dir: Optional[str] = typer.Option(
         None, "--claude-dir",
-        help=(
-            "Path to the Claude configuration directory. "
-            "Default: $CLAUDE_CONFIG_DIR if set, otherwise ~/.claude. "
-            "Example: --claude-dir /Volumes/External/.claude"
-        ),
+        help="Path to Claude config dir. Default: ~/.claude.",
         envvar="CLAUDE_CONFIG_DIR",
     ),
     config: Optional[str] = typer.Option(
         None, "--config",
-        help=(
-            "Path to the ai_session_tools config JSON file. "
-            "Default: OS config dir / ai_session_tools / config.json "
-            "(macOS: ~/Library/Application Support/ai_session_tools/config.json, "
-            "Linux: ~/.config/ai_session_tools/config.json). "
-            "Also overridable via AI_SESSION_TOOLS_CONFIG env var."
-        ),
+        help="Path to config JSON. Default: OS app config dir (macOS: ~/Library/Application Support/ai_session_tools/config.json).",
         envvar="AI_SESSION_TOOLS_CONFIG",
     ),
+    provider: Optional[str] = typer.Option(
+        None, "--provider",
+        help=(
+            "Sessions from: claude | aistudio | gemini | all. Default: all "
+            "(or config 'defaults.provider'). "
+            "Most commands also accept --provider directly: 'aise list --provider claude'."
+        ),
+    ),
 ) -> None:
-    global _g_claude_dir, _g_config_path, _config_cache
+    """Composition root: builds SessionBackend once, injects into ctx.obj for all subcommands.
+
+    Priority for --config flag:
+      1. --config CLI flag (absolute priority)
+      2. AI_SESSION_TOOLS_CONFIG env var
+      3. typer.get_app_dir("ai_session_tools") / "config.json" (OS default)
+
+    This ensures all parts of the app use the same config loader (no dual-loading bugs).
+    """
+    global _g_claude_dir
     _g_claude_dir = claude_dir
-    if config != _g_config_path:
-        _g_config_path = config
-        _config_cache = None  # invalidate cache when path changes
+    # Notify shared config module about --config flag so all parts of app use same config
+    set_config_path(config)
+
+    # ── COMPOSITION ROOT: Build SessionBackend ONCE, inject into ctx.obj ──
+    # ctx.obj is inherited by all child contexts (sub-apps, sub-commands)
+    ctx.ensure_object(dict)
+    cfg = load_config()  # already handles _g_config_path / env var priority
+    # Resolve provider: CLI flag > config 'defaults.provider' > "all"
+    if provider is None:
+        provider = cfg.get("defaults", {}).get("provider", "all")
+    ctx.obj["engine"] = get_session_backend(source=provider, claude_dir=claude_dir, config=cfg)
+    ctx.obj["source"] = provider  # can be accessed by commands for source filtering
+
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
 
 
 # ── Engine factory ────────────────────────────────────────────────────────────
+
+def _resolve_engine(ctx: typer.Context, source: Optional[str] = None) -> "SessionBackend":
+    """Return engine from ctx.obj, rebuilding with a different source if --source given per-command."""
+    if source:
+        cfg = load_config()
+        return get_session_backend(source=source, config=cfg, claude_dir=_g_claude_dir)
+    return ctx.obj.get("engine") if ctx.obj else None
+
 
 def get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] = None) -> SessionRecoveryEngine:
     """
@@ -468,8 +1036,8 @@ def _filter_versions(
     session: Optional[str] = None,
     include_sessions: Set[str] = frozenset(),
     exclude_sessions: Set[str] = frozenset(),
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> List[FileVersion]:
     """Filter FileVersion list by composable criteria. All filters are ANDed."""
     result = versions
@@ -485,11 +1053,11 @@ def _filter_versions(
     # --exclude-sessions: remove matching sessions
     if exclude_sessions:
         result = [v for v in result if not any(v.session_id.startswith(i) for i in exclude_sessions)]
-    # --after / --before: filter by version timestamp
-    if after:
-        result = [v for v in result if v.timestamp and v.timestamp >= after[:len(v.timestamp)]]
-    if before:
-        result = [v for v in result if v.timestamp and v.timestamp <= before[:len(v.timestamp)]]
+    # --since / --until: filter by version timestamp
+    if since:
+        result = [v for v in result if v.timestamp and v.timestamp >= since[:len(v.timestamp)]]
+    if until:
+        result = [v for v in result if v.timestamp and v.timestamp <= until[:len(v.timestamp)]]
     return result
 
 
@@ -594,13 +1162,51 @@ def _do_extract(  # noqa: C901
             raise typer.Exit(code=1)
 
 
-def _do_history_display(engine: SessionRecoveryEngine, name: str, versions: Optional[List[FileVersion]] = None) -> None:
-    """Show version history table (read-only, no disk writes)."""
+def _do_history_display(
+    engine: SessionRecoveryEngine,
+    name: str,
+    versions: Optional[List[FileVersion]] = None,
+    fmt: Optional[str] = None,
+) -> None:
+    """Show version history table (read-only, no disk writes).
+
+    Supports fmt='table' (Rich table), 'json', 'csv', 'plain'.
+    """
+    if fmt is None:
+        fmt = _cfg_default("format", "table")
     if versions is None:
         versions = engine.get_versions(name)
     if not versions:
         console.print(f"[yellow]No versions found for:[/yellow] {name}")
         return
+
+    # Build row dicts with delta (needs prev-row context, so computed before render)
+    rows = []
+    prev_lines = None
+    for v in versions:
+        if prev_lines is None:
+            delta = "—"
+        elif v.line_count >= prev_lines:
+            delta = f"+{v.line_count - prev_lines}"
+        else:
+            delta = str(v.line_count - prev_lines)
+        rows.append({
+            "version": f"v{v.version_num}",
+            "lines": v.line_count,
+            "delta_lines": delta,
+            "timestamp": v.timestamp or "—",
+            "session": v.session_id[:8],
+        })
+        prev_lines = v.line_count
+
+    if fmt == "json":
+        sys.stdout.write(json.dumps(rows, indent=2) + "\n")
+        return
+    if fmt in ("csv", "plain"):
+        for r in rows:
+            console.print(f"{r['version']}  {r['lines']}  {r['delta_lines']}  {r['timestamp']}  {r['session']}")
+        return
+    # Default: Rich table
     from rich.table import Table
     table = Table(title=f"Version history: {name}  ({len(versions)} versions)")
     table.add_column("Version", style="cyan", justify="right")
@@ -608,17 +1214,8 @@ def _do_history_display(engine: SessionRecoveryEngine, name: str, versions: Opti
     table.add_column("\u0394Lines", justify="right")
     table.add_column("Timestamp", style="dim")
     table.add_column("Session", style="blue")
-    prev_lines = None
-    for v in versions:
-        if prev_lines is None:
-            delta = "\u2014"
-        elif v.line_count >= prev_lines:
-            delta = f"+{v.line_count - prev_lines}"
-        else:
-            delta = str(v.line_count - prev_lines)
-        short_session = v.session_id[:16] + "\u2026" if len(v.session_id) > 16 else v.session_id
-        table.add_row(f"v{v.version_num}", str(v.line_count), delta, v.timestamp or "\u2014", short_session)
-        prev_lines = v.line_count
+    for r in rows:
+        table.add_row(r["version"], str(r["lines"]), r["delta_lines"], r["timestamp"], r["session"])
     console.print(table)
 
 
@@ -697,8 +1294,8 @@ def _do_files_search(
     exclude_extensions: Optional[str] = None,
     include_sessions: Optional[str] = None,
     exclude_sessions: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
     limit: Optional[int] = None,
     fmt: str = "table",
 ) -> None:
@@ -708,7 +1305,7 @@ def _do_files_search(
     inc_sessions = {s.strip() for s in include_sessions.split(",") if s.strip()} if include_sessions else set()
     exc_sessions = {s.strip() for s in exclude_sessions.split(",") if s.strip()} if exclude_sessions else set()
 
-    filters = FilterSpec(min_edits=min_edits, max_edits=max_edits, after=after, before=before)
+    filters = FilterSpec(min_edits=min_edits, max_edits=max_edits, after=since, before=until)
     if inc_ext or exc_ext:
         filters.with_extensions(include=inc_ext or None, exclude=exc_ext or None)
     if inc_sessions or exc_sessions:
@@ -732,19 +1329,38 @@ def _do_messages_search(
     query: str,
     message_type: Optional[str] = None,
     limit: int = 10,
-    max_chars: int = 0,
-    fmt: str = "table",
+    max_chars: Optional[int] = None,
+    fmt: Optional[str] = None,
     tool: Optional[str] = None,
     context: int = 0,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> None:
     """Search messages across all sessions. When context > 0, each result includes
-    up to ``context`` surrounding messages from the same session file."""
+    up to ``context`` surrounding messages from the same session file.
+
+    When since/until are given, only sessions whose timestamp_first falls in
+    the specified range are searched (pre-filtering via engine.get_sessions).
+    """
+    if max_chars is None:
+        max_chars = _cfg_default("max_chars", 0)
+    if fmt is None:
+        fmt = _cfg_default("format", "table")
     tag = f" [tool: {tool}]" if tool else ""
+
+    # Pre-filter to sessions in the date range when requested
+    valid_session_ids: Optional[set] = None
+    if since or until:
+        sessions = engine.get_sessions(since=since, until=until)
+        valid_session_ids = {s.session_id for s in sessions}
 
     if context > 0:
         ctx_results = engine.search_messages_with_context(
             query, context=context, message_type=message_type, tool=tool
-        )[:limit]
+        )
+        if valid_session_ids is not None:
+            ctx_results = [r for r in ctx_results if r.match.session_id in valid_session_ids]
+        ctx_results = ctx_results[:limit]
         if not ctx_results:
             console.print(f"[yellow]No messages match query{tag}[/yellow]")
             return
@@ -767,7 +1383,10 @@ def _do_messages_search(
         console.print(f"\n[bold]Found {len(ctx_results)} matches{tag} (context ±{context})[/bold]")
         return
 
-    results = engine.search_messages(query, message_type, tool=tool)[:limit]
+    all_results = engine.search_messages(query, message_type, tool=tool)
+    if valid_session_ids is not None:
+        all_results = [m for m in all_results if m.session_id in valid_session_ids]
+    results = all_results[:limit]
 
     if not results:
         console.print(f"[yellow]No messages match query{tag}[/yellow]")
@@ -805,13 +1424,13 @@ def _do_messages_search(
 def _do_list_sessions(
     engine: SessionRecoveryEngine,
     project: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
     limit: Optional[int] = None,
     fmt: str = "table",
 ) -> None:
     """List sessions with metadata."""
-    sessions = engine.get_sessions(project_filter=project, after=after, before=before)
+    sessions = engine.get_sessions(project_filter=project, since=since, until=until)
     if limit:
         sessions = sessions[:limit]
     _render_output(sessions, fmt, _LIST_SPEC, "No sessions found")
@@ -893,8 +1512,8 @@ def _parse_commands_option(raw: Optional[str]) -> Optional[List[str]]:
 def _do_messages_corrections(
     engine: SessionRecoveryEngine,
     project: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
     limit: int = 20,
     fmt: str = "table",
     pattern_overrides: Optional[List[str]] = None,
@@ -920,7 +1539,7 @@ def _do_messages_corrections(
             # Built-in defaults — lowest priority (engine uses DEFAULT_CORRECTION_PATTERNS)
             patterns = None
     corrections = engine.find_corrections(
-        project_filter=project, after=after, before=before,
+        project_filter=project, since=since, until=until,
         limit=limit, patterns=patterns,
     )
     _render_output(corrections, fmt, _CORRECTIONS_SPEC, "No corrections found")
@@ -929,8 +1548,8 @@ def _do_messages_corrections(
 def _do_messages_planning(
     engine: SessionRecoveryEngine,
     project: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
     fmt: str = "table",
     commands_raw: Optional[str] = None,
 ) -> None:
@@ -955,7 +1574,7 @@ def _do_messages_planning(
             # Built-in defaults — lowest priority (engine uses DEFAULT_PLANNING_COMMANDS)
             commands = None
     results = engine.analyze_planning_usage(
-        project_filter=project, after=after, before=before,
+        project_filter=project, since=since, until=until,
         commands=commands,
     )
     _render_output(results, fmt, _PLANNING_SPEC, "No planning commands found")
@@ -1033,9 +1652,18 @@ def _do_messages_timeline(
     session_id: str,
     fmt: str = "table",
     preview_chars: int = 150,
+    message_type: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> None:
     """Show chronological event timeline for a session."""
     events = engine.timeline_session(session_id, preview_chars=preview_chars)
+    if message_type:
+        events = [e for e in events if e.get("type") == message_type]
+    if since:
+        events = [e for e in events if (e.get("timestamp") or "") >= since]
+    if until:
+        events = [e for e in events if (e.get("timestamp") or "") <= until]
     if not events:
         # Distinguish "session file not found" from "session has no user/assistant events"
         session_files = engine._find_session_files(session_id)
@@ -1075,7 +1703,7 @@ def _do_files_cross_ref(
         ],
         row_fn=lambda d: [
             d["timestamp"][:19],
-            (d["session_id"][:16] + "\u2026") if len(d["session_id"]) > 16 else d["session_id"],
+            d["session_id"][:8],
             d["tool"],
             "[green]\u2713[/green]" if d["found_in_current"] else "[red]\u2717[/red]",
             d["content_snippet"][:60],
@@ -1083,7 +1711,7 @@ def _do_files_cross_ref(
         plain_fn=lambda d: (
             "{ts}  {sid}  {tool}  {mark}  {snip}".format(
                 ts=d["timestamp"][:19],
-                sid=d["session_id"][:16],
+                sid=d["session_id"][:8],
                 tool=d["tool"],
                 mark="\u2713" if d["found_in_current"] else "\u2717",
                 snip=d["content_snippet"][:60],
@@ -1131,8 +1759,8 @@ def _do_export_recent(
 ) -> None:
     """Export all sessions from last N days to markdown."""
     import datetime as _dt
-    after = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
-    sessions = engine.get_sessions(project_filter=project, after=after)
+    since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
+    sessions = engine.get_sessions(project_filter=project, since=since)
     if not sessions:
         console.print("[yellow]No sessions found[/yellow]")
         return
@@ -1166,8 +1794,8 @@ def _do_search(  # noqa: C901
     exclude_extensions: Optional[str],
     include_sessions: Optional[str],
     exclude_sessions: Optional[str],
-    after: Optional[str],
-    before: Optional[str],
+    since: Optional[str],          # canonical; after= is a hidden alias
+    until: Optional[str],          # canonical; before= is a hidden alias
     message_type: Optional[str],
     limit: Optional[int],
     max_chars: int,
@@ -1189,7 +1817,12 @@ def _do_search(  # noqa: C901
 
     # Validate domain (after "tools"→"messages" normalization)
     if domain is not None and domain not in ("files", "messages"):
-        typer.echo(f"Error: domain must be 'files', 'messages', or 'tools', got '{domain}'", err=True)
+        typer.echo(
+            f"Error: domain must be 'files', 'messages', or 'tools', got {domain!r}.\n"
+            f"  Hint: To search messages use:  aise search messages --query {domain!r}\n"
+            f"  Or:                            aise messages search {domain!r}",
+            err=True,
+        )
         raise typer.Exit(1)
 
     # Validate flag/domain conflicts
@@ -1221,12 +1854,13 @@ def _do_search(  # noqa: C901
             engine, pattern or "*", min_edits, max_edits,
             include_extensions, exclude_extensions,
             include_sessions, exclude_sessions,
-            after, before, limit, fmt,
+            since, until, limit, fmt,
         )
 
     if domain in ("messages", "both"):
         msg_limit = limit if limit is not None else 10
-        _do_messages_search(engine, query or "", message_type, msg_limit, max_chars, fmt, tool=tool)
+        _do_messages_search(engine, query or "", message_type, msg_limit, max_chars, fmt,
+                            tool=tool, since=since, until=until)
 
 
 def _do_get(
@@ -1234,14 +1868,22 @@ def _do_get(
     session_id: Optional[str],
     message_type: Optional[str] = None,
     limit: int = 10,
-    max_chars: int = 0,
-    fmt: str = "table",
+    max_chars: Optional[int] = None,
+    fmt: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> None:
     """Get messages from a specific session."""
+    if max_chars is None:
+        max_chars = _cfg_default("max_chars", 0)
     if not session_id:
         err_console.print("[red]Session ID is required.[/red] Use 'aise list' to find session IDs.")
         raise typer.Exit(code=1)
-    messages_list = engine.get_messages(session_id, message_type)[:limit]
+    messages_list = engine.get_messages(session_id, message_type)
+    if since or until:
+        from ai_session_tools.engine import _passes_date_filter
+        messages_list = [m for m in messages_list if _passes_date_filter(m.timestamp, since, until)]
+    messages_list = messages_list[:limit]
 
     if not messages_list:
         console.print("[yellow]No messages found[/yellow]")
@@ -1252,16 +1894,69 @@ def _do_get(
     console.print(f"\n[bold]Found {len(messages_list)} messages[/bold]")
 
 
-def _do_stats(engine: SessionRecoveryEngine) -> None:
-    """Show recovery statistics."""
-    stats_data = engine.get_statistics()
+def _do_stats(
+    engine: "SessionBackend",
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
+    fmt: Optional[str] = None,
+) -> None:
+    """Show recovery statistics. Default since=None, until=None: all sessions shown."""
+    if fmt is None:
+        fmt = _cfg_default("format", "table")
+    stats_data = engine.get_statistics(since=since, until=until)
+    if isinstance(stats_data, dict):
+        sessions = stats_data.get("total_sessions", 0)
+        files = stats_data.get("total_files", 0)
+        versions = stats_data.get("total_versions", 0)
+        largest = stats_data.get("largest_file", "—")
+        largest_edits = stats_data.get("largest_file_edits", 0)
+        # Collect per-source counts: keys like "aistudio_sessions", "gemini_cli_sessions"
+        per_source = {
+            k.replace("_sessions", ""): v
+            for k, v in stats_data.items()
+            if k.endswith("_sessions") and k != "total_sessions" and isinstance(v, int)
+        }
+    else:
+        sessions = stats_data.total_sessions
+        files = stats_data.total_files
+        versions = stats_data.total_versions
+        largest = stats_data.largest_file
+        largest_edits = stats_data.largest_file_edits
+        per_source = {}
+
+    if fmt == "json":
+        out = {
+            "total_sessions": sessions,
+            "total_files": files,
+            "total_versions": versions,
+            "largest_file": largest,
+            "largest_file_edits": largest_edits,
+        }
+        if per_source:
+            out["per_source"] = per_source
+        sys.stdout.write(json.dumps(out, indent=2) + "\n")
+        return
+
+    breakdown = ""
+    if len(per_source) > 1:
+        breakdown = "\n" + "\n".join(
+            f"    {src:<14} {count}" for src, count in sorted(per_source.items())
+        )
+
+    if fmt in ("csv", "plain"):
+        console.print(f"Sessions: {sessions}")
+        console.print(f"Files: {files}")
+        console.print(f"Versions: {versions}")
+        console.print(f"Largest File: {largest} ({largest_edits} edits)")
+        return
+
     console.print(
         f"""
 [bold cyan]Recovery Statistics[/bold cyan]
-  Sessions:      {stats_data.total_sessions}
-  Files:         {stats_data.total_files}
-  Versions:      {stats_data.total_versions}
-  Largest File:  {stats_data.largest_file} ({stats_data.largest_file_edits} edits)
+  Sessions:      {sessions}{breakdown}
+  Files:         {files}
+  Versions:      {versions}
+  Largest File:  {largest} ({largest_edits} edits)
 """
     )
 
@@ -1270,6 +1965,8 @@ def _do_stats(engine: SessionRecoveryEngine) -> None:
 
 @export_app.command("session")
 def export_session(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     session_id: str = typer.Argument(..., help="Session ID (prefix match, e.g. ab841016)."),
     output: Optional[str] = typer.Option(
         None, "--output", "-o",
@@ -1288,11 +1985,17 @@ def export_session(
         aise export session ab841016 --output out.md    # write explicitly
         aise export session ab841016 --dry-run          # preview only
     """
-    _do_export_session(get_engine(), session_id, output=output, dry_run=dry_run)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_export_session(engine, session_id, output=output, dry_run=dry_run)
 
 
 @export_app.command("recent")
 def export_recent(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     days: int = typer.Argument(7, help="Number of days back to include (default: 7)."),
     output: Optional[str] = typer.Option(
         None, "--output", "-o",
@@ -1308,13 +2011,19 @@ def export_recent(
         aise export recent 14 --output week2.md       # last 14 days → file
         aise export recent --project myproject        # filter by project
     """
-    _do_export_recent(get_engine(), days=days, output=output, project=project, dry_run=dry_run)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_export_recent(engine, days=days, output=output, project=project, dry_run=dry_run)
 
 
 # ── files_app commands ────────────────────────────────────────────────────────
 
 @files_app.command("search")
 def files_search(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     pattern: str = typer.Option("*", "--pattern", "-p", help="Filename glob/regex to match (e.g. '*.py', 'cli*'). Default: * (all files)"),
     min_edits: int = typer.Option(0, "--min-edits", help="Only show files edited at least this many times across all sessions. Default: 0"),
     max_edits: Optional[int] = typer.Option(None, "--max-edits", help="Only show files edited at most this many times. Default: unlimited"),
@@ -1322,10 +2031,13 @@ def files_search(
     exclude_extensions: Optional[str] = typer.Option(None, "--exclude-extensions", "-x", help="Skip these file extensions, comma-separated (e.g. pyc,tmp)"),
     include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="Only search these session UUIDs, comma-separated"),
     exclude_sessions: Optional[str] = typer.Option(None, "--exclude-sessions", help="Skip these session UUIDs, comma-separated"),
-    after: Optional[str] = typer.Option(None, "--after", help="Only files modified after this datetime (e.g. 2026-01-15 or 2026-01-15T14:30:00)"),
-    before: Optional[str] = typer.Option(None, "--before", help="Only files modified before this datetime (e.g. 2026-12-31 or 2026-12-31T23:59:59)"),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
     limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited"),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
 ) -> None:
     """Search source files found in Claude Code session data.
 
@@ -1336,10 +2048,15 @@ def files_search(
         aise files search                                  # all files
         aise files search --pattern "*.py"                 # Python files only
         aise files search --min-edits 3                    # files edited 3+ times across sessions
-        aise files search -i py,md --after 2026-01-15      # Python/Markdown since Jan 15
-        aise files search --after 2026-01-15T14:30:00      # files modified after specific time
+        aise files search -i py,md --since 2026-01-15      # Python/Markdown since Jan 15
+        aise files search --when 202X                      # files edited in the 2020s decade
     """
-    _do_files_search(get_engine(), pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, after, before, limit, fmt)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    _do_files_search(engine, pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, since, until, limit, fmt)
 
 
 # Register 'find' as alias for 'files search'
@@ -1348,6 +2065,8 @@ files_app.command("find")(files_search)
 
 @files_app.command("extract")
 def files_extract(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
     version: Optional[int] = typer.Option(
         None, "--version", "-v",
@@ -1407,17 +2126,29 @@ def files_extract(
         aise files extract cli.py --restore --dry-run    # preview restore
         aise files extract cli.py --output-dir ./backup  # write to ./backup/
     """
-    _do_extract(get_engine(), name, version=version, session=session, output_dir=output_dir, restore=restore, dry_run=dry_run)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_extract(engine, name, version=version, session=session, output_dir=output_dir, restore=restore, dry_run=dry_run)
 
 
 @files_app.command("history")
 def files_history(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to versions from this session ID (prefix match)."),
     export: bool = typer.Option(False, "--export", help="Write all versions to disk as cli_v1.py, cli_v2.py, etc."),
     export_dir: Optional[str] = typer.Option(None, "--export-dir", help="Where to write exported files. Default: versions/ alongside original path."),
     stdout_mode: bool = typer.Option(False, "--stdout", help="Print all versions to stdout with === v1 === headers (for scripting/AI)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --export: show what would be written without writing."),
+    fmt: Optional[str] = _OPT_FORMAT,
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Show version history of a source file from Claude Code session data. Read-only by default.
 
@@ -1428,16 +2159,28 @@ def files_history(
 
     Examples:
         aise files history cli.py                           # show version table
+        aise files history cli.py --since 7d               # versions from last 7 days
+        aise files history cli.py --when 202X              # versions in the 2020s decade
+        aise files history cli.py --format json            # machine-readable
         aise files history cli.py --export                  # write cli_v1.py, cli_v2.py, ...
         aise files history cli.py --export --dry-run        # preview export
         aise files history cli.py --export --export-dir ./versions
         aise files history cli.py --stdout                  # all versions to stdout
     """
-    engine = get_engine()
+    since, until = _normalize_date_range(since, until, when, after, before)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
     versions = engine.get_versions(name)
 
     if session:
         versions = [v for v in versions if v.session_id.startswith(session)]
+
+    # Date filter: keep only versions whose timestamp falls in [since, until]
+    if since or until:
+        from ai_session_tools.engine import _passes_date_filter
+        versions = [v for v in versions if _passes_date_filter(v.timestamp or "", since, until)]
 
     if not versions:
         err_console.print(f"[red]No versions found for:[/red] {name}  (check filters)")
@@ -1446,7 +2189,7 @@ def files_history(
     if stdout_mode:
         _do_history_stdout(engine, name, versions=versions)
     else:
-        _do_history_display(engine, name, versions=versions)
+        _do_history_display(engine, name, versions=versions, fmt=fmt)
         if export:
             _do_history_export(engine, name, export_dir=export_dir, dry_run=dry_run, versions=versions)
         elif dry_run:
@@ -1455,9 +2198,11 @@ def files_history(
 
 @files_app.command("cross-ref")
 def files_cross_ref(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     file: str = typer.Argument(..., help="Path to a file to compare against session edits (e.g. ./cli.py)."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to one session (prefix match)."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
 ) -> None:
     """Show which edits Claude made to a file are present in its current version.
 
@@ -1466,7 +2211,11 @@ def files_cross_ref(
         aise files cross-ref ./engine.py --session ab841016
         aise files cross-ref ./cli.py --format json
     """
-    _do_files_cross_ref(get_engine(), file, session, fmt)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_files_cross_ref(engine, file, session, fmt)
 
 
 # Add 'find' as alias for 'files search' (registered after files_search is defined below)
@@ -1474,12 +2223,14 @@ def files_cross_ref(
 # ── messages_app commands ─────────────────────────────────────────────────────
 
 def _messages_search_cmd(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     query: Optional[str] = typer.Argument(None, help="Text to search for in messages. Use quotes for multi-word queries."),
     query_opt: Optional[str] = typer.Option(None, "--query", "-q", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
-    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = full."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
+    max_chars: int = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
     tool: Optional[str] = typer.Option(
         None, "--tool",
         help="Filter for tool call invocations (e.g. Bash, Edit, Write). Implies --type assistant.",
@@ -1488,21 +2239,35 @@ def _messages_search_cmd(
         0, "--context", "-c",
         help="Include N messages before and after each match (from the same session). Default: 0.",
     ),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
-    """Search or find conversation messages from Claude Code sessions.
+    """Search conversation messages across all configured session sources.
 
     Accessible as both 'messages search' and 'messages find' (aliases).
 
     Examples:
-        aise messages search "authentication"
-        aise messages search --query "authentication"  # backward compat
-        aise messages find "error"                     # find is an alias
-        aise messages search "*" --tool Write          # all Write tool calls
-        aise messages search "error" --context 3       # show 3 surrounding messages
+        aise messages search "authentication"                   # all messages
+        aise messages search "critique" --type user             # user turns only
+        aise messages search "step by step" --type assistant    # AI turns only
+        aise messages find "error"                              # find is an alias
+        aise messages search "*" --tool Write                   # all Write tool calls
+        aise messages search "error" --context 3               # show surrounding messages
+        aise messages search "error" --since 2026-01-01        # sessions since Jan 1
+        aise messages search "error" --when 202X               # sessions in the 2020s decade
     """
     q = query or query_opt
-    _do_messages_search(get_engine(), q or "", message_type, limit, max_chars, fmt,
-                        tool=tool, context=context)
+    # Get backend from composition root (ctx.obj injected by app_callback)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    _do_messages_search(engine, q or "", message_type, limit, max_chars, fmt,
+                        tool=tool, context=context, since=since, until=until)
 
 
 _register_alias(messages_app, _messages_search_cmd, "search", "find")
@@ -1510,12 +2275,19 @@ _register_alias(messages_app, _messages_search_cmd, "search", "find")
 
 @messages_app.command("get")
 def messages_get(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016). Find IDs via 'aise list'."),
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
-    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = full."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
+    max_chars: Optional[int] = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Read messages from one specific Claude Code session.
 
@@ -1523,18 +2295,30 @@ def messages_get(
         aise messages get ab841016              # positional
         aise messages get --session ab841016    # flag (backward compat)
         aise messages get ab841016 --type user
+        aise messages get ab841016 --since 14:00  # messages after 2pm
     """
+    since, until = _normalize_date_range(since, until, when, after, before)
     sid = session_id or session_opt
-    _do_get(get_engine(), sid, message_type, limit, max_chars, fmt)
+    # Get backend from composition root (ctx.obj injected by app_callback)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_get(engine, sid, message_type, limit, max_chars, fmt, since=since, until=until)
 
 
 @messages_app.command("corrections")
 def messages_corrections(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
-    after: Optional[str] = typer.Option(None, "--after", help="Only corrections after this date."),
-    before: Optional[str] = typer.Option(None, "--before"),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
     limit: int = typer.Option(20, "--limit", help="Max corrections to return. Default: 20"),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
     pattern: Optional[List[str]] = typer.Option(
         None, "--pattern",
         help=(
@@ -1564,16 +2348,26 @@ def messages_corrections(
         aise messages corrections --pattern 'regression:you deleted' --pattern 'regression:you removed'
         aise messages corrections --pattern 'oops:nono' --pattern 'oops:that.s wrong'
     """
-    _do_messages_corrections(get_engine(), project, after, before, limit, fmt,
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    _do_messages_corrections(engine, project, since, until, limit, fmt,
                               pattern_overrides=pattern)
 
 
 @messages_app.command("planning")
 def messages_planning(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
-    after: Optional[str] = typer.Option(None, "--after", help="Only commands after this date."),
-    before: Optional[str] = typer.Option(None, "--before", help="Only commands before this date."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
+    fmt: Optional[str] = _OPT_FORMAT,
     commands: Optional[str] = typer.Option(
         None, "--commands",
         help=(
@@ -1604,13 +2398,20 @@ def messages_planning(
         aise messages planning --commands '/ar:plannew,/ar:pn'
         aise messages planning --commands '/mycommand,/mc,/plan,/p'
     """
-    _do_messages_planning(get_engine(), project, after, before, fmt, commands_raw=commands)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    _do_messages_planning(engine, project, since, until, fmt, commands_raw=commands)
 
 
-@messages_app.command("analyze")
-def messages_analyze(
+@messages_app.command("inspect")
+def messages_inspect(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. ab841016). Find IDs via 'aise list'."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
 ) -> None:
     """Show per-session statistics: message counts, tool usage, and files touched.
 
@@ -1618,20 +2419,32 @@ def messages_analyze(
     input — not hardcoded to specific tool names.
 
     Examples:
-        aise messages analyze ab841016
-        aise messages analyze ab841016 --format json
+        aise messages inspect ab841016
+        aise messages inspect ab841016 --format json
     """
-    _do_messages_analyze(get_engine(), session_id, fmt)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_messages_analyze(engine, session_id, fmt)
 
 
 @messages_app.command("timeline")
 def messages_timeline(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. ab841016). Find IDs via 'aise list'."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
     preview_chars: int = typer.Option(
         150, "--preview-chars",
         help="Max characters to show in content preview column. Default: 150",
     ),
+    message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' events. Default: both."),
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Show a chronological timeline of user/assistant events for a session.
 
@@ -1642,8 +2455,16 @@ def messages_timeline(
         aise messages timeline ab841016
         aise messages timeline ab841016 --format json
         aise messages timeline ab841016 --preview-chars 80
+        aise messages timeline ab841016 --type assistant    # AI turns only
+        aise messages timeline ab841016 --since 14:00       # events after 2pm
     """
-    _do_messages_timeline(get_engine(), session_id, fmt, preview_chars=preview_chars)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_messages_timeline(engine, session_id, fmt, preview_chars=preview_chars,
+                          message_type=message_type, since=since, until=until)
 
 
 #: Supported content extraction types for ``messages extract``.
@@ -1666,6 +2487,9 @@ def _do_messages_extract(
     session_id: str,
     content_type: str,
     fmt: str = "table",
+    limit: Optional[int] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> None:
     """Extract specific content type from a session."""
     if content_type not in _EXTRACT_TYPES:
@@ -1681,18 +2505,31 @@ def _do_messages_extract(
                 f"[red]No session found or no clipboard content for: {session_id!r}[/red]"
             )
             raise typer.Exit(code=1)
+        if since or until:
+            from ai_session_tools.engine import _passes_date_filter
+            results = [r for r in results if _passes_date_filter(r.get("timestamp", ""), since, until)]
+        if limit is not None:
+            results = results[:limit]
         _render_output(results, fmt, _EXTRACT_PBCOPY_SPEC, "No clipboard content found")
 
 
 @messages_app.command("extract")
 def messages_extract(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. dddd0001). Find IDs via 'aise list'."),
     content_type: str = typer.Argument(
         ...,
         help=f"Content type to extract. Supported: {', '.join(_EXTRACT_TYPES)}.",
         metavar="TYPE",
     ),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
+    limit: Optional[int] = typer.Option(None, "--limit", help="Max items to return. Default: unlimited."),
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Extract specific content from a Claude Code session.
 
@@ -1715,18 +2552,32 @@ def messages_extract(
         aise messages extract dddd0001 pbcopy --format json
 
         aise messages extract dddd0001 pbcopy --format plain
+
+        aise messages extract dddd0001 pbcopy --limit 3
     """
-    _do_messages_extract(get_engine(), session_id, content_type, fmt)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_messages_extract(engine, session_id, content_type, fmt, limit=limit, since=since, until=until)
 
 
 # ── tools_app commands ────────────────────────────────────────────────────────
 
 def _tools_search_cmd(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     tool: str = typer.Argument(..., help="Tool name (e.g. Bash, Edit, Write, Read, Glob, Grep)."),
     query: Optional[str] = typer.Argument(None, help="Optional text to match in tool input. Omit to list all uses."),
     limit: int = typer.Option(10, "--limit", help="Max results. Default: 10"),
-    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each result to N chars. 0=full."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
+    max_chars: int = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Search or find tool invocations from Claude Code sessions.
 
@@ -1737,10 +2588,18 @@ def _tools_search_cmd(
         aise tools search Bash "git commit"          # Bash calls with "git commit"
         aise tools find Edit "cli.py"                # find alias
         aise tools search Write --format json        # JSON output
+        aise tools search Bash --since 7d            # recent Bash calls only
+        aise tools search Bash --when 202X           # Bash calls in the 2020s decade
     """
+    since, until = _normalize_date_range(since, until, when, after, before)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
     _do_messages_search(
-        get_engine(), query or "", message_type="assistant",
+        engine, query or "", message_type="assistant",
         limit=limit, max_chars=max_chars, fmt=fmt, tool=tool,
+        since=since, until=until,
     )
 
 
@@ -1749,26 +2608,117 @@ _register_alias(tools_app, _tools_search_cmd, "search", "find")
 
 # ── Root commands ─────────────────────────────────────────────────────────────
 
+@app.command("dates")
+def dates_reference() -> None:
+    """Show full date/time format reference for --since, --until, and --when flags."""
+    from rich.markdown import Markdown
+    Console().print(Markdown("""\
+# Date/Time Format Reference
+
+All date flags (`--since`, `--until`, `--when`) accept the following formats:
+
+## ISO 8601 Dates
+| Input | Meaning |
+|-------|---------|
+| `2026-01-15` | Any time on January 15, 2026 |
+| `2026-01-15T14:30:00` | Specific date and time |
+
+## Partial Dates (EDTF Level 0)
+| Input | Meaning |
+|-------|---------|
+| `2026-01` | All of January 2026 |
+| `2026` | All of year 2026 |
+
+## Unspecified Digits (EDTF Level 1)
+| Input | Meaning |
+|-------|---------|
+| `202X` or `202x` | The 2020s decade (2020-01-01 to 2029-12-31) |
+| `19XX` | The 1900s century (1900-01-01 to 1999-12-31) |
+| `2026-01-1X` | January 10-19, 2026 |
+
+## EDTF Intervals (--since only, sets both lower and upper bounds)
+| Input | Meaning |
+|-------|---------|
+| `2026-01/2026-03` | January through March 2026 |
+
+## Durations (relative to now)
+| Input | Meaning |
+|-------|---------|
+| `7d` | 7 days ago |
+| `2w` | 2 weeks ago |
+| `1m` | ~30 days ago |
+| `24h` | 24 hours ago |
+| `30min` | 30 minutes ago |
+
+## Natural Language (via python-dateutil)
+| Input | Meaning |
+|-------|---------|
+| `yesterday` | Yesterday at midnight |
+| `3 days ago` | 3 days ago |
+
+## Flag Semantics
+
+| Flag | Lower bound | Upper bound | Best for |
+|------|------------|------------|---------|
+| `--since VALUE` | lower_strict(VALUE) | — | "from this date onward" |
+| `--until VALUE` | — | upper_strict(VALUE) | "up to this date" |
+| `--when VALUE` | lower_strict(VALUE) | upper_strict(VALUE) | EDTF periods: `202X`, `2026-01-1X`, `2026-01` |
+
+**Key difference:** `--when 202X` filters to exactly the 2020s decade.
+`--since 202X` means "from 2020 onward" with no upper limit.
+
+## Examples
+
+```
+aise list --since 7d
+aise list --when 202X
+aise list --when 2026-01-1X
+aise list --since 2026-01 --until 2026-03
+aise list --since 2026-01/2026-03
+aise search messages --query "bug" --since 2w
+aise messages corrections --when 2026
+```
+
+## EDTF Specification
+
+Full specification: https://www.loc.gov/standards/datetime/
+"""))
+
+
 @app.command("list")
 def list_sessions(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
-    after: Optional[str] = typer.Option(None, "--after", help="Only sessions after this date (e.g. 2026-01-15)."),
-    before: Optional[str] = typer.Option(None, "--before", help="Only sessions before this date."),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
     limit: Optional[int] = typer.Option(None, "--limit", help="Max sessions to return. Default: unlimited."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
 ) -> None:
-    """List Claude Code sessions with metadata (project, date, branch, message count).
+    """List sessions with metadata.
 
     Examples:
-        aise list                              # all sessions
+        aise list                              # all configured sessions
+        aise list --provider aistudio          # AI Studio sessions only
         aise list --project myproject          # filter by project
-        aise list --after 2026-01-01           # sessions since Jan 1
+        aise list --since 7d                   # sessions in the last 7 days
+        aise list --when 202X                  # all sessions in the 2020s decade
+        aise list --since 2026-01 --until 2026-03  # January through March 2026
         aise list --format json                # JSON output
     """
-    _do_list_sessions(get_engine(), project, after, before, limit, fmt)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    _do_list_sessions(engine, project, since, until, limit, fmt)
 
 
 def _root_search_cmd(
+    ctx: typer.Context,
     domain: Optional[str] = typer.Argument(None, metavar="[files|messages|tools]",
         help="Domain: 'files', 'messages', or 'tools' (tool calls). Auto-detected from flags."),
     pattern: Optional[str] = typer.Option(None, "--pattern", "-p", help="[files] Filename glob/regex to match (e.g. '*.py', 'cli*'). Default: * (all files)"),
@@ -1779,31 +2729,40 @@ def _root_search_cmd(
     exclude_extensions: Optional[str] = typer.Option(None, "--exclude-extensions", "-x", help="[files] Skip these file extensions, comma-separated (e.g. pyc,tmp)"),
     include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="[files] Only search these session UUIDs, comma-separated"),
     exclude_sessions: Optional[str] = typer.Option(None, "--exclude-sessions", help="[files] Skip these session UUIDs, comma-separated"),
-    after: Optional[str] = typer.Option(None, "--after", help="[files/messages] Only results after this date."),
-    before: Optional[str] = typer.Option(None, "--before", help="[files/messages] Only results before this date."),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="[messages] Show only 'user' or 'assistant' messages. Default: both"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited for files, 10 for messages"),
-    max_chars: int = typer.Option(0, "--max-chars", help="[messages] Truncate each message to this many characters. 0 = full message. Default: 0"),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    max_chars: int = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
     tool: Optional[str] = typer.Option(None, "--tool",
         help="[messages/tools] Filter for tool call invocations (e.g. Bash, Edit, Write). Auto-routes to messages domain."),
+    provider: Optional[str] = _OPT_PROVIDER,
 ) -> None:
-    """Search or find source files and/or conversation messages.
+    """Search messages, files, and tool calls across all sources.
 
     Accessible as both 'search' and 'find' at the root level (aliases).
 
     Examples:
-        aise search                                          # list all source files
-        aise search files --pattern "*.py"                   # Python files only
-        aise search messages --query "error"                 # messages with "error"
+        aise search messages --query "error"                 # messages containing "error"
+        aise search messages --query "error" --provider claude # Claude sessions only
+        aise search files --pattern "*.py"                   # Python files edited by Claude
         aise search tools --tool Write --query "login"       # Write calls with "login"
         aise search --tool Bash --query "git commit"         # auto-routes to messages
-        aise find files --pattern "*.py"                     # find is an alias
+        aise search messages --query "bug" --since 2w        # last 2 weeks
     """
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    since, until = _normalize_date_range(since, until, when, after, before)
     _do_search(
-        get_engine(), domain, pattern, query, min_edits, max_edits,
+        engine, domain, pattern, query, min_edits, max_edits,
         include_extensions, exclude_extensions, include_sessions, exclude_sessions,
-        after, before, message_type, limit, max_chars, fmt, tool=tool,
+        since, until, message_type, limit, max_chars, fmt, tool=tool,
     )
 
 
@@ -1812,6 +2771,7 @@ _register_alias(app, _root_search_cmd, "search", "find")
 
 @app.command()
 def extract(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Filename to extract (e.g. cli.py). Use 'aise search' to find available names."),
     version: Optional[int] = typer.Option(
         None, "--version", "-v",
@@ -1834,29 +2794,39 @@ def extract(
         help="Show what would be extracted/written without producing any output.",
     ),
 ) -> None:
-    """Extract a source file from Claude Code session data (stdout by default).
+    """Extract the latest (or a specific) version of a file from session history.
 
     Equivalent to 'aise files extract'. Use 'aise search' to find available filenames.
     By default prints the latest version to stdout (pipe-friendly).
     """
-    _do_extract(get_engine(), name, version=version, session=session, output_dir=output_dir, restore=restore, dry_run=dry_run)
+    engine = ctx.obj.get("engine") if ctx.obj else None
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_extract(engine, name, version=version, session=session, output_dir=output_dir, restore=restore, dry_run=dry_run)
 
 
 @app.command()
 def history(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Filename to show history for (e.g. cli.py)."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to versions from this session ID (prefix match)."),
     export: bool = typer.Option(False, "--export", help="Write all versions to disk as cli_v1.py, cli_v2.py, etc."),
     export_dir: Optional[str] = typer.Option(None, "--export-dir", help="Where to write exported files."),
     stdout_mode: bool = typer.Option(False, "--stdout", help="Print all versions to stdout with === v1 === headers."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --export: show what would be written without writing."),
+    fmt: Optional[str] = _OPT_FORMAT,
+    provider: Optional[str] = _OPT_PROVIDER,
 ) -> None:
-    """Show version history of a source file (read-only by default).
+    """Show all recorded versions of a file across sessions.
 
     Equivalent to 'aise files history'. Creates a table of all recorded versions.
     READ-ONLY — no files are written unless you use --export or --stdout.
     """
-    engine = get_engine()
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
     versions = engine.get_versions(name)
 
     if session:
@@ -1869,7 +2839,7 @@ def history(
     if stdout_mode:
         _do_history_stdout(engine, name, versions=versions)
     else:
-        _do_history_display(engine, name, versions=versions)
+        _do_history_display(engine, name, versions=versions, fmt=fmt)
         if export:
             _do_history_export(engine, name, export_dir=export_dir, dry_run=dry_run, versions=versions)
         elif dry_run:
@@ -1878,42 +2848,69 @@ def history(
 
 @app.command()
 def get(
+    ctx: typer.Context,
     session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016)."),
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
-    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = show full message. Default: 0"),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    max_chars: Optional[int] = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
+    provider: Optional[str] = _OPT_PROVIDER,
 ) -> None:
-    """Read messages from one specific Claude Code session.
+    """Read messages from one specific session.
 
-    Equivalent to 'aise messages get'. Session IDs are UUIDs found in ~/.claude/projects/
-    or in output from 'aise list'.
+    Equivalent to 'aise messages get'. Find session IDs with 'aise list'.
 
     Examples:
         aise get ab841016
         aise get ab841016 --type user --limit 50
     """
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
     sid = session_id or session_opt
-    _do_get(get_engine(), sid, message_type, limit, max_chars, fmt)
+    _do_get(engine, sid, message_type, limit, max_chars, fmt)
 
 
 @app.command()
-def stats() -> None:
-    """Show counts of sessions, files, versions, and the most-edited file."""
-    _do_stats(get_engine())
+def stats(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
+    fmt: Optional[str] = _OPT_FORMAT,
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
+) -> None:
+    """Show session, file, and version counts per source.
+
+    Examples:
+        aise stats                              # all configured sources (no date restriction)
+        aise stats --provider aistudio         # AI Studio only
+        aise stats --provider claude           # Claude Code only
+        aise stats --format json               # machine-readable output
+        aise stats --since 7d                  # sessions from the last 7 days
+        aise stats --when 202X                 # sessions in the 2020s decade
+        aise stats --since 2026-01 --until 2026-03  # January through March 2026
+    """
+    since, until = _normalize_date_range(since, until, when, after, before)
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    _do_stats(engine, since=since, until=until, fmt=fmt)
 
 
 # ── Config app ───────────────────────────────────────────────────────────────
 
 def _get_config_file_path() -> Path:
-    """Return the resolved config file path based on current priority chain."""
-    if _g_config_path:
-        return Path(_g_config_path).expanduser()
-    env_val = os.getenv("AI_SESSION_TOOLS_CONFIG")
-    if env_val:
-        return Path(env_val).expanduser()
-    return Path(typer.get_app_dir("ai_session_tools")) / "config.json"
+    """Return the resolved config file path based on current priority chain.
+
+    Delegates to _resolve_config_path() — single source of truth for path resolution.
+    """
+    return _resolve_config_path()
 
 
 @config_app.command("path")
@@ -1974,6 +2971,145 @@ def config_show(
 
 
 _CONFIG_INIT_TEMPLATE = {
+    "_comment": (
+        "ai_session_tools configuration. "
+        "Set org_dir and source_dirs before running 'aise analyze'. "
+        "Config path: override with --config flag or AI_SESSION_TOOLS_CONFIG env var."
+    ),
+    # ── Required for aise analyze ──────────────────────────────────────────
+    "org_dir": "",          # Path to your organized/ directory (output destination)
+    "source_dirs": {
+        "aistudio": [],     # List of Google AI Studio export directories
+        "gemini_cli": "",   # Path to Gemini CLI tmp dir (auto-detected: ~/.gemini/tmp)
+    },
+    # ── Optional analysis settings ─────────────────────────────────────────
+    "vocab_output_filename": "VOCABULARY_ANALYSIS.md",
+    "gemini_org_task_session": "",  # Session file path for aise instruction-history
+    "marker_window": 25000,         # Chars of user text to scan for codebook markers
+    # ── Scoring weights (all numeric thresholds in one place) ──────────────
+    "scoring_weights": {
+        "technique": 20,
+        "role": 15,
+        "thinking_budget": 30,
+        "anti_ai": 35,
+        "version_multiplier": 10,
+        "corrected_bonus": 25,
+        "descendant_boost": 15,
+        "tfidf_similarity_threshold": 0.70,
+        "min_ngram_freq": 3,
+        "min_session_text_len": 50,
+        "min_utility_for_index": 20,
+    },
+    # ── Stop words: common function words excluded from n-gram analysis ────
+    "stop_words": [
+        "the", "this", "that", "and", "is", "for", "with", "from", "you", "are",
+        "into", "of", "to", "a", "in", "it", "as", "be", "an", "or", "on", "at",
+        "by", "we", "i", "can", "but", "not", "so", "if", "do", "its", "all",
+        "my", "me", "have", "has", "was", "will", "your", "our", "they", "them",
+        "also", "then", "than", "when", "just", "up", "out", "about",
+    ],
+    # ── aise organize output formats ───────────────────────────────────────
+    # Valid values: "symlinks", "json", "markdown" (list to combine)
+    # "symlinks" — non-destructive symlink taxonomy dirs in org_dir (default)
+    # "json"     — SESSION_TAXONOMY.json: {name: {taxonomy, utility, era}}
+    # "markdown" — TAXONOMY.md: sessions grouped by dimension and category
+    "organize_formats": ["symlinks"],
+    # ── Taxonomy dimension definitions ─────────────────────────────────────
+    # Each dimension controls one axis of the taxonomy. Fields:
+    #   name           — directory name (e.g. "03_by_technique")
+    #   match          — "field" (read record field) or "keyword" (match via keyword_map)
+    #   field          — record field name         (for match=field)
+    #   scalar         — true if field is a single value, not a list (for match=field)
+    #   keyword_map    — key into keyword_maps     (for match=keyword)
+    #   match_field    — record field to match against  (for match=keyword)
+    #   match_type     — "substring" or "set_intersection"  (for match=keyword)
+    #   fallback       — category when no keywords match  (for match=keyword, optional)
+    #   exclude        — category values to skip  (optional, default [])
+    #   prefer_for_links — use this dim for INDEX.md link targets (default true)
+    #   label          — human-readable label for INDEX.md (optional)
+    # Remove this key or set to [] to use the built-in 7-dimension default.
+    "taxonomy_dimensions": [
+        {
+            "name": "01_by_project",
+            "match": "keyword",
+            "keyword_map": "project_map",
+            "source_field": "name",
+            "match_type": "substring",
+            "fallback": "misc_research",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "02_by_workflow",
+            "match": "keyword",
+            "keyword_map": "workflow_map",
+            "source_field": "techniques",
+            "match_type": "set_intersection",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "03_by_technique",
+            "match": "field",
+            "field": "techniques",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "04_by_task",
+            "match": "field",
+            "field": "task_categories",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "05_by_expert_role",
+            "match": "field",
+            "field": "roles",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "06_by_writing_method",
+            "match": "field",
+            "field": "writing_methods",
+            "prefer_for_links": True,
+        },
+        {
+            "name": "07_by_era",
+            "match": "field",
+            "field": "era",
+            "scalar": True,
+            "exclude": ["unknown"],
+            "prefer_for_links": False,
+        },
+        {
+            # Sessions with cwd="" (AI Studio, Gemini CLI) are skipped (no fallback).
+            # Populated for Claude Code sessions from the JSONL cwd field.
+            "name": "08_by_working_dir",
+            "match": "field",
+            "field": "cwd",
+            "scalar": True,
+            "exclude": [""],
+            "prefer_for_links": False,
+            "label": "08 By Working Dir",
+        },
+    ],
+    # ── Continuation marker detection for prompt role classification ───────
+    "continuation_markers": {
+        "min_initial_len": 50,
+        "prefix_markers": [
+            "ok", "okay", "yes", "yeah", "sure", "great", "good", "nice",
+            "thanks", "thank you", "now", "also", "and", "but", "so",
+            "wait", "hmm", "hm", "continue", "proceed", "go on", "go ahead",
+            "can you", "could you", "please", "i want", "i need",
+            "actually", "by the way", "one more", "also can", "also please",
+            "commit", "push", "run", "execute", "fix the", "fix that", "fix it",
+        ],
+    },
+    # ── Keyword maps for taxonomy classification (populate to improve results)
+    "keyword_maps": {
+        "task_categories": {},
+        "writing_methods": {},
+        "project_map": {},
+        "workflow_map": {},
+    },
+    # ── Claude Code session analysis settings ──────────────────────────────
     "correction_patterns": [
         "regression:you deleted",
         "regression:you removed",
@@ -1983,14 +3119,8 @@ _CONFIG_INIT_TEMPLATE = {
         "incomplete:also need",
     ],
     "planning_commands": [
-        "/ar:plannew",
-        "/ar:pn",
-        "/ar:planrefine",
-        "/ar:pr",
-        "/ar:planupdate",
-        "/ar:pu",
-        "/ar:planprocess",
-        "/ar:pp",
+        "/ar:plannew", "/ar:pn", "/ar:planrefine", "/ar:pr",
+        "/ar:planupdate", "/ar:pu", "/ar:planprocess", "/ar:pp",
     ],
 }
 
@@ -2020,18 +3150,395 @@ def config_init(
         )
         raise typer.Exit(code=1)
 
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(json.dumps(_CONFIG_INIT_TEMPLATE, indent=2) + "\n", encoding="utf-8")
-
-    # Invalidate cache so next command picks up the new file
-    global _config_cache
-    _config_cache = None
+    _write_config(_CONFIG_INIT_TEMPLATE)
+    # _write_config always calls invalidate_config_cache() so no extra step needed
 
     console.print(f"[green]Created:[/green] {config_file}")
     console.print(
-        "[dim]Edit the file to customize correction patterns and planning commands.[/dim]\n"
+        "[dim]Edit org_dir and source_dirs.aistudio to enable 'aise analyze'.[/dim]\n"
+        "[dim]All scoring thresholds, stop words, and keyword maps are in one place.[/dim]\n"
         "[dim]Run 'aise config show' to verify the active configuration.[/dim]"
     )
+
+
+# ── Analysis pipeline configuration ──────────────────────────────────────────
+
+# Pipeline stage mapping: stage name → module path
+_PIPELINE_STEPS = {
+    "instruction-history": "ai_session_tools.analysis.extract",
+    "analyze":             "ai_session_tools.analysis.analyzer",
+    "graph":               "ai_session_tools.analysis.graph",
+    "organize":            "ai_session_tools.analysis.orchestrator",
+    "vocab":               "ai_session_tools.analysis.vocab",
+}
+
+# Pipeline dependencies: stage → (required_predecessor_stage, required_file)
+_STEP_DEPS = {
+    "graph":    ("analyze", "session_db.json"),
+    "organize": ("graph",   "SESSION_GRAPH.json"),
+}
+
+
+def _pipeline_order(cfg: dict) -> list[str]:
+    """Build pipeline step list; omit instruction-history if not configured.
+
+    Args:
+        cfg: Configuration dict
+
+    Returns:
+        List of stage names in execution order
+    """
+    base = ["analyze", "graph", "organize"]
+    if cfg.get("gemini_org_task_session"):
+        return ["instruction-history"] + base
+    return base
+
+
+def _check_step_dep(step: str, cfg: dict, org_dir: Path) -> None:
+    """Raise helpful error if required predecessor output is missing.
+
+    Args:
+        step: Pipeline stage name
+        cfg: Configuration dict
+        org_dir: Organization directory
+
+    Raises:
+        typer.Exit: If required predecessor output is missing
+    """
+    if step not in _STEP_DEPS:
+        return
+    prev_step, required_file = _STEP_DEPS[step]
+    if not (org_dir / required_file).exists():
+        err_console.print(
+            f"[red]Missing {required_file}.[/red] "
+            f"Run [bold]aise analyze --step {prev_step}[/bold] first."
+        )
+        raise typer.Exit(code=1)
+
+
+def _run_single_step(
+    step: str,
+    source_filter: Optional[str],
+    marker_window: int,
+    cfg: dict,
+    org_dir: Path,
+    organize_formats: Optional[list[str]] = None,
+) -> None:
+    """Run a single pipeline step.
+
+    Args:
+        step: Pipeline stage name
+        source_filter: Source to narrow to (aistudio, gemini, or None for all)
+        marker_window: Chars for marker matching (0 = use config default)
+        cfg: Configuration dict
+        org_dir: Organization directory
+        organize_formats: Output formats for the organize step (None = read from config)
+
+    Raises:
+        typer.Exit: If step fails
+    """
+    import importlib
+    _check_step_dep(step, cfg, org_dir)
+    mod_path = _PIPELINE_STEPS[step]
+    mod = importlib.import_module(mod_path)
+
+    try:
+        if step == "analyze" and marker_window > 0:
+            mod.run_analysis(marker_window=marker_window, source_filter=source_filter)
+        elif step == "analyze" and source_filter:
+            mod.run_analysis(marker_window=0, source_filter=source_filter)
+        elif step == "organize":
+            mod.run_orchestration(formats=organize_formats)
+        else:
+            mod.main()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        err_console.print(f"[red]Step '{step}' failed: {exc}[/red]")
+        raise
+
+
+# ── Analysis commands (aise analyze / graph / organize / vocab / instruction-history) ──
+
+
+@app.command("analyze")
+def cmd_analyze(
+    ctx: typer.Context,
+    step: Optional[str] = typer.Option(
+        None, "--step", hidden=True,
+        help="Advanced: run only one pipeline step. Use 'aise analyze' for full pipeline."
+    ),
+    marker_window: int = typer.Option(
+        0, "--window", "-w",
+        help="Chars for marker matching (0=from config)."
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Force re-run all stages even if inputs unchanged."
+    ),
+    status_only: bool = typer.Option(
+        False, "--status",
+        help="Show which stages are stale/current without running."
+    ),
+    org_dir: Optional[str] = typer.Option(
+        None, "--org-dir",
+        help="Override config.org_dir for this run."
+    ),
+    fmt: Optional[str] = typer.Option(
+        None, "--format", "-f",
+        help=(
+            "Output format(s) for the organize step, comma-separated: "
+            "symlinks, json, markdown. Default: from config or 'symlinks'."
+        ),
+    ),
+) -> None:
+    """Run the full analysis pipeline: qualitative coding → graph → taxonomy symlinks.
+
+    Runs the full pipeline automatically. Stages are skipped when inputs
+    have not changed since the last run (idempotent).
+
+    Full pipeline (in order):
+      1. analyze   → session_db.json + VOCABULARY_ANALYSIS.md
+      2. graph     → SESSION_GRAPH.json
+      3. organize  → symlinks + INDEX.md + SESSIONS_FULL.md
+      (instruction-history → USER_INSTRUCTIONS_CLEAN.md if gemini_org_task_session configured)
+
+    Re-run one stage with --step (advanced):
+        aise analyze --step analyze
+        aise analyze --step graph
+
+    To narrow to one backend, use --provider:
+        aise analyze --provider aistudio  (analyze only AI Studio sessions)
+        aise analyze --provider gemini    (analyze only Gemini CLI sessions)
+        aise analyze                      (analyze all configured sources)
+    """
+    from ai_session_tools.analysis import pipeline_state as ps
+
+    cfg = load_config()
+    if org_dir:
+        cfg["org_dir"] = org_dir
+    org_dir_str = cfg.get("org_dir", "").strip()
+    if not org_dir_str:
+        err_console.print(
+            "[red]org_dir not configured.[/red] "
+            "Run [bold]aise config init[/bold] or set org_dir in config.json"
+        )
+        raise typer.Exit(code=1)
+    org = Path(org_dir_str).expanduser()
+    org.mkdir(parents=True, exist_ok=True)
+
+    # Get source filter from ctx.obj (set by app_callback composition root)
+    ctx_obj = ctx.obj if ctx.obj else {}
+    source_filter = ctx_obj.get("source")
+    if source_filter and source_filter not in ("aistudio", "gemini", "all"):
+        source_filter = None  # fallback: None means all sources
+    organize_formats = [f.strip() for f in fmt.split(",")] if fmt else None
+    pipeline_order = _pipeline_order(cfg)
+    state = ps.load_state(org) if (org and not force) else {}
+
+    # Single step mode (advanced)
+    if step:
+        if step not in _PIPELINE_STEPS:
+            err_console.print(
+                f"[red]Invalid --step '{step}'.[/red] "
+                f"Valid: {', '.join(sorted(_PIPELINE_STEPS.keys()))}"
+            )
+            raise typer.Exit(code=1)
+        _run_single_step(step, source_filter, marker_window, cfg, org,
+                         organize_formats=organize_formats)
+        # Note: Not updating state for single-step runs; use full pipeline for tracking
+        return
+
+    # Status dry-run mode
+    if status_only:
+        console.print("[bold]Pipeline status:[/bold]")
+        for name in pipeline_order:
+            # Simple check: does output file exist?
+            if name == "instruction-history":
+                output = org / "USER_INSTRUCTIONS_CLEAN.md"
+            elif name == "analyze":
+                output = org / "session_db.json"
+            elif name == "graph":
+                output = org / "SESSION_GRAPH.json"
+            elif name == "organize":
+                output = org / "INDEX.md"
+            else:
+                output = None
+            if output and output.exists():
+                console.print(f"  [green]current[/green]  {name}")
+            else:
+                console.print(f"  [red]STALE[/red]   {name}")
+        return
+
+    # Full pipeline with change detection
+    console.print("[bold]Running full analysis pipeline...[/bold]")
+    ran_any = False
+    for i, name in enumerate(pipeline_order, 1):
+        # Simple heuristic: check if output exists and --force not specified
+        if name == "instruction-history":
+            output = org / "USER_INSTRUCTIONS_CLEAN.md"
+        elif name == "analyze":
+            output = org / "session_db.json"
+        elif name == "graph":
+            output = org / "SESSION_GRAPH.json"
+        elif name == "organize":
+            output = org / "INDEX.md"
+        else:
+            output = None
+
+        if not force and output and output.exists():
+            console.print(f"[dim][{name}] skipped (output up to date)[/dim]")
+            continue
+
+        console.print(f"[cyan][{name}] running...[/cyan]")
+        try:
+            _run_single_step(name, source_filter, marker_window, cfg, org,
+                             organize_formats=organize_formats)
+            ran_any = True
+        except SystemExit:
+            raise
+
+    if not ran_any:
+        console.print("[green]All pipeline stages are current. Nothing to do.[/green]")
+    else:
+        console.print("[bold green]Pipeline complete.[/bold green]")
+
+
+@app.command("graph", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")
+def cmd_graph() -> None:
+    """Build session provenance graph from session_db.json -> SESSION_GRAPH.json.
+
+    Detects 'Branch of X', 'Copy of X', 'Name vN' lineage patterns and project groupings.
+
+    Requires session_db.json from 'aise analyze --step analyze'.
+    Tip: Use 'aise analyze' to run the full pipeline automatically.
+    """
+    cfg = load_config()
+    org_dir_str = cfg.get("org_dir", "").strip()
+    if not org_dir_str:
+        err_console.print(
+            "[red]org_dir not configured.[/red] "
+            "Run [bold]aise config init[/bold] or set org_dir in config.json"
+        )
+        raise typer.Exit(code=1)
+    org = Path(org_dir_str).expanduser()
+    _check_step_dep("graph", cfg, org)
+    from ai_session_tools.analysis.graph import main as graph_main
+    graph_main()
+
+
+@app.command("organize", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")
+def cmd_organize(
+    fmt: Optional[str] = typer.Option(
+        None, "--format", "-f",
+        help=(
+            "Output format(s), comma-separated: symlinks, json, markdown. "
+            "Default: from config.json['organize_formats'] or 'symlinks'."
+        ),
+    ),
+    validate: bool = typer.Option(
+        False, "--validate", "-V",
+        help=(
+            "Check taxonomy config health without running orchestration. "
+            "Reports each dimension: OK, WARN (empty keyword_map), or ERROR (missing key). "
+            "Exits 1 if any errors found."
+        ),
+    ),
+) -> None:
+    """Create taxonomy output in one or more formats + INDEX.md + SESSIONS_FULL.md.
+
+    Formats: symlinks (default), json (SESSION_TAXONOMY.json), markdown (TAXONOMY.md).
+    Use --format symlinks,json,markdown to produce all three simultaneously.
+    Non-destructive: symlinks are never deleted, only added.
+
+    Requires SESSION_GRAPH.json from 'aise analyze --step graph'.
+    Tip: Use 'aise analyze' to run the full pipeline automatically.
+
+    Validate config without running: aise organize --validate
+    """
+    from ai_session_tools.analysis.orchestrator import (
+        load_taxonomy_dimensions, validate_taxonomy_dimensions, _DEFAULT_TAXONOMY_DIMENSIONS
+    )
+    from ai_session_tools.analysis.codebook import load_keyword_maps
+
+    if validate:
+        cfg = load_config()
+        keyword_maps = load_keyword_maps()
+        raw_dims = get_config_section("taxonomy_dimensions")
+        if raw_dims and isinstance(raw_dims, list):
+            dims = raw_dims
+            source = "config.json[taxonomy_dimensions]"
+        else:
+            dims = _DEFAULT_TAXONOMY_DIMENSIONS
+            source = "built-in defaults (no taxonomy_dimensions in config)"
+
+        console.print(f"[bold]Validating taxonomy dimensions[/bold] ({source})\n")
+        errors = validate_taxonomy_dimensions(dims, keyword_maps)
+
+        has_errors = any("ERROR" in e or "missing required key" in e or "must be one of" in e
+                         for e in errors)
+        has_warns = any("empty or missing" in e for e in errors)
+
+        for dim in dims:
+            name = dim.get("name", "<unnamed>")
+            match = dim.get("match", "?")
+            if match == "field":
+                detail = f"field={dim.get('field', '?')}, scalar={dim.get('scalar', False)}"
+            else:
+                sf = dim.get("source_field") or dim.get("match_field", "?")
+                kmap = dim.get("keyword_map", "?")
+                kmap_size = len(keyword_maps.get(kmap, {}))
+                detail = f"source_field={sf}, keyword_map={kmap} ({kmap_size} categories)"
+            console.print(f"  [cyan]{name}[/cyan]  match={match}  {detail}")
+
+        if errors:
+            console.print()
+            for e in errors:
+                if "empty or missing" in e:
+                    console.print(f"  [yellow]WARN[/yellow] {e}")
+                else:
+                    console.print(f"  [red]ERROR[/red] {e}")
+        else:
+            console.print("\n  [green]All dimensions OK[/green]")
+
+        if has_errors:
+            raise typer.Exit(code=1)
+        return
+
+    cfg = load_config()
+    org_dir_str = cfg.get("org_dir", "").strip()
+    if not org_dir_str:
+        err_console.print(
+            "[red]org_dir not configured.[/red] "
+            "Run [bold]aise config init[/bold] or set org_dir in config.json"
+        )
+        raise typer.Exit(code=1)
+    org = Path(org_dir_str).expanduser()
+    _check_step_dep("organize", cfg, org)
+    formats = [f.strip() for f in fmt.split(",")] if fmt else None
+    from ai_session_tools.analysis import orchestrator as _orch
+    _orch.run_orchestration(formats=formats)
+
+
+@app.command("vocab", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")
+def cmd_vocab() -> None:
+    """Standalone vocabulary analysis -> VOCABULARY_ANALYSIS.md.
+
+    Normally vocabulary is mined inline by `aise analyze`. Use this to re-run independently.
+    """
+    from ai_session_tools.analysis.vocab import main as vocab_main
+    vocab_main()
+
+
+@app.command("instruction-history", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")
+def cmd_instruction_history() -> None:
+    """Extract verbatim user instruction history from Gemini CLI session -> USER_INSTRUCTIONS_CLEAN.md.
+
+    Session path: from config key 'gemini_org_task_session' or auto-discovered.
+    Tip: Use 'aise analyze' to run the full pipeline automatically.
+    """
+    from ai_session_tools.analysis.extract import main as extract_main
+    extract_main()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 """
 
+import contextlib
 import datetime
 import fnmatch
 import functools
@@ -34,6 +35,149 @@ from .models import (
     SessionInfo,
     SessionMessage,
 )
+from ai_session_tools.config import get_config_path, load_config, write_config
+
+
+def _parse_date_input(s: str, mode: str = "start") -> "str | tuple[str, str]":
+    """Normalize flexible date/EDTF input to ISO 8601 for lexicographic comparison.
+
+    mode="start" → lower_strict() bound (earliest date in period)
+    mode="end"   → upper_strict() bound (latest date in period)
+
+    Accepted formats:
+      Any valid EDTF (Level 0-2):
+        YYYY-MM-DDTHH:MM:SS    full ISO 8601 datetime
+        YYYY-MM-DD             date-only
+        YYYY-MM, YYYY          month/year precision (expanded to period bounds)
+        202X, 19XX             EDTF Level 1 unspecified digits (decade/century)
+        2026-01-1X             EDTF Level 1 unspecified day digit
+        2026-01/2026-03        EDTF interval — returns (start_iso, end_iso) 2-tuple
+      Duration shorthands (not EDTF, handled before library):
+        7d, 2w, 1m, 24h, 30min   time ago from now
+      NLP via python-dateutil (transitive dep of edtf):
+        "yesterday", "3 days ago", "last Monday"
+
+    Returns str for single date bound, tuple[str, str] for EDTF interval (A/B).
+    Raises ValueError with user-friendly message on invalid/unrecognised input.
+    """
+    import re as _re
+    import time as _time
+
+    s = s.strip()
+
+    # ── Duration shorthand (7d, 2w, 1m, 24h, 30min) ─────────────────────────
+    # Handled before edtf: "1m" is not valid EDTF and would fail parsing.
+    _dur = _re.fullmatch(r"(\d+)(min|[dwmh])", s, _re.IGNORECASE)
+    if _dur:
+        n, unit = int(_dur.group(1)), _dur.group(2).lower()
+        _deltas = {
+            "d":   datetime.timedelta(days=n),
+            "w":   datetime.timedelta(weeks=n),
+            "h":   datetime.timedelta(hours=n),
+            "m":   datetime.timedelta(days=n * 30),   # 1m ≈ 30 days (approximate)
+            "min": datetime.timedelta(minutes=n),
+        }
+        dt = datetime.datetime.now(datetime.timezone.utc) - _deltas[unit]
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    # ── Normalize case: EDTF library requires uppercase X for unspecified digits ──
+    # Uppercase only date-like strings (digits, X, x, T, t, hyphens, colons, slash).
+    # NLP strings like "yesterday" contain other letters and are left unchanged.
+    if _re.fullmatch(r"[\dXxTt:/\-]+", s):
+        s = s.upper()
+
+    # ── Full ISO datetime (exact second) — return as-is, no expansion ────────
+    # The edtf library's lower_strict()/upper_strict() floor full datetimes to
+    # day boundaries (2026-01-15T14:30:25 → 2026-01-15T00:00:00). A fully-
+    # specified YYYY-MM-DDTHH:MM:SS is an exact point; both modes return it.
+    if _re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", s):
+        return s  # exact second — start and end are the same point
+
+    # ── Partial datetime: hour or minute precision ────────────────────────────
+    # EDTF Level 0 requires full YYYY-MM-DDTHH:MM:SS; partial times like
+    # YYYY-MM-DDTHH or YYYY-MM-DDTHH:MM are not valid EDTF and fall through
+    # to dateutil, which returns the same start-of-period for both modes.
+    # Expand to full-period bounds based on detected precision:
+    #   hour   (YYYY-MM-DDTHH)      → [THH:00:00, THH:59:59]
+    #   minute (YYYY-MM-DDTHH:MM)   → [THH:MM:00, THH:MM:59]
+    _partial_dt = _re.fullmatch(r"(\d{4}-\d{2}-\d{2}T\d{2})(?::(\d{2}))?", s)
+    if _partial_dt:
+        date_hh = _partial_dt.group(1)  # "2026-01-15T14"
+        mm = _partial_dt.group(2)       # "30" or None (hour-only)
+        if mm is None:
+            return f"{date_hh}:00:00" if mode == "start" else f"{date_hh}:59:59"
+        else:
+            return f"{date_hh}:{mm}:00" if mode == "start" else f"{date_hh}:{mm}:59"
+
+    # ── Day-level unspecified digits: edtf library bug workaround ────────────
+    # parse_edtf("2026-01-1X") succeeds, but lower_strict()/upper_strict() crash
+    # with ValueError because they try int("1X"). We handle these manually.
+    _day_x = _re.fullmatch(r"(\d{4})-(\d{2})-([0-3X])([0-9X])", s)
+    if _day_x and ("X" in _day_x.group(3) or "X" in _day_x.group(4)):
+        import calendar as _cal
+        year_s, month_s, tens_c, units_c = _day_x.groups()
+        year, month = int(year_s), int(month_s)
+        max_day = _cal.monthrange(year, month)[1]
+        if tens_c == "X" and units_c == "X":
+            # XX = all days in the month
+            lo_day, hi_day = 1, max_day
+        elif units_c == "X":
+            # e.g. "1X" = days 10–19; "2X" = 20–29; "3X" = 30–31
+            tens = int(tens_c)
+            lo_day = tens * 10
+            hi_day = min(tens * 10 + 9, max_day)
+        else:
+            # e.g. "X5" = days 5, 15, 25 (tens unspecified, units fixed)
+            # Use the full span that digit could appear in
+            units = int(units_c)
+            lo_day = units if units >= 1 else 10   # day 0 is invalid; X0 → 10
+            hi_day = min(units + 20, max_day)
+        return (
+            f"{year_s}-{month_s}-{lo_day:02d}T00:00:00"
+            if mode == "start"
+            else f"{year_s}-{month_s}-{hi_day:02d}T23:59:59"
+        )
+
+    # ── EDTF parsing ─────────────────────────────────────────────────────────
+    try:
+        from edtf import parse_edtf  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError(
+            "Package 'edtf' is required. Run: pip install aise"
+        ) from exc
+
+    def _st(st: "_time.struct_time") -> str:
+        """Convert struct_time to ISO 8601 string for lexicographic comparison."""
+        return _time.strftime("%Y-%m-%dT%H:%M:%S", st)
+
+    try:
+        parsed = parse_edtf(s)
+        lo = _st(parsed.lower_strict())
+        hi = _st(parsed.upper_strict())
+        # EDTF interval syntax contains "/": return 2-tuple so caller splits after+before
+        if "/" in s:
+            return (lo, hi)
+        return lo if mode == "start" else hi
+
+    except Exception as edtf_exc:
+        # Fallback: python-dateutil NLP ("yesterday", "3 days ago")
+        # — installed as transitive dep of edtf, so always available
+        try:
+            from dateutil import parser as _du  # noqa: PLC0415
+            dt = _du.parse(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%S")
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        raise ValueError(
+            f"Unrecognised date/time: {s!r}. Run 'aise dates' for full format reference.\n"
+            "Quick formats: 2026-01-15, 2026-01, 2026, 202X, 2026-01-1X, 7d, 2w, 1m, 24h"
+        ) from edtf_exc
+
 
 #: Default correction patterns: (category, [regex_keywords...])
 #: Uses \b word boundaries (matching claude_session_tools.py:103-127).
@@ -76,6 +220,34 @@ _EXPORT_FILTER_PATTERNS = (
     "<task-notification>",
     "<system-reminder>",
 )
+
+
+def _passes_date_filter(ts: str, since: Optional[str], until: Optional[str]) -> bool:
+    """Return True iff ISO timestamp ts falls within [since, until] (inclusive).
+
+    # ``since`` and ``until`` are the canonical param names; ``after``/``before``
+    # are deprecated hidden aliases kept for backward compatibility.
+
+    - Both since and until default to None (no restriction); any combination works.
+    - None/empty ts with any active filter → False (consistent with FilterSpec semantics).
+    - Normalizes ts to 19 chars (YYYY-MM-DDTHH:MM:SS) before comparison, stripping
+      timezone designators (+00:00, Z) and sub-second precision so that timestamps
+      from all sources (Claude, AI Studio, Gemini CLI) compare correctly against
+      the naive ISO strings produced by _parse_date_input.
+    - ISO 8601 lexicographic order == chronological for fixed-width prefixes.
+    - Pure function: no I/O, no side effects. O(1).
+    """
+    if (since or until) and not ts:
+        return False   # unknown/None timestamp excluded when filtering is active
+    if ts and (since or until):
+        # Strip timezone suffix and sub-second precision for uniform comparison.
+        # since/until from _parse_date_input are always 19-char naive ISO strings.
+        ts = ts[:19]
+    if since and ts < since:
+        return False
+    if until and ts > until:
+        return False
+    return True
 
 
 class SessionRecoveryEngine:
@@ -675,15 +847,15 @@ class SessionRecoveryEngine:
     def get_sessions(
         self,
         project_filter: Optional[str] = None,
-        after: Optional[str] = None,
-        before: Optional[str] = None,
+        since: Optional[str] = None,   # canonical; --after is a hidden alias
+        until: Optional[str] = None,   # canonical; --before is a hidden alias
     ) -> List[SessionInfo]:
         """List all sessions with metadata, sorted newest-first.
 
         Args:
             project_filter: Substring to match against project_dir name. None = all projects.
-            after:  Only sessions with timestamp_first >= this (ISO prefix, e.g. "2026-01-15").
-            before: Only sessions with timestamp_first <= this (ISO prefix, e.g. "2026-12-31").
+            since:  Only sessions with timestamp_first >= this (ISO prefix, e.g. "2026-01-15").
+            until:  Only sessions with timestamp_first <= this (ISO prefix, e.g. "2026-12-31").
 
         Returns:
             List of SessionInfo, sorted by timestamp_first descending (newest first).
@@ -709,14 +881,7 @@ class SessionRecoveryEngine:
                     has_compact = True
                 if data.get("type") in ("user", "assistant"):
                     message_count += 1
-            # Exclude sessions with no timestamp when a date filter is active,
-            # consistent with FilterSpec.matches_datetime() which returns False for
-            # None/empty values when after or before is set.
-            if (after or before) and not ts_first:
-                continue
-            if after and ts_first and ts_first < after:
-                continue
-            if before and ts_first and ts_first > before:
+            if not _passes_date_filter(ts_first, since, until):
                 continue
             sessions.append(SessionInfo(
                 session_id=session_id,
@@ -727,6 +892,7 @@ class SessionRecoveryEngine:
                 timestamp_last=ts_last,
                 message_count=message_count,
                 has_compact_summary=has_compact,
+                provider="claude",
             ))
         sessions.sort(key=lambda s: s.timestamp_first, reverse=True)
         return sessions
@@ -734,8 +900,8 @@ class SessionRecoveryEngine:
     def find_corrections(
         self,
         project_filter: Optional[str] = None,
-        after: Optional[str] = None,
-        before: Optional[str] = None,
+        since: Optional[str] = None,   # canonical; --after is a hidden alias
+        until: Optional[str] = None,   # canonical; --before is a hidden alias
         patterns: Optional[List[tuple]] = None,
         limit: int = 50,
     ) -> List[CorrectionMatch]:
@@ -743,8 +909,8 @@ class SessionRecoveryEngine:
 
         Args:
             project_filter: Substring to match project_dir. None = all projects.
-            after:    Only messages >= this timestamp (ISO prefix).
-            before:   Only messages <= this timestamp (ISO prefix).
+            since:    Only messages >= this timestamp (ISO prefix).
+            until:    Only messages <= this timestamp (ISO prefix).
             patterns: Override DEFAULT_CORRECTION_PATTERNS. Each tuple is
                       (category, [regex_keyword_strings]).
             limit:    Max results. Default: 50.
@@ -771,9 +937,9 @@ class SessionRecoveryEngine:
                             if data.get("type") != "user":
                                 continue
                             ts = data.get("timestamp", "")
-                            if after and ts and ts < after:
+                            if since and ts and ts < since:
                                 continue
-                            if before and ts and ts > before:
+                            if until and ts and ts > until:
                                 continue
                             content = self._extract_content(data)
                             if not content:
@@ -801,8 +967,8 @@ class SessionRecoveryEngine:
         self,
         commands: Optional[List[str]] = None,
         project_filter: Optional[str] = None,
-        after: Optional[str] = None,
-        before: Optional[str] = None,
+        since: Optional[str] = None,   # canonical; --after is a hidden alias
+        until: Optional[str] = None,   # canonical; --before is a hidden alias
     ) -> List[PlanningCommandCount]:
         """Count slash command usage across all sessions, sorted by frequency.
 
@@ -821,8 +987,8 @@ class SessionRecoveryEngine:
         Args:
             commands:       Regex patterns to match (pattern mode). ``None`` = auto-discover.
             project_filter: Substring to match project_dir. None = all projects.
-            after:          Only messages >= this timestamp (ISO prefix).
-            before:         Only messages <= this timestamp (ISO prefix).
+            since:          Only messages >= this timestamp (ISO prefix).
+            until:          Only messages <= this timestamp (ISO prefix).
 
         Returns:
             List of PlanningCommandCount, sorted by count descending.
@@ -850,9 +1016,9 @@ class SessionRecoveryEngine:
                             if discovery_mode and data.get("type") != "user":
                                 continue
                             ts = data.get("timestamp", "")
-                            if after and ts and ts < after:
+                            if since and ts and ts < since:
                                 continue
-                            if before and ts and ts > before:
+                            if until and ts and ts > until:
                                 continue
                             content = self._extract_content(data)
                             if not content:
@@ -1274,57 +1440,74 @@ class SessionRecoveryEngine:
                 if message_type and msg_type_str != message_type.lower():
                     continue
                 if not pattern or pattern.search(msg.content):
-                    before = all_msgs[max(0, i - context): i]
-                    after = all_msgs[i + 1: i + 1 + context]
+                    ctx_before = all_msgs[max(0, i - context): i]
+                    ctx_after = all_msgs[i + 1: i + 1 + context]
                     results.append(ContextMatch(
                         match=msg,
-                        context_before=before,
-                        context_after=after,
+                        context_before=ctx_before,
+                        context_after=ctx_after,
                     ))
 
         return results
 
-    def get_statistics(self) -> RecoveryStatistics:
-        """Get recovery statistics across all sessions."""
-        session_ids: Set[str] = set()
+    def get_statistics(
+        self,
+        since: Optional[str] = None,   # canonical; --after is a hidden alias
+        until: Optional[str] = None,   # canonical; --before is a hidden alias
+    ) -> RecoveryStatistics:
+        """Get recovery statistics. Defaults to all sessions (no date restriction).
+
+        When since/until given, counts only sessions whose timestamp_first is in range.
+        Delegates to get_sessions() for date-aware counting — no filter logic duplicated.
+        """
+        if since or until:
+            # Date filter active: scan JSONL for timestamps via get_sessions()
+            filtered = self.get_sessions(since=since, until=until)
+            total_sessions = len(filtered)
+            filtered_ids: Optional[frozenset] = frozenset(s.session_id for s in filtered)
+        else:
+            # No filter: fast path (file enumeration only, no JSONL content read)
+            total_sessions = sum(1 for _ in self._iter_all_jsonl())
+            filtered_ids = None   # None → include all session dirs below
+
         total_files = 0
         total_versions = 0
         largest_file = None
         largest_edits = 0
 
-        if not self.recovery_dir.exists():
-            return RecoveryStatistics()
+        if self.recovery_dir.exists():
+            # File count: recovery_dir/session_<session_id>/ (excludes all_versions dirs)
+            for session_dir in self.recovery_dir.glob("session_*"):
+                if not session_dir.is_dir() or "all_versions" in session_dir.name:
+                    continue
+                sid = session_dir.name.removeprefix("session_")
+                if filtered_ids is not None and sid not in filtered_ids:
+                    continue   # O(1) frozenset lookup
+                for file_path in session_dir.glob("*"):
+                    if file_path.is_file():
+                        total_files += 1
 
-        # Count sessions and files from session_*/ dirs
-        for session_dir in self.recovery_dir.glob("session_*"):
-            if not session_dir.is_dir() or "all_versions" in session_dir.name:
-                continue
+            # Version count: recovery_dir/session_all_versions_<session_id>/
+            file_version_totals: Dict[str, int] = defaultdict(int)
+            for session_dir in self._version_dirs:
+                # _version_dirs: dirs named "session_all_versions_<session_id>"
+                sid = session_dir.name.removeprefix("session_all_versions_")
+                if filtered_ids is not None and sid not in filtered_ids:
+                    continue   # O(1) frozenset lookup
+                version_files = list(session_dir.glob("*_v*_line_*.txt"))
+                total_versions += len(version_files)
+                for v_file in version_files:
+                    filename = self._extract_filename(v_file.name)
+                    file_version_totals[filename] += 1
 
-            session_id = session_dir.name.replace("session_", "")
-            session_ids.add(session_id)
-
-            for file_path in session_dir.glob("*"):
-                if file_path.is_file():
-                    total_files += 1
-
-        # Count versions globally (accumulate across all sessions before comparing)
-        file_version_totals: Dict[str, int] = defaultdict(int)
-        for session_dir in self._version_dirs:
-            version_files = list(session_dir.glob("*_v*_line_*.txt"))
-            total_versions += len(version_files)
-
-            for v_file in version_files:
-                filename = self._extract_filename(v_file.name)
-                file_version_totals[filename] += 1
-
-        # Find globally largest file after accumulating all sessions
-        for filename, edits in file_version_totals.items():
-            if edits > largest_edits:
-                largest_edits = edits
-                largest_file = filename
+            # Find globally largest file after accumulating all sessions
+            for filename, edits in file_version_totals.items():
+                if edits > largest_edits:
+                    largest_edits = edits
+                    largest_file = filename
 
         return RecoveryStatistics(
-            total_sessions=len(session_ids),
+            total_sessions=total_sessions,
             total_files=total_files,
             total_versions=total_versions,
             largest_file=largest_file,
@@ -1420,3 +1603,589 @@ class SessionRecoveryEngine:
                     continue
 
         return last_path
+
+
+# ── Multi-source engine ──────────────────────────────────────────────────────
+
+
+class MultiSourceEngine:
+    """Composable engine: delegates to multiple Storage backends simultaneously.
+
+    Adding a new format = new Storage impl, zero changes to search/filter/CLI layers.
+    """
+
+    def __init__(self, sources: list) -> None:
+        self._sources = sources
+
+    def search_messages(self, query: str, message_type: str | None = None) -> list:
+        """Aggregate search across ALL sources. Unified signature with SessionRecoveryEngine."""
+        import contextlib
+        results = []
+        for source in self._sources:
+            with contextlib.suppress(Exception):
+                results.extend(source.search_messages(query, message_type))
+        return sorted(results, key=lambda m: m.timestamp or "", reverse=True)
+
+    def list_sessions(self) -> list:
+        """List all sessions from all sources, sorted newest-first.
+
+        ISO 8601 strings are lexicographically sortable, so string comparison
+        is correct for all known timestamp formats. Sessions with no timestamp
+        (empty string) sort to the end (oldest).
+        """
+        import contextlib
+        all_sessions = []
+        for source in self._sources:
+            with contextlib.suppress(Exception):
+                all_sessions.extend(source.list_sessions())
+        all_sessions.sort(key=lambda s: s.timestamp_first or "", reverse=True)
+        return all_sessions
+
+    def read_session(self, session_info) -> list:
+        """Read messages for a session (delegates to first source that has it)."""
+        import contextlib
+        for source in self._sources:
+            with contextlib.suppress(Exception):
+                msgs = source.read_session(session_info)
+                if msgs:
+                    return msgs
+        return []
+
+    def stats(self) -> dict:
+        """Aggregate stats across all sources."""
+        import contextlib
+        total: dict = {}
+        for source in self._sources:
+            with contextlib.suppress(Exception):
+                for k, v in source.stats().items():
+                    total[k] = total.get(k, 0) + v
+        return total
+
+
+class ClaudeSource:
+    """Adapter: wraps SessionRecoveryEngine so Claude participates in MultiSourceEngine.
+
+    Provides the same interface as AiStudioSource/GeminiCliSource so that
+    MultiSourceEngine can aggregate Claude sessions alongside other providers.
+    """
+
+    def __init__(self, engine: "SessionRecoveryEngine") -> None:
+        self._engine = engine
+
+    def search_messages(self, query: str, message_type: str | None = None) -> list:
+        return self._engine.search_messages(query, message_type)
+
+    def list_sessions(self) -> list:
+        return self._engine.get_sessions()
+
+    def read_session(self, session_info) -> list:
+        return self._engine.get_messages(session_info.session_id)
+
+    def stats(self) -> dict:
+        s = self._engine.get_statistics()
+        return {"claude_sessions": s.total_sessions}
+
+
+def get_multi_engine(config: dict | None = None):
+    """Factory: builds MultiSourceEngine from config. WOLOG: no hardcoded paths."""
+    import contextlib
+    from pathlib import Path as _Path
+    from ai_session_tools.sources.aistudio import AiStudioSource, load_config
+    from ai_session_tools.sources.gemini_cli import GeminiCliSource
+
+    if config is None:
+        config = load_config()
+
+    sources = []
+    sd = config.get("source_dirs", {})
+
+    if ai := sd.get("aistudio"):
+        dirs = [ai] if isinstance(ai, str) else ai
+        sources.append(AiStudioSource([_Path(p) for p in dirs]))
+
+    if gc := sd.get("gemini_cli"):
+        sources.append(GeminiCliSource(_Path(gc)))
+
+    return MultiSourceEngine(sources)
+
+
+def _aistudio_candidate_dirs(home: Path) -> list[Path]:
+    """Return ordered list of candidate directories to probe for AI Studio sessions.
+
+    Checks Downloads folder and Google Drive mount points across macOS, Linux,
+    and Windows. Any directory whose name contains 'Google AI Studio' is included.
+    Results are deduplicated while preserving discovery order.
+
+    Candidates (in priority order):
+    - ~/Downloads/Google AI Studio/                              (direct export)
+    - ~/Downloads/*Google AI Studio*/                            (variant names)
+    - ~/Downloads/drive-download-*/Google AI Studio/             (Drive bulk exports)
+    - ~/Downloads/aistudio_sessions/Google AI Studio/            (custom subfolder)
+    - ~/Downloads/aistudio_sessions/*Google AI Studio*/          (variant names)
+    - macOS Google Drive: ~/Library/CloudStorage/GoogleDrive-*/My Drive/
+    - macOS Google Drive legacy: ~/Google Drive/
+    - Linux Google Drive: ~/GoogleDrive/, ~/google-drive/
+    - Windows Google Drive: C:/Users/<user>/Google Drive/
+    - Any of the above / *Google AI Studio*                      (glob within Drive)
+    """
+    import contextlib
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        key = str(p.resolve()) if p.exists() else str(p)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(p)
+
+    def _glob_aistudio(base: Path) -> None:
+        """Add all *Google AI Studio* matches under base."""
+        with contextlib.suppress(OSError):
+            for d in sorted(base.glob("*Google AI Studio*")):
+                if d.is_dir():
+                    _add(d)
+
+    downloads = home / "Downloads"
+
+    # ── Downloads folder ────────────────────────────────────────────────────
+    with contextlib.suppress(OSError):
+        direct = downloads / "Google AI Studio"
+        if direct.is_dir():
+            _add(direct)
+        _glob_aistudio(downloads)
+        for drive_export in sorted(downloads.glob("drive-download-*")):
+            if drive_export.is_dir():
+                _glob_aistudio(drive_export)
+        for subfolder in ("aistudio_sessions", "aistudio"):
+            base = downloads / subfolder
+            if base.is_dir():
+                _glob_aistudio(base)
+
+    # ── macOS Google Drive (modern: CloudStorage) ────────────────────────────
+    cloud_storage = home / "Library" / "CloudStorage"
+    with contextlib.suppress(OSError):
+        for drive_mount in sorted(cloud_storage.glob("GoogleDrive-*")):
+            if not drive_mount.is_dir():
+                continue
+            for sub in ("My Drive", "MyDrive", ""):
+                root = drive_mount / sub if sub else drive_mount
+                _glob_aistudio(root)
+
+    # ── macOS Google Drive (legacy: ~/Google Drive/) ────────────────────────
+    legacy_mac = home / "Google Drive"
+    with contextlib.suppress(OSError):
+        if legacy_mac.is_dir():
+            _glob_aistudio(legacy_mac)
+
+    # ── Linux Google Drive mount points ─────────────────────────────────────
+    for linux_drive in ("GoogleDrive", "google-drive", "Google Drive"):
+        candidate = home / linux_drive
+        with contextlib.suppress(OSError):
+            if candidate.is_dir():
+                _glob_aistudio(candidate)
+
+    # ── Windows Google Drive (C:\Users\<user>\Google Drive\) ─────────────────
+    # Path.home() on Windows returns C:\Users\<user>, so ~/Google Drive works there too.
+    # Additional Windows variant: OneDrive / Google Drive synced folder.
+    for win_drive in ("Google Drive", "Google Drive (My Drive)"):
+        candidate = home / win_drive
+        with contextlib.suppress(OSError):
+            if candidate.is_dir():
+                _glob_aistudio(candidate)
+
+    return candidates
+
+
+# How long auto-discovered source paths are cached in config.json before a re-scan.
+# Users can force an immediate refresh with: aise source scan
+_DISCOVERY_TTL_SECONDS: int = 86400  # 24 hours
+
+
+def _discover_sources(config: dict, force: bool = False) -> dict:
+    """Scan standard install locations and merge discovered sources into config.
+
+    Priority: explicit config > auto-discovered (cached or freshly scanned).
+    Claude Code is always included via SessionRecoveryEngine (not in source_dirs).
+    Returns effective config dict with discovered paths merged in.
+
+    Caching (config.json["_auto_discovered"]):
+    ─────────────────────────────────────────
+    Auto-discovery runs filesystem globs which are O(entries in Downloads / Drive).
+    Results are cached in config.json under "_auto_discovered" for
+    _DISCOVERY_TTL_SECONDS (24 h). On cache hit the function is O(1).
+    To force an immediate re-scan: aise source scan  (passes force=True).
+
+    The cache stores only auto-discovered values — explicit source_dirs entries
+    are never overwritten. Cache structure (written to config.json):
+        {
+          "_auto_discovered": {
+            "_discovered_at": "2026-03-01T14:23:45+00:00",  # ISO 8601 UTC
+            "gemini_cli": "/Users/you/.gemini/tmp",
+            "aistudio":   ["/Users/you/Downloads/Google AI Studio"]
+          }
+        }
+
+    Auto-discovery locations probed per provider:
+    ── Claude Code  always included (SessionRecoveryEngine, no source_dirs entry)
+    ── Gemini CLI   ~/.gemini/tmp/          (standard install, all platforms)
+    ── AI Studio    ~/Downloads/*Google AI Studio*/
+                    ~/Library/CloudStorage/GoogleDrive-*/My Drive/*Google AI Studio*/
+                    ~/Google Drive/*Google AI Studio*/  (macOS legacy / Linux / Windows)
+
+    To disable auto-discovery for a provider: aise source disable <type>
+      (writes {"source_dirs": {"aistudio": []}} — empty list blocks auto-discovery)
+    To add explicit paths:   aise source add <path> --type <type>
+    To remove explicit path: aise source remove <path>
+    To see config file path: aise config path
+    To view config:          aise config show
+    """
+    explicit_sd = config.get("source_dirs", {})
+
+    # ── Cache hit: use _auto_discovered if fresh ────────────────────────────
+    if not force:
+        auto = config.get("_auto_discovered", {})
+        discovered_at_str = auto.get("_discovered_at", "")
+        if discovered_at_str:
+            with contextlib.suppress(ValueError, TypeError):
+                ts = datetime.datetime.fromisoformat(discovered_at_str)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=datetime.timezone.utc)
+                age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+                if age < _DISCOVERY_TTL_SECONDS:
+                    # Merge cached auto-discovered values; explicit config always wins
+                    effective = dict(config)
+                    sd = dict(explicit_sd)
+                    if not sd.get("gemini_cli") and auto.get("gemini_cli"):
+                        sd["gemini_cli"] = auto["gemini_cli"]
+                    if "aistudio" not in explicit_sd and auto.get("aistudio"):
+                        sd["aistudio"] = auto["aistudio"]
+                    effective["source_dirs"] = sd
+                    return effective
+
+    # ── Cache miss or forced: run full filesystem scan ───────────────────────
+    home = Path.home()
+    effective = dict(config)
+    sd = dict(explicit_sd)
+
+    # Gemini CLI: standard install at ~/.gemini/tmp/ (all platforms)
+    if not sd.get("gemini_cli"):
+        gemini_tmp = home / ".gemini" / "tmp"
+        with contextlib.suppress(OSError):
+            if gemini_tmp.exists() and any(gemini_tmp.iterdir()):
+                sd["gemini_cli"] = str(gemini_tmp)
+
+    # AI Studio: explicit config (incl. empty list) disables auto-discovery.
+    if "aistudio" not in explicit_sd:
+        candidates = _aistudio_candidate_dirs(home)
+        found = [str(p) for p in candidates if p.exists()]
+        if found:
+            sd["aistudio"] = found
+
+    # ── Persist cache entry back to config.json ──────────────────────────────
+    new_auto: dict = {
+        "_discovered_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    # Only cache auto-discovered values (never copy explicit config into cache)
+    if sd.get("gemini_cli") and not explicit_sd.get("gemini_cli"):
+        new_auto["gemini_cli"] = sd["gemini_cli"]
+    if sd.get("aistudio") and "aistudio" not in explicit_sd:
+        new_auto["aistudio"] = sd["aistudio"]
+
+    updated_config = dict(config)
+    updated_config["_auto_discovered"] = new_auto
+    # Only persist cache if this looks like an aise config (has source_dirs key)
+    # AND the config file already exists on disk. Avoids creating config files
+    # as a side effect of scanning, and avoids corrupting unrelated config files.
+    with contextlib.suppress(Exception):  # never fail on write errors
+        if "source_dirs" in config and get_config_path().exists():
+            write_config(updated_config)
+
+    effective["source_dirs"] = sd
+    return effective
+
+
+def _detect_default_source(cfg: dict) -> str:
+    """Return 'all' if any non-Claude sources configured or discovered, else 'claude'.
+
+    Callers should pass effective_cfg (the result of _discover_sources()) rather
+    than the raw config so the TTL cache is hit on this second call, avoiding
+    a redundant filesystem scan within the same process invocation.
+    """
+    effective_cfg = _discover_sources(cfg)
+    sd = effective_cfg.get("source_dirs", {})
+    if sd.get("aistudio") or sd.get("gemini_cli"):
+        return "all"
+    return "claude"
+
+
+class SessionBackend:
+    """Uniform interface for all session backends. All CLI commands use this exclusively.
+
+    Wraps SessionRecoveryEngine (Claude single-source) or MultiSourceEngine (multiple sources).
+    Claude-specific operations return graceful empty results with clear messages
+    when called on non-Claude backends — no crashes, no silent failures.
+
+    Composition Root: constructed ONCE in app_callback → ctx.obj["engine"].
+    All commands read ctx.obj["engine"]; no globals, no hidden ordering.
+    """
+
+    def __init__(self, backend: "SessionRecoveryEngine | MultiSourceEngine",
+                 source: str) -> None:
+        self._backend = backend
+        self._source = source
+
+    @property
+    def source(self) -> str:
+        return self._source
+
+    @property
+    def _is_claude(self) -> bool:
+        return isinstance(self._backend, SessionRecoveryEngine)
+
+    def _warn_claude_only(self, feature: str) -> None:
+        """Print graceful warning for Claude-only feature on non-Claude backend."""
+        from rich.console import Console
+        Console(stderr=True).print(
+            f"[yellow]{feature} requires --source claude (Claude Code sessions only)[/yellow]"
+        )
+
+    def _claude_only(self, method_name: str, default: object, *args: object, **kwargs: object) -> object:
+        """Delegate to Claude backend or warn + return default. DRY pattern for all claude-only features."""
+        if self._is_claude:
+            return getattr(self._backend, method_name)(*args, **kwargs)
+        self._warn_claude_only(method_name.replace("_", " ").title())
+        return default
+
+    # ── Cross-backend operations (work for all sources) ──────────────────────
+
+    def search_messages(self, query: str, message_type: str | None = None,
+                        tool: str | None = None) -> list:
+        """Unified search. Unifies SRE(query, type, tool) and MSE(query, type)."""
+        if self._is_claude:
+            return self._backend.search_messages(query, message_type, tool)
+        if tool:
+            from rich.console import Console
+            Console(stderr=True).print(
+                "[yellow]--tool filter not supported for non-Claude sources[/yellow]"
+            )
+        return self._backend.search_messages(query, message_type)
+
+    def search_messages_with_context(self, query: str, context: int = 3,
+                                     message_type: str | None = None,
+                                     tool: str | None = None) -> list:
+        if self._is_claude:
+            return self._backend.search_messages_with_context(
+                query, context, message_type, tool
+            )
+        return self.search_messages(query, message_type)  # no context for non-Claude
+
+    def get_sessions(self, project_filter: str | None = None,
+                     since: str | None = None,   # canonical; after= is a hidden alias
+                     until: str | None = None,   # canonical; before= is a hidden alias
+                     ) -> list:
+        """List sessions. Applies date filter for all backends via _passes_date_filter."""
+        if self._is_claude:
+            return self._backend.get_sessions(project_filter, since, until)
+        sessions = self._backend.list_sessions()
+        if since or until:   # only filter when needed (default: no restriction)
+            sessions = [
+                s for s in sessions
+                if _passes_date_filter(s.timestamp_first, since, until)
+            ]
+        return sessions
+
+    def get_messages(self, session_id: str,
+                     message_type: str | None = None) -> list:
+        """Get messages by session ID (substring match for non-Claude backends).
+
+        Uses MultiSourceEngine.list_sessions() + read_session() public API — no private attribute access.
+        """
+        if self._is_claude:
+            return self._backend.get_messages(session_id, message_type)
+        import contextlib
+        found: list = []
+        # Use public list_sessions() + read_session() — do NOT access _sources directly
+        for si in self._backend.list_sessions():
+            if session_id.lower() in si.session_id.lower():
+                with contextlib.suppress(Exception):
+                    msgs = self._backend.read_session(si)
+                    if message_type:
+                        msgs = [m for m in msgs if m.type.value == message_type]
+                    found.extend(msgs)
+                    break
+        return found
+
+    def get_statistics(self, since: str | None = None,   # canonical; after= is a hidden alias
+                       until: str | None = None,         # canonical; before= is a hidden alias
+                       ) -> dict:
+        """Get stats as a normalized dict. Default since=None, until=None: no date restriction.
+
+        Returns keys: total_sessions, total_files, total_versions.
+        Avoids RecoveryStatistics | dict union type — callers never need isinstance checks.
+        """
+        if self._is_claude:
+            s = self._backend.get_statistics(since=since, until=until)
+            return {k: getattr(s, k, 0) for k in
+                    ("total_sessions", "total_files", "total_versions")}
+        if since or until:
+            # Non-Claude (aistudio, gemini_cli): recount from filtered sessions.
+            # total_files and total_versions are always 0 for non-Claude backends.
+            sessions = self.get_sessions(since=since, until=until)
+            per_source: dict[str, int] = {}
+            for s in sessions:
+                key = f"{s.provider}_sessions"
+                per_source[key] = per_source.get(key, 0) + 1
+            return {"total_sessions": len(sessions), "total_files": 0, "total_versions": 0, **per_source}
+        raw = self._backend.stats()
+        # MultiSourceEngine.stats() returns source-specific keys (e.g. aistudio_sessions=1167).
+        # Normalize to total_sessions for display helpers that expect that key.
+        total = sum(v for v in raw.values() if isinstance(v, int))
+        return {"total_sessions": total, "total_files": 0, "total_versions": 0, **raw}
+
+    # Alias for backward compat with display helpers that called get_stats()
+    get_stats = get_statistics
+
+    # ── Claude-only operations — graceful degradation (using DRY _claude_only helper) ──
+
+    def search(self, pattern: str, filters=None) -> list:
+        return self._claude_only("search", [], pattern, filters)
+
+    def get_versions(self, filename: str) -> list:
+        return self._claude_only("get_versions", [], filename)
+
+    def extract_final(self, filename: str, output_dir) -> object:
+        return self._claude_only("extract_final", None, filename, output_dir)
+
+    def extract_all(self, filename: str, output_dir) -> list:
+        return self._claude_only("extract_all", [], filename, output_dir)
+
+    def find_corrections(self, **kwargs) -> list:
+        return self._claude_only("find_corrections", [], **kwargs)
+
+    def analyze_planning_usage(self, **kwargs) -> list:
+        return self._claude_only("analyze_planning_usage", [], **kwargs)
+
+    def cross_reference_session(self, *args, **kwargs) -> list:
+        return self._claude_only("cross_reference_session", [], *args, **kwargs)
+
+    def export_session_markdown(self, session_id: str) -> str:
+        return self._claude_only("export_session_markdown", "", session_id)
+
+    def get_clipboard_content(self, session_id: str) -> list:
+        return self._claude_only("get_clipboard_content", [], session_id)
+
+    def analyze_session(self, session_id: str) -> object:
+        return self._claude_only("analyze_session", None, session_id)
+
+    def inspect_session(self, session_id: str) -> object:
+        """Deep analysis of one session (messages inspect command). Claude only."""
+        return self.analyze_session(session_id)
+
+    def timeline_session(self, session_id: str, preview_chars: int = 150) -> list:
+        return self._claude_only("timeline_session", [], session_id, preview_chars)
+
+    def get_original_path(self, filename: str) -> str | None:
+        return self._claude_only("get_original_path", None, filename)
+
+    @property
+    def recovery_dir(self) -> "Path":
+        """Recovery directory (Claude-only). Used by _version_src_path in cli.py."""
+        if self._is_claude:
+            return self._backend.recovery_dir
+        from pathlib import Path
+        return Path()
+
+
+def get_session_backend(
+    source: str | None = None,
+    claude_dir: str | None = None,
+    config: dict | None = None,
+) -> SessionBackend:
+    """Build SessionBackend. Auto-discovers sources if source is None.
+
+    Args:
+        source: "claude", "aistudio", "gemini", "all", or None (auto-detect)
+        claude_dir: Override Claude config dir (default: ~/.claude)
+        config: Config dict (default: load from config.json)
+
+    Returns:
+        SessionBackend wrapping either SessionRecoveryEngine or MultiSourceEngine.
+
+    Strategy:
+        source=None      → auto: 'all' if any non-Claude sources discovered, else 'claude'
+        source="claude"  → Claude Code only (SessionRecoveryEngine)
+        source="aistudio"→ AI Studio only
+        source="gemini"  → Gemini CLI only
+        source="all"     → all discovered/configured sources via MultiSourceEngine
+    """
+    from ai_session_tools.sources.aistudio import AiStudioSource
+    from ai_session_tools.sources.gemini_cli import GeminiCliSource
+
+    if config is None:
+        config = load_config()
+
+    # Merge auto-discovered sources into config (explicit config takes priority)
+    effective_cfg = _discover_sources(config)
+    # Pass effective_cfg (which includes _auto_discovered) so _detect_default_source
+    # hits the TTL cache rather than re-scanning the filesystem.
+    effective_source = source if source is not None else _detect_default_source(effective_cfg)
+
+    if effective_source == "claude":
+        base: Path
+        if claude_dir:
+            base = Path(claude_dir).expanduser()
+        elif env_d := os.getenv("CLAUDE_CONFIG_DIR"):
+            base = Path(env_d).expanduser()
+        else:
+            base = Path.home() / ".claude"
+        projects = Path(os.getenv(
+            "AI_SESSION_TOOLS_PROJECTS", str(base / "projects")
+        )).expanduser()
+        recovery = Path(os.getenv(
+            "AI_SESSION_TOOLS_RECOVERY", str(base / "recovery")
+        )).expanduser()
+        backend = SessionRecoveryEngine(projects, recovery)
+        return SessionBackend(backend, "claude")
+
+    # Non-Claude: build MultiSourceEngine with requested sources
+    sources: list = []
+    sd = effective_cfg.get("source_dirs", {})
+
+    if effective_source in ("aistudio", "all"):
+        with contextlib.suppress(Exception):
+            ai = sd.get("aistudio")
+            if ai:
+                dirs = [ai] if isinstance(ai, str) else ai
+                sources.append(AiStudioSource([Path(p) for p in dirs]))
+
+    if effective_source in ("gemini", "all"):
+        with contextlib.suppress(Exception):
+            gc = sd.get("gemini_cli")
+            if gc:
+                sources.append(GeminiCliSource(Path(gc)))
+
+    # Include Claude as a source when source="all" (it is the default provider).
+    # Claude sessions live in projects_dir, not in source_dirs, so they must be
+    # added explicitly as a ClaudeSource adapter wrapping SessionRecoveryEngine.
+    if effective_source == "all":
+        with contextlib.suppress(Exception):
+            if claude_dir:
+                _base = Path(claude_dir).expanduser()
+            elif _env_d := os.getenv("CLAUDE_CONFIG_DIR"):
+                _base = Path(_env_d).expanduser()
+            else:
+                _base = Path.home() / ".claude"
+            _projects = Path(os.getenv(
+                "AI_SESSION_TOOLS_PROJECTS", str(_base / "projects")
+            )).expanduser()
+            _recovery = Path(os.getenv(
+                "AI_SESSION_TOOLS_RECOVERY", str(_base / "recovery")
+            )).expanduser()
+            sources.insert(0, ClaudeSource(SessionRecoveryEngine(_projects, _recovery)))
+
+    if not sources:
+        # Nothing configured/discovered — fall back to Claude
+        return get_session_backend("claude", claude_dir, config)
+
+    backend = MultiSourceEngine(sources)
+    return SessionBackend(backend, effective_source)

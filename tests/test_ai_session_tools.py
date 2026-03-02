@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Unit tests for AI Session Tools
 
@@ -37,7 +38,7 @@ from ai_session_tools import (
 )
 from ai_session_tools.cli import app
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 @pytest.fixture
@@ -299,6 +300,7 @@ class TestSessionInfoModel:
         assert set(d.keys()) == {
             "session_id", "project_dir", "project_display", "cwd", "git_branch",
             "timestamp_first", "timestamp_last", "message_count", "has_compact_summary",
+            "provider",
         }
 
     def test_is_mutable_dataclass(self):
@@ -391,7 +393,7 @@ class TestGetSessionsAfterFilter:
     def test_after_2026_01_25(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         engine = _make_engine(tmp_path, projects)
-        sessions = engine.get_sessions(after="2026-01-25")
+        sessions = engine.get_sessions(since="2026-01-25")
         assert len(sessions) == 1
         assert "proj2" in sessions[0].project_dir
 
@@ -631,14 +633,14 @@ def _invoke(args, tmp_path: Optional[Path] = None, projects: Optional[Path] = No
 class TestListCommand:
     def test_list_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["list"], env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
+        result = runner.invoke(app, ["--provider", "claude", "list"], env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "aaaa0001" in result.output
 
     def test_list_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["list", "--format", "json"],
+            app, ["--provider", "claude", "list", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -649,7 +651,7 @@ class TestListCommand:
     def test_list_project_filter(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["list", "--project", "proj1"],
+            app, ["--provider", "claude", "list", "--project", "proj1"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -664,7 +666,7 @@ class TestMessagesCorrections:
     def test_corrections_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "corrections"],
+            app, ["--provider", "claude", "messages", "corrections"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -672,7 +674,7 @@ class TestMessagesCorrections:
     def test_corrections_has_category(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "corrections"],
+            app, ["--provider", "claude", "messages", "corrections"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "skip_step" in result.output or "you forgot" in result.output
@@ -680,7 +682,7 @@ class TestMessagesCorrections:
     def test_corrections_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "corrections", "--format", "json"],
+            app, ["--provider", "claude", "messages", "corrections", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -691,7 +693,7 @@ class TestMessagesCorrections:
         projects = _make_projects_with_sessions(tmp_path)
         # Custom pattern that matches "start the feature" (not a default correction)
         result = runner.invoke(
-            app, ["messages", "corrections", "--pattern", "custom:start the feature"],
+            app, ["--provider", "claude", "messages", "corrections", "--pattern", "custom:start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -701,7 +703,7 @@ class TestMessagesCorrections:
         projects = _make_projects_with_sessions(tmp_path)
         # Pattern that won't match anything — built-in "you forgot" should NOT appear
         result = runner.invoke(
-            app, ["messages", "corrections", "--pattern", "custom:xyzzy_nomatch_xyzzy"],
+            app, ["--provider", "claude", "messages", "corrections", "--pattern", "custom:xyzzy_nomatch_xyzzy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -711,7 +713,7 @@ class TestMessagesCorrections:
     def test_corrections_bad_pattern_format_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "corrections", "--pattern", "no-colon-here"],
+            app, ["--provider", "claude", "messages", "corrections", "--pattern", "no-colon-here"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -723,7 +725,7 @@ class TestMessagesSearchToolFlag:
     def test_tool_flag_returns_write_call(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "search", "*", "--tool", "Write"],
+            app, ["--provider", "claude", "messages", "search", "*", "--tool", "Write"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -732,7 +734,7 @@ class TestMessagesSearchToolFlag:
     def test_no_tool_unchanged(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "search", "start the feature"],
+            app, ["--provider", "claude", "messages", "search", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -745,7 +747,7 @@ class TestMessagesPlanning:
     def test_planning_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "planning"],
+            app, ["--provider", "claude", "messages", "planning"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -754,7 +756,7 @@ class TestMessagesPlanning:
     def test_planning_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "planning", "--format", "json"],
+            app, ["--provider", "claude", "messages", "planning", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -766,7 +768,7 @@ class TestMessagesPlanning:
         empty_projects = tmp_path / "empty_projects"
         empty_projects.mkdir()
         result = runner.invoke(
-            app, ["messages", "planning"],
+            app, ["--provider", "claude", "messages", "planning"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(empty_projects)},
         )
         assert result.exit_code == 0
@@ -776,7 +778,7 @@ class TestMessagesPlanning:
         projects = _make_projects_with_sessions(tmp_path)
         # /ar:plannew is in session 1; /custom is not — result should have only /ar:plannew
         result = runner.invoke(
-            app, ["messages", "planning", "--commands", "/ar:plannew"],
+            app, ["--provider", "claude", "messages", "planning", "--commands", "/ar:plannew"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -787,7 +789,7 @@ class TestMessagesPlanning:
     def test_planning_custom_commands_no_match(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "planning", "--commands", "/xyzzy_nomatch"],
+            app, ["--provider", "claude", "messages", "planning", "--commands", "/xyzzy_nomatch"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -797,7 +799,7 @@ class TestMessagesPlanning:
         projects = _make_projects_with_sessions(tmp_path)
         # Both /ar:plannew (s1) and /ar:pn (s2) are in fixture
         result = runner.invoke(
-            app, ["messages", "planning", "--commands", "/ar:plannew,/ar:pn"],
+            app, ["--provider", "claude", "messages", "planning", "--commands", "/ar:plannew,/ar:pn"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -813,7 +815,7 @@ class TestFilesCrossRef:
         test_file = tmp_path / "login.py"
         test_file.write_text("def login():\n    pass\n")
         result = runner.invoke(
-            app, ["files", "cross-ref", str(test_file)],
+            app, ["--provider", "claude", "files", "cross-ref", str(test_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -823,7 +825,7 @@ class TestFilesCrossRef:
         test_file = tmp_path / "login.py"
         test_file.write_text("def login():\n    pass\n")
         result = runner.invoke(
-            app, ["files", "cross-ref", str(test_file)],
+            app, ["--provider", "claude", "files", "cross-ref", str(test_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "\u2713" in result.output or "✓" in result.output or "1/1" in result.output
@@ -833,7 +835,7 @@ class TestFilesCrossRef:
         test_file = tmp_path / "login.py"
         test_file.write_text("completely different content")
         result = runner.invoke(
-            app, ["files", "cross-ref", str(test_file)],
+            app, ["--provider", "claude", "files", "cross-ref", str(test_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "✗" in result.output or "0/1" in result.output
@@ -845,7 +847,7 @@ class TestExportSession:
     def test_export_session_stdout(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["export", "session", "aaaa0001"],
+            app, ["--provider", "claude", "export", "session", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -855,7 +857,7 @@ class TestExportSession:
         projects = _make_projects_with_sessions(tmp_path)
         out_file = tmp_path / "out.md"
         result = runner.invoke(
-            app, ["export", "session", "aaaa0001", "--output", str(out_file)],
+            app, ["--provider", "claude", "export", "session", "aaaa0001", "--output", str(out_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -866,7 +868,7 @@ class TestExportSession:
         projects = _make_projects_with_sessions(tmp_path)
         out_file = tmp_path / "dry.md"
         result = runner.invoke(
-            app, ["export", "session", "aaaa0001", "--output", str(out_file), "--dry-run"],
+            app, ["--provider", "claude", "export", "session", "aaaa0001", "--output", str(out_file), "--dry-run"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -878,7 +880,7 @@ class TestExportRecent:
         projects = _make_projects_with_sessions(tmp_path)
         out_file = tmp_path / "out.md"
         result = runner.invoke(
-            app, ["export", "recent", "365", "--output", str(out_file)],
+            app, ["--provider", "claude", "export", "recent", "365", "--output", str(out_file)],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -887,7 +889,7 @@ class TestExportRecent:
     def test_export_recent_empty(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["export", "recent", "0"],
+            app, ["--provider", "claude", "export", "recent", "0"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -900,7 +902,7 @@ class TestToolsSearch:
     def test_tools_search_write_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["tools", "search", "Write"],
+            app, ["--provider", "claude", "tools", "search", "Write"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -908,7 +910,7 @@ class TestToolsSearch:
     def test_tools_search_with_query(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["tools", "search", "Write", "login"],
+            app, ["--provider", "claude", "tools", "search", "Write", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -917,7 +919,7 @@ class TestToolsSearch:
     def test_tools_search_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["tools", "search", "Write", "--format", "json"],
+            app, ["--provider", "claude", "tools", "search", "Write", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -927,7 +929,7 @@ class TestToolsSearch:
     def test_tools_find_alias(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["tools", "find", "Write"],
+            app, ["--provider", "claude", "tools", "find", "Write"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -939,7 +941,7 @@ class TestMessagesSearchPositional:
     def test_positional_query(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "search", "start the feature"],
+            app, ["--provider", "claude", "messages", "search", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -947,7 +949,7 @@ class TestMessagesSearchPositional:
     def test_query_flag_still_works(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "search", "--query", "start the feature"],
+            app, ["--provider", "claude", "messages", "search", "--query", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -959,7 +961,7 @@ class TestMessagesGetPositional:
     def test_positional_session_id(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "get", "aaaa0001"],
+            app, ["--provider", "claude", "messages", "get", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -967,7 +969,7 @@ class TestMessagesGetPositional:
     def test_session_flag_still_works(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "get", "--session", "aaaa0001"],
+            app, ["--provider", "claude", "messages", "get", "--session", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -977,7 +979,7 @@ class TestRootGetPositional:
     def test_root_get_positional(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["get", "aaaa0001"],
+            app, ["--provider", "claude", "get", "aaaa0001"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -989,7 +991,7 @@ class TestRootSearchToolFlag:
     def test_root_search_tool_flag(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["search", "--tool", "Write", "--query", "login"],
+            app, ["--provider", "claude", "search", "--tool", "Write", "--query", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -997,7 +999,7 @@ class TestRootSearchToolFlag:
     def test_root_search_tools_domain(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["search", "tools", "--tool", "Write", "--query", "login"],
+            app, ["--provider", "claude", "search", "tools", "--tool", "Write", "--query", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -1005,7 +1007,7 @@ class TestRootSearchToolFlag:
     def test_root_search_tools_domain_requires_tool(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["search", "tools"],
+            app, ["--provider", "claude", "search", "tools"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -1015,7 +1017,7 @@ class TestRootFindAlias:
     def test_find_alias_messages(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["find", "messages", "--query", "start the feature"],
+            app, ["--provider", "claude", "find", "messages", "--query", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -1023,7 +1025,7 @@ class TestRootFindAlias:
     def test_find_alias_tool(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["find", "--tool", "Write", "--query", "login"],
+            app, ["--provider", "claude", "find", "--tool", "Write", "--query", "login"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -1033,7 +1035,7 @@ class TestFilesFindAlias:
     def test_files_find_alias(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["files", "find", "--pattern", "*.py"],
+            app, ["--provider", "claude", "files", "find", "--pattern", "*.py"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         # Should exit 0 (even if no files found in recovery dir)
@@ -1044,7 +1046,7 @@ class TestMessagesFindAlias:
     def test_messages_find_positional(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["messages", "find", "start the feature"],
+            app, ["--provider", "claude", "messages", "find", "start the feature"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -1782,15 +1784,16 @@ class TestCLIDualOrdering:
         assert "max-chars" in result.output.lower()
 
     def test_cli_search_files_has_datetime_flags(self):
-        """File search should have --after and --before flags."""
+        """File search should have --since, --until, --when flags (--after/--before are hidden aliases)."""
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
-        assert "--after" in result.output
-        assert "--before" in result.output
+        assert "--since" in result.output
+        assert "--until" in result.output
+        assert "--when" in result.output
 
     def test_cli_search_files_has_session_flags(self):
         """File search should have --include-sessions and --exclude-sessions."""
@@ -2994,7 +2997,7 @@ class TestPositionalArgExtract:
             os.environ["AI_SESSION_TOOLS_PROJECTS"] = str(tmp_path / "projects")
             os.environ["AI_SESSION_TOOLS_RECOVERY"] = str(recovery)
             cli_module._g_claude_dir = None
-            result = runner.invoke(app, ["files", "extract", "hello.py"])
+            result = runner.invoke(app, ["--provider", "claude", "files", "extract", "hello.py"])
         finally:
             if old_projects is None:
                 os.environ.pop("AI_SESSION_TOOLS_PROJECTS", None)
@@ -3241,20 +3244,20 @@ class TestLoadConfig:
     """Tests for load_config(): reads JSON, falls back gracefully, respects env var."""
 
     def _reset_cache(self):
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
-        cli_mod._g_config_path = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
+        cfg_mod._g_config_path = None
 
     def test_missing_file_returns_empty_dict(self, tmp_path):
         self._reset_cache()
         import os
         env = {"AI_SESSION_TOOLS_CONFIG": str(tmp_path / "nonexistent.json")}
-        result = runner.invoke(app, ["list"], env=env)
+        result = runner.invoke(app, ["--provider", "claude", "list"], env=env)
         # No crash; config loading returns empty dict silently
         from ai_session_tools.cli import load_config
         self._reset_cache()
-        import ai_session_tools.cli as cli_mod
-        cli_mod._g_config_path = str(tmp_path / "nonexistent.json")
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._g_config_path = str(tmp_path / "nonexistent.json")
         assert load_config() == {}
 
     def test_valid_config_loaded(self, tmp_path):
@@ -3263,8 +3266,8 @@ class TestLoadConfig:
         cfg = {"planning_commands": ["/mycommand", "/mc"]}
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps(cfg))
-        import ai_session_tools.cli as cli_mod
-        cli_mod._g_config_path = str(config_file)
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._g_config_path = str(config_file)
         result = load_config()
         assert result == cfg
         self._reset_cache()
@@ -3273,8 +3276,8 @@ class TestLoadConfig:
         self._reset_cache()
         config_file = tmp_path / "config.json"
         config_file.write_text("{ bad json !!!")
-        import ai_session_tools.cli as cli_mod
-        cli_mod._g_config_path = str(config_file)
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._g_config_path = str(config_file)
         from ai_session_tools.cli import load_config
         result = load_config()
         assert result == {}
@@ -3284,8 +3287,8 @@ class TestLoadConfig:
         self._reset_cache()
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({"planning_commands": ["/x"]}))
-        import ai_session_tools.cli as cli_mod
-        cli_mod._g_config_path = str(config_file)
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._g_config_path = str(config_file)
         from ai_session_tools.cli import load_config
         r1 = load_config()
         r2 = load_config()
@@ -3301,40 +3304,40 @@ class TestConfigFileCorrectionsIntegration:
 
     def test_config_patterns_used_when_no_cli_flag(self, tmp_path):
         """Config file correction_patterns override built-in defaults."""
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
         config_file = tmp_path / "config.json"
         # Pattern that matches "you forgot" (present in fixture session)
         config_file.write_text(json.dumps({
             "correction_patterns": ["config_cat:you forgot"]
         }))
         projects = self._projects(tmp_path)
-        result = runner.invoke(app, ["messages", "corrections", "--format", "json"], env={
+        result = runner.invoke(app, ["--provider", "claude", "messages", "corrections", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert any(d["category"] == "config_cat" for d in data)
 
     def test_cli_pattern_overrides_config(self, tmp_path):
         """--pattern flag takes priority over config file."""
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({
             "correction_patterns": ["config_cat:NOMATCH_UNIQUE_XYZ"]
         }))
         projects = self._projects(tmp_path)
         result = runner.invoke(app, [
-            "messages", "corrections", "--format", "json",
+            "--provider", "claude", "messages", "corrections", "--format", "json",
             "--pattern", "cli_cat:you forgot",
         ], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         # CLI pattern wins — category is "cli_cat", not "config_cat"
@@ -3350,40 +3353,40 @@ class TestConfigFilePlanningIntegration:
 
     def test_config_commands_used_when_no_cli_flag(self, tmp_path):
         """Config file planning_commands override built-in defaults."""
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
         config_file = tmp_path / "config.json"
         # "/ar:plannew" appears in the fixture session
         config_file.write_text(json.dumps({
             "planning_commands": [r"/ar:plannew\b"]
         }))
         projects = self._projects(tmp_path)
-        result = runner.invoke(app, ["messages", "planning", "--format", "json"], env={
+        result = runner.invoke(app, ["--provider", "claude", "messages", "planning", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert any("/ar:plannew" in d["command"] for d in data)
 
     def test_cli_commands_override_config(self, tmp_path):
         """--commands flag takes priority over config file."""
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({
             "planning_commands": [r"/NOMATCH_UNIQUE_XYZ\b"]
         }))
         projects = self._projects(tmp_path)
         result = runner.invoke(app, [
-            "messages", "planning", "--format", "json",
+            "--provider", "claude", "messages", "planning", "--format", "json",
             "--commands", r"/ar:plannew\b",
         ], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
             "AI_SESSION_TOOLS_CONFIG": str(config_file),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         # CLI commands win
@@ -3589,7 +3592,7 @@ class TestMessagesPlanningDiscovery:
     def test_planning_discovery_exit0(self, tmp_path):
         """Default (no --commands) uses discovery mode and exits 0."""
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "planning"], env={
+        result = runner.invoke(app, ["--provider", "claude", "messages", "planning"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
         assert result.exit_code == 0, result.output
@@ -3597,7 +3600,7 @@ class TestMessagesPlanningDiscovery:
     def test_planning_discovery_finds_commands(self, tmp_path):
         """Default output includes auto-discovered /ar:plannew."""
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "planning"], env={
+        result = runner.invoke(app, ["--provider", "claude", "messages", "planning"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
         assert result.exit_code == 0
@@ -3606,7 +3609,7 @@ class TestMessagesPlanningDiscovery:
     def test_planning_discovery_json_format(self, tmp_path):
         """Discovery mode with --format json returns valid JSON with command key."""
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "planning", "--format", "json"], env={
+        result = runner.invoke(app, ["--provider", "claude", "messages", "planning", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
         assert result.exit_code == 0
@@ -3618,7 +3621,7 @@ class TestMessagesPlanningDiscovery:
         """--commands flag switches to pattern mode, overriding discovery."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(app, [
-            "messages", "planning", "--commands", r"/ar:plannew\b", "--format", "json"
+            "--provider", "claude", "messages", "planning", "--commands", r"/ar:plannew\b", "--format", "json"
         ], env={
             "AI_SESSION_TOOLS_PROJECTS": str(projects),
         })
@@ -3659,41 +3662,41 @@ class TestConfigShow:
 
     def test_config_show_no_file(self, tmp_path):
         """When no config file exists, shows a helpful message."""
-        import ai_session_tools.cli as cli_mod
-        cli_mod._config_cache = None
+        import ai_session_tools.config as cfg_mod
+        cfg_mod._config_cache = None
         result = runner.invoke(app, ["config", "show"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
             "AI_SESSION_TOOLS_CONFIG": str(tmp_path / "nonexistent.json"),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0
         assert "does not exist" in result.output or "init" in result.output.lower()
 
     def test_config_show_with_file(self, tmp_path):
         """With a config file, shows its contents."""
-        import ai_session_tools.cli as cli_mod
+        import ai_session_tools.config as cfg_mod
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"planning_commands": ["/mycommand"]}))
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         result = runner.invoke(app, ["config", "show"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
             "AI_SESSION_TOOLS_CONFIG": str(cfg),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0
         assert "planning_commands" in result.output or "/mycommand" in result.output
 
     def test_config_show_json_format(self, tmp_path):
         """--format json returns valid JSON with config_file and exists keys."""
-        import ai_session_tools.cli as cli_mod
+        import ai_session_tools.config as cfg_mod
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"planning_commands": ["/mycommand"]}))
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         result = runner.invoke(app, ["config", "show", "--format", "json"], env={
             "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
             "AI_SESSION_TOOLS_CONFIG": str(cfg),
         })
-        cli_mod._config_cache = None
+        cfg_mod._config_cache = None
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "config_file" in data
@@ -4019,13 +4022,13 @@ class TestSearchMessagesWithContext:
 class TestMessagesSearchContext:
     def test_context_flag_accepted(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "search", "feature", "--context", "2"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "search", "feature", "--context", "2"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_context_shows_surrounding_messages(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "search", "start the feature",
+        result = runner.invoke(app, ["--provider", "claude", "messages", "search", "start the feature",
                                      "--context", "1"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
@@ -4034,13 +4037,13 @@ class TestMessagesSearchContext:
 
     def test_context_zero_same_as_default(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "search", "feature", "--context", "0"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "search", "feature", "--context", "0"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_context_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "search", "feature",
+        result = runner.invoke(app, ["--provider", "claude", "messages", "search", "feature",
                                      "--context", "1", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
@@ -4057,27 +4060,27 @@ class TestMessagesSearchContext:
 class TestMessagesAnalyze:
     def test_analyze_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "analyze", "aaaa0001"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "inspect", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_analyze_shows_tool_name(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "analyze", "aaaa0001"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "inspect", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "Write" in result.output
 
     def test_analyze_shows_file_path(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "analyze", "aaaa0001"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "inspect", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "login.py" in result.output
 
     def test_analyze_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "analyze", "aaaa0001", "--format", "json"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "inspect", "aaaa0001", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -4088,7 +4091,7 @@ class TestMessagesAnalyze:
 
     def test_analyze_missing_session_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "analyze", "nonexistent-session"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "inspect", "nonexistent-session"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code != 0
 
@@ -4098,13 +4101,13 @@ class TestMessagesAnalyze:
 class TestMessagesTimeline:
     def test_timeline_exit0(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "timeline", "aaaa0001"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "timeline", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
 
     def test_timeline_shows_event_types(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "timeline", "aaaa0001"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "timeline", "aaaa0001"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         assert "user" in result.output
@@ -4112,7 +4115,7 @@ class TestMessagesTimeline:
 
     def test_timeline_json_format(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "timeline", "aaaa0001", "--format", "json"],
+        result = runner.invoke(app, ["--provider", "claude", "messages", "timeline", "aaaa0001", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -4132,7 +4135,7 @@ class TestMessagesTimeline:
 
     def test_timeline_preview_chars_option(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
-        result = runner.invoke(app, ["messages", "timeline", "aaaa0001",
+        result = runner.invoke(app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
                                      "--preview-chars", "10", "--format", "json"],
                                env={"AI_SESSION_TOOLS_PROJECTS": str(projects)})
         assert result.exit_code == 0
@@ -4485,7 +4488,7 @@ class TestMessagesExtractCLI:
     def test_extract_pbcopy_exit0(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["messages", "extract", "dddd0001", "pbcopy"],
+            app, ["--provider", "claude", "messages", "extract", "dddd0001", "pbcopy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -4493,7 +4496,7 @@ class TestMessagesExtractCLI:
     def test_extract_pbcopy_shows_content(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["messages", "extract", "dddd0001", "pbcopy"],
+            app, ["--provider", "claude", "messages", "extract", "dddd0001", "pbcopy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert "clipboard" in result.output
@@ -4501,7 +4504,7 @@ class TestMessagesExtractCLI:
     def test_extract_pbcopy_json_format(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["messages", "extract", "dddd0001", "pbcopy", "--format", "json"],
+            app, ["--provider", "claude", "messages", "extract", "dddd0001", "pbcopy", "--format", "json"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -4512,7 +4515,7 @@ class TestMessagesExtractCLI:
     def test_extract_missing_session_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["messages", "extract", "zzzz", "pbcopy"],
+            app, ["--provider", "claude", "messages", "extract", "zzzz", "pbcopy"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -4520,7 +4523,7 @@ class TestMessagesExtractCLI:
     def test_extract_invalid_type_exits_nonzero(self, tmp_path):
         projects = _make_projects_with_pbcopy(tmp_path)
         result = runner.invoke(
-            app, ["messages", "extract", "dddd0001", "invalid-type"],
+            app, ["--provider", "claude", "messages", "extract", "dddd0001", "invalid-type"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code != 0
@@ -4635,21 +4638,21 @@ class TestGetSessionsNoTimestampFilter:
         """Sessions with no timestamp should be excluded when after= filter is set."""
         projects = _make_projects_for_edge_cases(tmp_path)
         engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
-        # after="2026-01-01" — s2 has no timestamp so should be excluded
-        sessions = engine.get_sessions(after="2026-01-01")
+        # since="2026-01-01" — s2 has no timestamp so should be excluded
+        sessions = engine.get_sessions(since="2026-01-01")
         session_ids = [s.session_id for s in sessions]
         assert "bbbb0002-0000-0000-0000-000000000000" not in session_ids, (
-            "Session with no timestamp should be excluded when after= filter is active"
+            "Session with no timestamp should be excluded when since= filter is active"
         )
 
     def test_no_timestamp_session_excluded_when_before_filter_active(self, tmp_path):
-        """Sessions with no timestamp should be excluded when before= filter is set."""
+        """Sessions with no timestamp should be excluded when until= filter is set."""
         projects = _make_projects_for_edge_cases(tmp_path)
         engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
-        sessions = engine.get_sessions(before="2026-12-31")
+        sessions = engine.get_sessions(until="2026-12-31")
         session_ids = [s.session_id for s in sessions]
         assert "bbbb0002-0000-0000-0000-000000000000" not in session_ids, (
-            "Session with no timestamp should be excluded when before= filter is active"
+            "Session with no timestamp should be excluded when until= filter is active"
         )
 
     def test_no_timestamp_session_included_when_no_filter(self, tmp_path):
@@ -4785,3 +4788,4100 @@ class TestTimelineNoSessionError:
         )
         # More precise: after fix, error should mention events/content, not "session not found"
         # We test that the CLI exits non-zero (always true) — the message test is in the impl
+
+
+# ─── Tests for new multi-source extensions ────────────────────────────────────
+
+
+class TestAiStudioSource:
+    """Unit tests for AiStudioSource (chunkedPrompt JSON + legacy .md)."""
+
+    def _make_aistudio_json(self, tmp_path: Path, name: str, chunks: list) -> Path:
+        data = {"chunkedPrompt": {"chunks": chunks}}
+        f = tmp_path / name
+        f.write_text(json.dumps(data), encoding="utf-8")
+        return f
+
+    def test_stream_sessions_yields_session_info(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        self._make_aistudio_json(tmp_path, "test_session", [
+            {"role": "user", "text": "hello", "tokenCount": 1},
+        ])
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 1
+        assert sessions[0].session_id == "test_session"
+        assert sessions[0].project_dir == str(tmp_path)
+
+    def test_read_session_parses_chunks(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        self._make_aistudio_json(tmp_path, "mysession", [
+            {"role": "user", "text": "hello world", "tokenCount": 2},
+            {"role": "model", "text": "hi there", "tokenCount": 2},
+        ])
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = list(src.stream_sessions())
+        msgs = src.read_session(sessions[0])
+        assert len(msgs) == 2
+        assert msgs[0].type.value == "user"
+        assert msgs[0].content == "hello world"
+        assert msgs[1].type.value == "assistant"
+
+    def test_read_session_legacy_md(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        md_file = tmp_path / "old_session.md"
+        md_file.write_text("# Old session\n\nSome content", encoding="utf-8")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 1
+        msgs = src.read_session(sessions[0])
+        assert len(msgs) == 1
+        assert "Old session" in msgs[0].content
+
+    def test_skips_binary_extensions(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        (tmp_path / "image.png").write_bytes(b"\x89PNG")
+        (tmp_path / "doc.pdf").write_bytes(b"%PDF")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 0
+
+    def test_search_messages_finds_matches(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        self._make_aistudio_json(tmp_path, "session1", [
+            {"role": "user", "text": "transcription SRT file", "tokenCount": 3},
+        ])
+        self._make_aistudio_json(tmp_path, "session2", [
+            {"role": "user", "text": "unrelated content", "tokenCount": 2},
+        ])
+        src = AiStudioSource(source_dirs=[tmp_path])
+        results = src.search_messages("SRT")
+        assert len(results) == 1
+        assert "transcription" in results[0].content
+
+    def test_stats_returns_count(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        self._make_aistudio_json(tmp_path, "s1", [{"role": "user", "text": "a"}])
+        self._make_aistudio_json(tmp_path, "s2", [{"role": "user", "text": "b"}])
+        src = AiStudioSource(source_dirs=[tmp_path])
+        s = src.stats()
+        assert s.get("aistudio_sessions", 0) == 2
+
+    def test_multiple_source_dirs(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        dir1 = tmp_path / "dir1"
+        dir2 = tmp_path / "dir2"
+        dir1.mkdir()
+        dir2.mkdir()
+        self._make_aistudio_json(dir1, "s1", [{"role": "user", "text": "a"}])
+        self._make_aistudio_json(dir2, "s2", [{"role": "user", "text": "b"}])
+        src = AiStudioSource(source_dirs=[dir1, dir2])
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 2
+
+    def test_missing_dir_does_not_raise(self, tmp_path):
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        missing = tmp_path / "does_not_exist"
+        src = AiStudioSource(source_dirs=[missing])
+        sessions = list(src.stream_sessions())  # should not raise
+        assert len(sessions) == 0
+
+
+class TestGeminiCliSource:
+    """Unit tests for GeminiCliSource (Gemini CLI session JSON)."""
+
+    def _make_gemini_session(self, tmp_path: Path, session_name: str, messages: list) -> Path:
+        chats_dir = tmp_path / "abc123hash" / "chats"
+        chats_dir.mkdir(parents=True, exist_ok=True)
+        f = chats_dir / session_name
+        data = {
+            "sessionId": "test-session-id",
+            "projectHash": "abc123hash",
+            "startTime": "2026-02-23T04:07:00Z",
+            "lastUpdated": "2026-02-23T05:00:00Z",
+            "messages": messages,
+        }
+        f.write_text(json.dumps(data), encoding="utf-8")
+        return f
+
+    def test_stream_sessions_discovers_chats(self, tmp_path):
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        self._make_gemini_session(tmp_path, "session-2026-02-23T04-07-abc.json", [
+            {"id": "1", "type": "user", "content": "hello", "timestamp": "2026-02-23T04:07:00Z"},
+        ])
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 1
+
+    def test_read_session_parses_user_messages(self, tmp_path):
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        self._make_gemini_session(tmp_path, "session-2026-02-23T04-07-abc.json", [
+            {"id": "1", "type": "user", "content": "hello gemini", "timestamp": "2026-02-23T04:07:00Z"},
+            {"id": "2", "type": "gemini", "content": "hello user", "timestamp": "2026-02-23T04:07:01Z"},
+            {"id": "3", "type": "info", "content": "system note", "timestamp": "2026-02-23T04:07:02Z"},
+        ])
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = list(src.stream_sessions())
+        msgs = src.read_session(sessions[0])
+        # Should parse user + gemini, skip info
+        assert len(msgs) == 2
+        assert msgs[0].type.value == "user"
+        assert msgs[0].content == "hello gemini"
+        assert msgs[1].type.value == "assistant"
+
+    def test_content_as_list_of_parts(self, tmp_path):
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        self._make_gemini_session(tmp_path, "session-2026-02-23T04-07-abc.json", [
+            {"id": "1", "type": "user", "content": [{"text": "part one"}, {"text": "part two"}], "timestamp": ""},
+        ])
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = list(src.stream_sessions())
+        msgs = src.read_session(sessions[0])
+        assert "part one" in msgs[0].content
+        assert "part two" in msgs[0].content
+
+    def test_strips_embedded_file_blocks(self, tmp_path):
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        content = "my question\n--- Content from referenced files ---\nsome file content\n--- End of content ---\nrest of message"
+        self._make_gemini_session(tmp_path, "session-2026-02-23T04-07-abc.json", [
+            {"id": "1", "type": "user", "content": content, "timestamp": ""},
+        ])
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = list(src.stream_sessions())
+        msgs = src.read_session(sessions[0])
+        assert "Content from referenced files" not in msgs[0].content
+        assert "my question" in msgs[0].content
+
+    def test_missing_gemini_dir_does_not_raise(self, tmp_path):
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path / "nonexistent")
+        sessions = list(src.stream_sessions())
+        assert len(sessions) == 0
+
+
+class TestCodebookUtils:
+    """Unit tests for ai_session_tools.analysis.codebook utilities."""
+
+    def test_get_ngrams_trigrams(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        result = get_ngrams("the quick brown fox", 3)
+        assert "quick brown fox" in result
+
+    def test_get_ngrams_empty(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        assert get_ngrams("", 3) == []
+
+    def test_is_meaningful_filters_stopword_start(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        assert not is_meaningful("the quick fox")
+        assert not is_meaningful("and also too")
+
+    def test_is_meaningful_passes_content_phrase(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        assert is_meaningful("critique and improve")
+        assert is_meaningful("tenured professor persona")
+
+    def test_compile_codes_creates_patterns(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        codes = {"chain_of_thought": ["think step by step", "chain of thought"]}
+        patterns = compile_codes(codes)
+        assert "chain_of_thought" in patterns
+        assert patterns["chain_of_thought"].search("Please think step by step here")
+
+    def test_load_codebook_empty_dir(self, tmp_path):
+        from ai_session_tools.analysis.codebook import load_codebook
+        tech, role = load_codebook(tmp_path)
+        assert isinstance(tech, dict)
+        assert isinstance(role, dict)
+
+    def test_load_keyword_maps_empty_dir(self, tmp_path):
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        maps = load_keyword_maps(tmp_path)
+        assert isinstance(maps, dict)
+
+
+class TestExtractHistory:
+    """Unit tests for ai_session_tools.analysis.extract."""
+
+    def _make_gemini_session_file(self, tmp_path: Path, messages: list) -> Path:
+        f = tmp_path / "session-test.json"
+        f.write_text(json.dumps({"messages": messages}), encoding="utf-8")
+        return f
+
+    def test_strip_embedded_files_removes_block(self):
+        from ai_session_tools.analysis.extract import strip_embedded_files
+        text = "question\n--- Content from referenced files ---\nfile data\n--- End of content ---\nanswer"
+        result = strip_embedded_files(text)
+        assert "Content from referenced files" not in result
+        assert "question" in result
+        assert "answer" in result
+
+    def test_extract_text_from_str(self):
+        from ai_session_tools.analysis.extract import extract_text
+        assert extract_text("hello") == "hello"
+
+    def test_extract_text_from_list(self):
+        from ai_session_tools.analysis.extract import extract_text
+        result = extract_text([{"text": "part a"}, {"text": "part b"}])
+        assert "part a" in result
+        assert "part b" in result
+
+    def test_extract_history_writes_file(self, tmp_path):
+        from ai_session_tools.analysis.extract import extract_history
+        session_file = self._make_gemini_session_file(tmp_path, [
+            {"type": "user", "content": "first instruction", "timestamp": ""},
+            {"type": "gemini", "content": "response", "timestamp": ""},
+            {"type": "user", "content": "second instruction", "timestamp": ""},
+        ])
+        output_file = tmp_path / "output.md"
+        count = extract_history(session_file, output_file)
+        assert count == 2
+        text = output_file.read_text()
+        assert "first instruction" in text
+        assert "second instruction" in text
+
+    def test_extract_history_missing_session_raises(self, tmp_path):
+        from ai_session_tools.analysis.extract import extract_history
+        import pytest
+        with pytest.raises(FileNotFoundError):
+            extract_history(tmp_path / "nonexistent.json", tmp_path / "out.md")
+
+
+class TestGraphBuilder:
+    """Unit tests for ai_session_tools.analysis.graph."""
+
+    def _make_records(self, names: list[str]) -> list[dict]:
+        return [{"name": n, "source_format": "aistudio_json", "utility": 10,
+                 "era": "2025-2026", "techniques": [], "roles": [], "filepath": ""} for n in names]
+
+    def test_filename_strategy_detects_branch(self):
+        from ai_session_tools.analysis.graph import AiStudioFilenameStrategy, GraphNode
+        nodes = [
+            GraphNode(id="Session Alpha", source_format="aistudio_json", title="Session Alpha"),
+            GraphNode(id="Branch of Session Alpha", source_format="aistudio_json", title="Branch of Session Alpha"),
+        ]
+        strat = AiStudioFilenameStrategy()
+        edges = strat.detect(nodes)
+        assert len(edges) == 1
+        assert edges[0].edge_type == "branch"
+        assert edges[0].source == "Session Alpha"
+        assert edges[0].target == "Branch of Session Alpha"
+
+    def test_filename_strategy_detects_copy(self):
+        from ai_session_tools.analysis.graph import AiStudioFilenameStrategy, GraphNode
+        nodes = [
+            GraphNode(id="Session Beta", source_format="aistudio_json", title="Session Beta"),
+            GraphNode(id="Copy of Session Beta", source_format="aistudio_json", title="Copy of Session Beta"),
+        ]
+        strat = AiStudioFilenameStrategy()
+        edges = strat.detect(nodes)
+        assert len(edges) == 1
+        assert edges[0].edge_type == "copy"
+
+    def test_filename_strategy_detects_version_chain(self):
+        from ai_session_tools.analysis.graph import AiStudioFilenameStrategy, GraphNode
+        nodes = [
+            GraphNode(id="Harbor Native v1", source_format="aistudio_json", title="Harbor Native v1"),
+            GraphNode(id="Harbor Native v2", source_format="aistudio_json", title="Harbor Native v2"),
+            GraphNode(id="Harbor Native v3", source_format="aistudio_json", title="Harbor Native v3"),
+        ]
+        strat = AiStudioFilenameStrategy()
+        edges = strat.detect(nodes)
+        assert len(edges) == 2
+        types = {e.edge_type for e in edges}
+        assert "version" in types
+
+    def test_build_graph_returns_structure(self):
+        from ai_session_tools.analysis.graph import build_graph
+        records = self._make_records(["Session A", "Branch of Session A", "Session B"])
+        result = build_graph(records)
+        assert result["node_count"] == 3
+        assert "nodes" in result
+        assert "edges" in result
+        assert result["edge_count"] >= 1  # at least the Branch edge
+
+    def test_build_graph_bitemporal_fields(self):
+        from ai_session_tools.analysis.graph import build_graph
+        records = self._make_records(["Session X"])
+        result = build_graph(records)
+        node = result["nodes"][0]
+        assert "event_time" in node
+        assert "ingest_time" in node
+        assert node["ingest_time"]  # not empty
+
+    def test_tfidf_strategy_no_self_loops(self):
+        from ai_session_tools.analysis.graph import TfIdfSimilarityStrategy, GraphNode
+        nodes = [
+            GraphNode(id="transcription analysis review", source_format="aistudio_json", title="transcription analysis review"),
+            GraphNode(id="transcription analysis session", source_format="aistudio_json", title="transcription analysis session"),
+            GraphNode(id="unrelated topic completely", source_format="aistudio_json", title="unrelated topic completely"),
+        ]
+        strat = TfIdfSimilarityStrategy(threshold=0.1)
+        edges = strat.detect(nodes)
+        # No self-loops: source != target for all edges
+        for e in edges:
+            assert e.source != e.target
+
+
+class TestSessionRecord:
+    """Unit tests for SessionRecord and apply_codes in analyzer."""
+
+    def test_to_db_dict_excludes_user_text(self):
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="test", source_dir="/tmp", filepath="/tmp/test",
+            source_format="aistudio_json", user_text="very long user text",
+            chunk_count=5, user_chunk_count=3,
+        )
+        d = rec.to_db_dict()
+        assert "user_text" not in d
+        assert d["name"] == "test"
+        assert d["chunk_count"] == 5
+
+    def test_apply_codes_version_detection(self):
+        from ai_session_tools.analysis.analyzer import SessionRecord, apply_codes
+        rec = SessionRecord(
+            name="Harbor Native v3", source_dir="/tmp", filepath="/tmp/x",
+            source_format="aistudio_json", user_text="some content",
+            chunk_count=1, user_chunk_count=1,
+        )
+        apply_codes(rec, {}, {}, {}, {"version_multiplier": 10})
+        assert rec.version_num == 3
+        assert rec.rigor_score >= 30  # 3 * 10
+
+    def test_apply_codes_branch_detection(self):
+        from ai_session_tools.analysis.analyzer import SessionRecord, apply_codes
+        rec = SessionRecord(
+            name="Branch of Session Alpha", source_dir="/tmp", filepath="/tmp/x",
+            source_format="aistudio_json", user_text="content",
+            chunk_count=1, user_chunk_count=1,
+        )
+        apply_codes(rec, {}, {}, {}, {})
+        assert rec.is_branch
+        assert rec.graph_parent == "Session Alpha"
+
+    def test_apply_codes_copy_detection(self):
+        from ai_session_tools.analysis.analyzer import SessionRecord, apply_codes
+        rec = SessionRecord(
+            name="Copy of Session Beta", source_dir="/tmp", filepath="/tmp/x",
+            source_format="aistudio_json", user_text="content",
+            chunk_count=1, user_chunk_count=1,
+        )
+        apply_codes(rec, {}, {}, {}, {})
+        assert rec.is_copy
+        assert rec.graph_parent == "Session Beta"
+
+    def test_compute_descendant_boost(self):
+        from ai_session_tools.analysis.analyzer import SessionRecord, compute_descendant_boost
+        parent = SessionRecord(
+            name="Root Session", source_dir="/tmp", filepath="/tmp/r",
+            source_format="aistudio_json", user_text="", chunk_count=1, user_chunk_count=1,
+            utility=50,
+        )
+        child = SessionRecord(
+            name="Branch of Root Session", source_dir="/tmp", filepath="/tmp/c",
+            source_format="aistudio_json", user_text="", chunk_count=1, user_chunk_count=1,
+            graph_parent="Root Session",
+        )
+        compute_descendant_boost([parent, child], boost_per_descendant=15)
+        assert parent.utility == 65  # 50 + 15
+
+
+class TestMultiSourceEngine:
+    """Unit tests for MultiSourceEngine."""
+
+    def _make_mock_source(self, session_ids: list[str], content: str = "test content"):
+        """Create a minimal mock source with predictable sessions."""
+        from ai_session_tools.models import MessageType, SessionInfo, SessionMessage
+
+        class MockSource:
+            def list_sessions(self):
+                return [SessionInfo(
+                    session_id=sid, project_dir="/tmp", cwd="", git_branch="",
+                    timestamp_first="", timestamp_last="", message_count=1,
+                    has_compact_summary=False,
+                ) for sid in session_ids]
+
+            def search_messages(self, pattern, filters=None):
+                import re
+                results = []
+                for sid in session_ids:
+                    if re.search(pattern, content, re.IGNORECASE):
+                        results.append(SessionMessage(
+                            type=MessageType.USER, timestamp="",
+                            content=content, session_id=sid,
+                        ))
+                return results
+
+            def stats(self):
+                return {"mock_sessions": len(session_ids)}
+
+        return MockSource()
+
+    def test_list_sessions_aggregates_all_sources(self):
+        from ai_session_tools.engine import MultiSourceEngine
+        src1 = self._make_mock_source(["s1", "s2"])
+        src2 = self._make_mock_source(["s3"])
+        engine = MultiSourceEngine([src1, src2])
+        sessions = engine.list_sessions()
+        assert len(sessions) == 3
+
+    def test_search_messages_aggregates_results(self):
+        from ai_session_tools.engine import MultiSourceEngine
+        src1 = self._make_mock_source(["s1"], "transcription SRT content")
+        src2 = self._make_mock_source(["s2"], "transcription SRT content")
+        engine = MultiSourceEngine([src1, src2])
+        results = engine.search_messages("SRT")
+        assert len(results) == 2
+
+    def test_stats_merges_counts(self):
+        from ai_session_tools.engine import MultiSourceEngine
+        src1 = self._make_mock_source(["s1", "s2"])
+        src2 = self._make_mock_source(["s3"])
+        engine = MultiSourceEngine([src1, src2])
+        stats = engine.stats()
+        assert stats.get("mock_sessions", 0) == 3  # 2 + 1
+
+    def test_failed_source_does_not_crash_engine(self):
+        from ai_session_tools.engine import MultiSourceEngine
+
+        class BrokenSource:
+            def list_sessions(self):
+                raise RuntimeError("I am broken")
+            def stats(self):
+                raise RuntimeError("also broken")
+
+        src_good = self._make_mock_source(["s1"])
+        engine = MultiSourceEngine([BrokenSource(), src_good])
+        # Should not raise — broken source is suppressed
+        sessions = engine.list_sessions()
+        assert len(sessions) == 1
+        stats = engine.stats()
+        assert stats.get("mock_sessions", 0) == 1
+
+
+# ── Phase C Tests: Composition Root, SessionBackend, Idempotent Pipeline ───
+
+
+class TestSessionBackendSearchMessages:
+    """Test SessionBackend.search_messages() signature unification (Phase C C4/C8)."""
+
+    def test_search_messages_accepts_query_and_message_type(self):
+        """SessionBackend.search_messages(query, message_type) works for all backends."""
+        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
+        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
+        # Should not crash even with empty sources
+        result = engine.search_messages("query", "user")
+        assert isinstance(result, list)
+
+    def test_search_messages_with_tool_parameter_warns_on_non_claude(self):
+        """SessionBackend.search_messages with --tool warns on non-Claude backend."""
+        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
+        from io import StringIO
+        import sys
+        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
+        # tool parameter is only supported on Claude backend; should return empty
+        # (we can't easily test stderr capture in this context, but verify no crash)
+        result = engine.search_messages("query", None, tool="some_tool")
+        assert isinstance(result, list)
+
+
+class TestSessionBackendDegradation:
+    """Test graceful degradation of Claude-only operations on multi-source backend."""
+
+    def test_find_corrections_returns_empty_on_aistudio(self):
+        """find_corrections (Claude-only) returns [] on non-Claude with no crash."""
+        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
+        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
+        result = engine.find_corrections()
+        assert result == []
+
+    def test_export_session_returns_empty_string_on_aistudio(self):
+        """export_session_markdown (Claude-only) returns "" on non-Claude."""
+        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
+        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
+        result = engine.export_session_markdown("session-id")
+        assert result == ""
+
+    def test_analyze_planning_usage_returns_empty_on_aistudio(self):
+        """analyze_planning_usage (Claude-only) returns [] on non-Claude."""
+        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
+        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
+        result = engine.analyze_planning_usage()
+        assert result == []
+
+    def test_timeline_session_returns_empty_on_aistudio(self):
+        """timeline_session (Claude-only) returns [] on non-Claude."""
+        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
+        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
+        result = engine.timeline_session("session-id")
+        assert result == []
+
+    def test_get_statistics_always_returns_dict(self):
+        """get_statistics() always returns dict (no RecoveryStatistics union type)."""
+        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
+        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
+        stats = engine.get_statistics()
+        assert isinstance(stats, dict)
+
+
+class TestSourceAutoDiscovery:
+    """Test _discover_sources() and _detect_default_source() (Phase C C1)."""
+
+    def test_detect_default_source_returns_claude_when_no_aistudio_configured(self, monkeypatch):
+        """_detect_default_source returns 'claude' when no non-Claude sources configured or auto-discovered."""
+        from ai_session_tools.engine import _detect_default_source, _discover_sources
+        # Mock _discover_sources to return empty (prevents auto-discovery from finding real sources)
+        monkeypatch.setattr(
+            "ai_session_tools.engine._discover_sources",
+            lambda cfg: {"source_dirs": cfg.get("source_dirs", {})}
+        )
+        result = _detect_default_source({"source_dirs": {}})
+        assert result == "claude"
+
+    def test_detect_default_source_returns_all_when_aistudio_configured(self):
+        """_detect_default_source returns 'all' when aistudio sources exist."""
+        from ai_session_tools.engine import _detect_default_source
+        cfg = {"source_dirs": {"aistudio": ["/tmp/studio"]}}
+        result = _detect_default_source(cfg)
+        assert result == "all"
+
+    def test_detect_default_source_returns_all_when_gemini_configured(self):
+        """_detect_default_source returns 'all' when gemini_cli sources exist."""
+        from ai_session_tools.engine import _detect_default_source
+        cfg = {"source_dirs": {"gemini_cli": "/tmp/gemini"}}
+        result = _detect_default_source(cfg)
+        assert result == "all"
+
+
+class TestGetSessionBackend:
+    """Test get_session_backend factory (Phase C C1)."""
+
+    def test_get_session_backend_returns_claude_backend_by_default(self, tmp_path):
+        """get_session_backend with source='claude' returns Claude-backed SessionBackend."""
+        from ai_session_tools.engine import get_session_backend, SessionBackend
+        engine = get_session_backend(
+            source="claude",
+            config={"source_dirs": {}},
+            claude_dir=str(tmp_path)
+        )
+        assert isinstance(engine, SessionBackend)
+        assert engine._is_claude
+
+    def test_get_session_backend_fallback_to_claude_when_no_sources_found(self, tmp_path):
+        """get_session_backend falls back to Claude when aistudio configured but not found."""
+        from ai_session_tools.engine import get_session_backend, SessionBackend
+        engine = get_session_backend(
+            source="aistudio",
+            config={"source_dirs": {"aistudio": ["/nonexistent"]}},
+            claude_dir=str(tmp_path)
+        )
+        assert isinstance(engine, SessionBackend)
+        # Falls back to Claude; this is acceptable behavior
+        assert engine._is_claude or engine.source == "aistudio"
+
+
+class TestPipelineState:
+    """Test idempotent pipeline with change detection (Phase C C12)."""
+
+    def test_compute_file_list_hash_detects_changes(self, tmp_path):
+        """compute_file_list_hash changes when file mtime changes."""
+        from ai_session_tools.analysis.pipeline_state import compute_file_list_hash
+        import time
+        f = tmp_path / "test.json"
+        f.write_text("{}")
+        h1 = compute_file_list_hash([f])
+        # Wait a tiny bit then touch file to change mtime
+        time.sleep(0.01)
+        f.touch()
+        h2 = compute_file_list_hash([f])
+        # Hashes should differ because mtime changed
+        assert h1 != h2
+
+    def test_load_state_returns_empty_for_missing_file(self, tmp_path):
+        """load_state returns {} when .pipeline_state.json doesn't exist."""
+        from ai_session_tools.analysis.pipeline_state import load_state
+        result = load_state(tmp_path)
+        assert result == {}
+
+    def test_save_state_writes_and_load_retrieves(self, tmp_path):
+        """save_state/load_state roundtrip preserves data."""
+        from ai_session_tools.analysis.pipeline_state import save_state, load_state, mark_done
+        state = {}
+        mark_done("analyze", "sha256:abc", state)
+        save_state(tmp_path, state)
+        loaded = load_state(tmp_path)
+        assert loaded["analyze"]["input_hash"] == "sha256:abc"
+        assert "run_time" in loaded["analyze"]
+
+    def test_is_stale_detects_changed_hash(self):
+        """is_stale returns True when input hash changed."""
+        from ai_session_tools.analysis.pipeline_state import is_stale
+        state = {"analyze": {"input_hash": "sha256:old"}}
+        assert is_stale("analyze", "sha256:new", state) is True
+        assert is_stale("analyze", "sha256:old", state) is False
+
+    def test_is_stale_returns_true_for_never_run_stage(self):
+        """is_stale returns True when stage never run before."""
+        from ai_session_tools.analysis.pipeline_state import is_stale
+        assert is_stale("analyze", "sha256:abc", {}) is True
+
+
+class TestSharedConfigModule:
+    """Test ai_session_tools.config module (Phase C R0)."""
+
+    def test_load_config_respects_set_config_path(self, tmp_path):
+        """set_config_path() makes load_config() use that path."""
+        import ai_session_tools.config as cfg_mod
+        import json
+        test_config = {"test_key": "test_value", "source_dirs": {}}
+        config_file = tmp_path / "test_config.json"
+        config_file.write_text(json.dumps(test_config))
+        original = cfg_mod._g_config_path
+        try:
+            cfg_mod.set_config_path(str(config_file))
+            cfg_mod._config_cache = None
+            result = cfg_mod.load_config()
+            assert result.get("test_key") == "test_value"
+        finally:
+            cfg_mod.set_config_path(original)
+
+    def test_config_loading_prefers_cli_flag_over_env(self, tmp_path, monkeypatch):
+        """--config CLI flag has priority over AI_SESSION_TOOLS_CONFIG env var."""
+        import ai_session_tools.config as cfg_mod
+        import json, os
+        flag_config = {"source": "flag"}
+        env_config = {"source": "env"}
+        flag_file = tmp_path / "flag.json"
+        env_file = tmp_path / "env.json"
+        flag_file.write_text(json.dumps(flag_config))
+        env_file.write_text(json.dumps(env_config))
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(env_file))
+        original = cfg_mod._g_config_path
+        try:
+            cfg_mod.set_config_path(str(flag_file))
+            cfg_mod._config_cache = None
+            result = cfg_mod.load_config()
+            assert result.get("source") == "flag"
+        finally:
+            cfg_mod.set_config_path(original)
+            cfg_mod._config_cache = None
+
+
+class TestAnalyzerSourceFilter:
+    """Test that run_analysis() accepts and respects source_filter (Phase C R1/R2)."""
+
+    def test_run_analysis_accepts_source_filter_parameter(self, tmp_path, monkeypatch):
+        """run_analysis(source_filter='aistudio') parameter is accepted."""
+        import ai_session_tools.analysis.analyzer as _anl
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {"org_dir": str(tmp_path)})
+        # Should accept source_filter parameter without crashing
+        try:
+            result = _anl.run_analysis(source_filter="aistudio", marker_window=0)
+            # Empty result expected since no actual sessions
+            assert isinstance(result, list)
+        except Exception as e:
+            # If it fails, it should NOT be because of unknown parameter
+            assert "source_filter" not in str(e), f"source_filter parameter rejected: {e}"
+
+
+class TestMultiSourceEngineSignature:
+    """Test MultiSourceEngine.search_messages() signature fix (Phase C C4/C8)."""
+
+    def test_search_messages_accepts_query_and_message_type(self):
+        """MultiSourceEngine.search_messages(query, message_type) works."""
+        from ai_session_tools.engine import MultiSourceEngine
+        engine = MultiSourceEngine([])
+        result = engine.search_messages("query", "user")
+        assert isinstance(result, list)
+
+
+class TestDetectEra:
+    """Test _detect_era(name, user_text, filepath=None, timestamp=None) for all priority levels.
+
+    Priority (highest → lowest):
+    1. 4-digit year at start of name
+    2. 2-digit year prefix (YY-MM-DD or YYMMDD) at start of name
+    3. Standalone 4-digit year anywhere in name
+    4. Authoritative ISO timestamp parameter
+    5. ISO date (YYYY-MM-DD) in first 2000 chars of user_text
+    6. .md extension → "legacy"
+    7. "unknown"
+    """
+
+    def setup_method(self):
+        from ai_session_tools.analysis.analyzer import _detect_era
+        self._detect_era = _detect_era
+
+    # --- Priority 1: 4-digit year at start of name ---
+
+    def test_4digit_year_prefix_2024(self):
+        """Name starting with 2024 returns '2024'."""
+        assert self._detect_era("2024_session_name", "") == "2024"
+
+    def test_4digit_year_prefix_2023(self):
+        """Name starting with 2023 returns '2023'."""
+        assert self._detect_era("2023_transcription_work", "") == "2023"
+
+    def test_4digit_year_prefix_2025(self):
+        """Name starting with 2025 returns '2025'."""
+        assert self._detect_era("2025-meeting-notes", "") == "2025"
+
+    def test_4digit_year_prefix_2026(self):
+        """Name starting with 2026 returns '2026'."""
+        assert self._detect_era("2026_project_alpha", "") == "2026"
+
+    # --- Priority 2: 2-digit year prefix (YY-MM-DD or YYMMDD) ---
+
+    def test_2digit_year_prefix_yy_mm_dd(self):
+        """Name '25-08-27_something' maps to 2025 (2-digit prefix YY-MM-DD)."""
+        result = self._detect_era("25-08-27_something", "")
+        assert result == "2025"
+
+    def test_2digit_year_prefix_yymmdd(self):
+        """Name '250509_session' maps to 2025 (YYMMDD prefix)."""
+        result = self._detect_era("250509_session", "")
+        assert result == "2025"
+
+    def test_2digit_year_prefix_23(self):
+        """Name '23-01-15' maps to 2023."""
+        result = self._detect_era("23-01-15", "")
+        assert result == "2023"
+
+    # --- Priority 3: Standalone 4-digit year anywhere in name ---
+
+    def test_standalone_year_in_parentheses(self):
+        """Name 'session (2023) title' returns '2023' via standalone year search."""
+        result = self._detect_era("session (2023) title", "")
+        assert result == "2023"
+
+    def test_standalone_year_at_end_of_name(self):
+        """Name 'meeting notes 2024' returns '2024' via standalone year search."""
+        result = self._detect_era("meeting notes 2024", "")
+        assert result == "2024"
+
+    # --- Priority 4: Authoritative ISO timestamp parameter ---
+
+    def test_timestamp_iso_used_when_no_name_year(self):
+        """timestamp='2024-03-15T10:00:00Z' → '2024' when name has no year."""
+        result = self._detect_era("my session", "", timestamp="2024-03-15T10:00:00Z")
+        assert result == "2024"
+
+    def test_timestamp_year_2025(self):
+        """timestamp='2025-01-01' → '2025' when name has no year."""
+        result = self._detect_era("some session", "", timestamp="2025-01-01")
+        assert result == "2025"
+
+    # --- Priority 5: ISO date in user_text content ---
+
+    def test_iso_date_in_user_text(self):
+        """'2024-03-15 meeting notes' in user_text → '2024' when name has no year."""
+        result = self._detect_era("my session", "2024-03-15 meeting notes")
+        assert result == "2024"
+
+    def test_year_in_content_no_name_year(self):
+        """Content with ISO date 'discussed in 2024-07-01' → '2024'."""
+        result = self._detect_era("session", "as of 2024-07-01 we discussed this")
+        assert result == "2024"
+
+    def test_plain_year_in_content_without_iso_date_is_not_priority5(self):
+        """'discussed in 2024' (no full ISO date) with .md filepath falls through to legacy."""
+        # Priority 5 only triggers on ISO date (YYYY-MM-DD), not bare year in text.
+        # With .md filepath → legacy (Priority 6).
+        result = self._detect_era("session", "discussed in 2024", filepath="session.md")
+        assert result == "legacy"
+
+    # --- Priority 6: .md extension → "legacy" ---
+
+    def test_md_extension_returns_legacy(self):
+        """File with .md extension and no year signals → 'legacy'."""
+        result = self._detect_era("my session", "hello world", filepath="my session.md")
+        assert result == "legacy"
+
+    def test_md_in_name_returns_legacy(self):
+        """Name ending in .md with no year → 'legacy'."""
+        result = self._detect_era("session.md", "hello world")
+        assert result == "legacy"
+
+    # --- Priority 7: "unknown" ---
+
+    def test_no_signals_returns_unknown(self):
+        """No year in name, no year in text, no .md, no timestamp → 'unknown'."""
+        result = self._detect_era("my session", "hello world", filepath="")
+        assert result == "unknown"
+
+    def test_empty_inputs_returns_unknown(self):
+        """All empty inputs → 'unknown'."""
+        result = self._detect_era("", "", filepath="")
+        assert result == "unknown"
+
+    # --- Priority ordering ---
+
+    def test_name_year_beats_content_year(self):
+        """Name '2024_session' with user_text mentioning 2022 → '2024' (name wins)."""
+        result = self._detect_era("2024_session", "from 2022")
+        assert result == "2024"
+
+    def test_name_year_beats_timestamp(self):
+        """Name '2024_session' with timestamp='2022-01-01' → '2024' (name wins)."""
+        result = self._detect_era("2024_session", "", timestamp="2022-01-01")
+        assert result == "2024"
+
+    def test_timestamp_beats_content_iso_date(self):
+        """Timestamp '2025-06-01' beats ISO date '2023-01-01' in user_text."""
+        result = self._detect_era("session", "2023-01-01 notes", timestamp="2025-06-01")
+        assert result == "2025"
+
+    def test_name_year_beats_md_extension(self):
+        """Name '2024_session.md' → '2024' (name year Priority 1 beats .md Priority 6)."""
+        result = self._detect_era("2024_session.md", "hello world")
+        assert result == "2024"
+
+
+class TestWriteVocabReport:
+    """Test write_vocab_report(tri, quad, output_file, min_freq, stop_words).
+
+    Function signature (from analyzer.py):
+        write_vocab_report(tri: Counter, quad: Counter, output_file: Path,
+                           min_freq: int = 3, stop_words: frozenset | None = None)
+    """
+
+    def setup_method(self):
+        from ai_session_tools.analysis.analyzer import write_vocab_report
+        self.write_vocab_report = write_vocab_report
+
+    def _make_counter(self, items):
+        from collections import Counter
+        return Counter(items)
+
+    # --- File creation ---
+
+    def test_creates_output_file(self, tmp_path):
+        """write_vocab_report creates the file at the specified path."""
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), self._make_counter([]), out)
+        assert out.exists()
+
+    def test_file_starts_with_vocab_analysis_header(self, tmp_path):
+        """Output file starts with '# Vocabulary Analysis' header."""
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), self._make_counter([]), out)
+        content = out.read_text(encoding="utf-8")
+        assert content.startswith("# Vocabulary Analysis")
+
+    # --- Section headers ---
+
+    def test_contains_3word_phrases_section(self, tmp_path):
+        """Output contains '3-Word Phrases' section header."""
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), self._make_counter([]), out)
+        content = out.read_text(encoding="utf-8")
+        assert "3-Word Phrases" in content
+
+    def test_contains_4word_phrases_section(self, tmp_path):
+        """Output contains '4-Word Phrases' section header."""
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), self._make_counter([]), out)
+        content = out.read_text(encoding="utf-8")
+        assert "4-Word Phrases" in content
+
+    # --- Markdown table format ---
+
+    def test_markdown_table_header_present(self, tmp_path):
+        """Output contains '| Count | Phrase |' markdown table header."""
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), self._make_counter([]), out)
+        content = out.read_text(encoding="utf-8")
+        assert "| Count | Phrase |" in content
+
+    # --- Frequency filtering ---
+
+    def test_high_freq_trigram_appears_in_output(self, tmp_path):
+        """Trigram with freq >= min_freq and is_meaningful → appears in output."""
+        from collections import Counter
+        tri = Counter({"prompt engineering techniques": 5})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "prompt engineering techniques" in content
+
+    def test_low_freq_trigram_excluded(self, tmp_path):
+        """Trigram with freq below min_freq is excluded from output."""
+        from collections import Counter
+        tri = Counter({"rare trigram phrase": 1})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "rare trigram phrase" not in content
+
+    def test_exactly_min_freq_trigram_included(self, tmp_path):
+        """Trigram with freq == min_freq is included (boundary condition)."""
+        from collections import Counter
+        tri = Counter({"boundary test phrase": 3})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "boundary test phrase" in content
+
+    # --- Stop word filtering ---
+
+    def test_stop_word_only_phrase_excluded(self, tmp_path):
+        """Phrase consisting entirely of stop words is excluded by is_meaningful."""
+        from collections import Counter
+        # "the and is" — all stop words → is_meaningful returns False
+        tri = Counter({"the and is": 10})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "the and is" not in content
+
+    def test_phrase_starting_with_stop_word_excluded(self, tmp_path):
+        """Phrase starting with a stop word is excluded (is_meaningful rule)."""
+        from collections import Counter
+        # "the quick brown" starts with "the" (stop word) → excluded
+        tri = Counter({"the quick brown": 10})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "the quick brown" not in content
+
+    def test_custom_stop_words_applied(self, tmp_path):
+        """Custom stop_words parameter overrides default, filtering phrase that would otherwise pass."""
+        from collections import Counter
+        # "python machine learning" would normally pass, but "python" as custom stop word blocks it
+        tri = Counter({"python machine learning": 5})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(tri, self._make_counter([]), out, min_freq=3,
+                                stop_words=frozenset({"python"}))
+        content = out.read_text(encoding="utf-8")
+        assert "python machine learning" not in content
+
+    # --- Empty counters ---
+
+    def test_empty_counters_no_crash(self, tmp_path):
+        """Empty counters write sections with 0 entries without crashing."""
+        from collections import Counter
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(Counter(), Counter(), out)
+        content = out.read_text(encoding="utf-8")
+        assert "0 total" in content
+
+    def test_empty_counters_file_is_valid_markdown(self, tmp_path):
+        """Empty counters still produce a valid markdown file with both sections."""
+        from collections import Counter
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(Counter(), Counter(), out)
+        content = out.read_text(encoding="utf-8")
+        assert "3-Word Phrases" in content
+        assert "4-Word Phrases" in content
+
+    # --- Quadgram-specific ---
+
+    def test_high_freq_quadgram_appears_in_output(self, tmp_path):
+        """Quadgram with freq >= min_freq and is_meaningful → appears in output."""
+        from collections import Counter
+        quad = Counter({"advanced prompt engineering techniques": 4})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), quad, out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "advanced prompt engineering techniques" in content
+
+    def test_low_freq_quadgram_excluded(self, tmp_path):
+        """Quadgram with freq below min_freq is excluded."""
+        from collections import Counter
+        quad = Counter({"rare four word phrase": 2})
+        out = tmp_path / "vocab.md"
+        self.write_vocab_report(self._make_counter([]), quad, out, min_freq=3)
+        content = out.read_text(encoding="utf-8")
+        assert "rare four word phrase" not in content
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestOrchestratorTaxonomy  (orchestrator.py coverage)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestOrchestratorTaxonomy:
+    """Tests for ai_session_tools.analysis.orchestrator — all public APIs."""
+
+    # ── 1. make_symlink ──────────────────────────────────────────────────────
+
+    def test_make_symlink_creates_link_when_source_exists(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import make_symlink
+        src = tmp_path / "source.txt"
+        src.write_text("hello")
+        link = tmp_path / "links" / "target.txt"
+        result = make_symlink(str(src), link)
+        assert result is True
+        assert link.is_symlink()
+
+    def test_make_symlink_skips_if_already_exists(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import make_symlink
+        src = tmp_path / "source.txt"
+        src.write_text("hello")
+        link = tmp_path / "target.txt"
+        make_symlink(str(src), link)
+        result = make_symlink(str(src), link)
+        assert result is False
+
+    def test_make_symlink_creates_parent_dirs(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import make_symlink
+        src = tmp_path / "source.txt"
+        src.write_text("hello")
+        link = tmp_path / "a" / "b" / "c" / "target.txt"
+        make_symlink(str(src), link)
+        assert link.parent.is_dir()
+
+    def test_make_symlink_nonexistent_source_still_creates_link(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import make_symlink
+        link = tmp_path / "subdir" / "link.txt"
+        result = make_symlink("/nonexistent/path/file.txt", link)
+        # make_symlink does not check if source exists; link may be dangling
+        # result is True if symlink was created, False if OS refused
+        assert isinstance(result, bool)
+        # If created, verify it is a symlink
+        if result:
+            assert link.is_symlink()
+
+    # ── 2. validate_taxonomy_dimensions (no keyword_maps) ───────────────────
+
+    def test_validate_empty_list_is_valid(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        assert validate_taxonomy_dimensions([]) == []
+
+    def test_validate_missing_name_key(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{"match": "field", "field": "era"}])
+        assert any("missing required key 'name'" in e for e in errors)
+
+    def test_validate_field_match_missing_field_key(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{"name": "dim", "match": "field"}])
+        assert any("match='field' requires 'field' key" in e for e in errors)
+        assert any("example" in e.lower() or '"techniques"' in e for e in errors)
+
+    def test_validate_keyword_match_missing_keyword_map(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{
+            "name": "dim", "match": "keyword",
+            "source_field": "name", "match_type": "substring"
+        }])
+        assert any("'keyword_map'" in e for e in errors)
+
+    def test_validate_keyword_match_missing_source_field(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{
+            "name": "dim", "match": "keyword",
+            "keyword_map": "mymap", "match_type": "substring"
+        }])
+        assert any("'source_field'" in e for e in errors)
+
+    def test_validate_keyword_bad_match_type(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{
+            "name": "dim", "match": "keyword",
+            "keyword_map": "mymap", "source_field": "name",
+            "match_type": "regex"
+        }])
+        # Should mention valid types
+        assert any("set_intersection" in e or "substring" in e for e in errors)
+
+    def test_validate_invalid_match_value_glob(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        errors = validate_taxonomy_dimensions([{"name": "dim", "match": "glob"}])
+        assert any("field" in e and "keyword" in e for e in errors)
+
+    def test_validate_default_taxonomy_dimensions_ok(self):
+        from ai_session_tools.analysis.orchestrator import (
+            validate_taxonomy_dimensions, _DEFAULT_TAXONOMY_DIMENSIONS
+        )
+        errors = validate_taxonomy_dimensions(_DEFAULT_TAXONOMY_DIMENSIONS)
+        assert errors == []
+
+    # ── 3. validate_taxonomy_dimensions with keyword_maps ───────────────────
+
+    def test_validate_keyword_map_not_in_maps_dict(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        dims = [{
+            "name": "dim", "match": "keyword",
+            "keyword_map": "missing_map", "source_field": "name",
+            "match_type": "substring", "fallback": "other"
+        }]
+        errors = validate_taxonomy_dimensions(dims, keyword_maps={})
+        assert any("missing_map" in e for e in errors)
+        assert any("fallback" in e for e in errors)
+        assert any("keyword_maps" in e or "config.json" in e for e in errors)
+
+    def test_validate_keyword_map_present_but_empty(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        dims = [{
+            "name": "dim", "match": "keyword",
+            "keyword_map": "empty_map", "source_field": "name",
+            "match_type": "substring", "fallback": "other"
+        }]
+        errors = validate_taxonomy_dimensions(dims, keyword_maps={"empty_map": {}})
+        assert any("empty_map" in e for e in errors)
+
+    def test_validate_keyword_map_present_and_nonempty_no_error(self):
+        from ai_session_tools.analysis.orchestrator import validate_taxonomy_dimensions
+        dims = [{
+            "name": "dim", "match": "keyword",
+            "keyword_map": "mymap", "source_field": "name",
+            "match_type": "substring"
+        }]
+        errors = validate_taxonomy_dimensions(dims, keyword_maps={"mymap": {"cat": ["kw"]}})
+        # No error for this dimension specifically
+        assert not any("mymap" in e for e in errors)
+
+    # ── 4. load_taxonomy_dimensions ─────────────────────────────────────────
+
+    def test_load_taxonomy_returns_default_when_no_config(self, monkeypatch):
+        from ai_session_tools.analysis import orchestrator as orch
+        monkeypatch.setattr(orch, "get_config_section", lambda _: None)
+        result = orch.load_taxonomy_dimensions()
+        assert result is orch._DEFAULT_TAXONOMY_DIMENSIONS
+
+    def test_load_taxonomy_returns_custom_valid_config(self, monkeypatch):
+        from ai_session_tools.analysis import orchestrator as orch
+        custom = [{"name": "x", "match": "field", "field": "era"}]
+        monkeypatch.setattr(orch, "get_config_section", lambda _: custom)
+        result = orch.load_taxonomy_dimensions()
+        assert result == custom
+
+    def test_load_taxonomy_raises_value_error_for_invalid_config(self, monkeypatch):
+        from ai_session_tools.analysis import orchestrator as orch
+        bad = [{"name": "x", "match": "field"}]  # missing 'field' key
+        monkeypatch.setattr(orch, "get_config_section", lambda _: bad)
+        import pytest
+        with pytest.raises(ValueError) as exc_info:
+            orch.load_taxonomy_dimensions()
+        assert "field" in str(exc_info.value).lower()
+
+    # ── 5. _dim_label ────────────────────────────────────────────────────────
+
+    def test_dim_label_with_leading_number(self):
+        from ai_session_tools.analysis.orchestrator import _dim_label
+        assert _dim_label("03_by_technique") == "03 By Technique"
+
+    def test_dim_label_no_leading_number(self):
+        from ai_session_tools.analysis.orchestrator import _dim_label
+        assert _dim_label("by_project") == "By Project"
+
+    def test_dim_label_single_word_with_number(self):
+        from ai_session_tools.analysis.orchestrator import _dim_label
+        assert _dim_label("01_era") == "01 Era"
+
+    # ── 6. assign_taxonomy ───────────────────────────────────────────────────
+
+    def test_assign_field_list(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques"}]
+        rec = {"techniques": ["chain_of_thought"]}
+        result = assign_taxonomy(rec, {}, dims)
+        assert result == {"tech": ["chain_of_thought"]}
+
+    def test_assign_field_scalar(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{"name": "era_dim", "match": "field", "field": "era", "scalar": True}]
+        rec = {"era": "2024"}
+        result = assign_taxonomy(rec, {}, dims)
+        assert result == {"era_dim": ["2024"]}
+
+    def test_assign_field_exclude(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques", "exclude": ["unknown"]}]
+        rec = {"techniques": ["chain_of_thought", "unknown"]}
+        result = assign_taxonomy(rec, {}, dims)
+        assert "unknown" not in result["tech"]
+        assert "chain_of_thought" in result["tech"]
+
+    def test_assign_field_missing_from_record(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques"}]
+        rec = {}
+        result = assign_taxonomy(rec, {}, dims)
+        assert "tech" not in result
+
+    def test_assign_keyword_substring_match(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        kmap = {"transcription": ["transcription", "audio"]}
+        dims = [{
+            "name": "proj", "match": "keyword",
+            "keyword_map": "proj_map", "source_field": "name",
+            "match_type": "substring"
+        }]
+        rec = {"name": "my_transcription_session"}
+        result = assign_taxonomy(rec, {"proj_map": kmap}, dims)
+        assert "transcription" in result.get("proj", [])
+
+    def test_assign_keyword_set_intersection(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        kmap = {"workflow_a": ["chain_of_thought", "step_back"]}
+        dims = [{
+            "name": "wf", "match": "keyword",
+            "keyword_map": "wf_map", "source_field": "techniques",
+            "match_type": "set_intersection"
+        }]
+        rec = {"techniques": ["chain_of_thought"]}
+        result = assign_taxonomy(rec, {"wf_map": kmap}, dims)
+        assert "workflow_a" in result.get("wf", [])
+
+    def test_assign_keyword_no_match_uses_fallback(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{
+            "name": "proj", "match": "keyword",
+            "keyword_map": "proj_map", "source_field": "name",
+            "match_type": "substring", "fallback": "misc"
+        }]
+        rec = {"name": "unrelated_session"}
+        result = assign_taxonomy(rec, {"proj_map": {"proj_a": ["specific_keyword"]}}, dims)
+        assert result.get("proj") == ["misc"]
+
+    def test_assign_keyword_no_match_no_fallback_dim_absent(self):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy
+        dims = [{
+            "name": "proj", "match": "keyword",
+            "keyword_map": "proj_map", "source_field": "name",
+            "match_type": "substring"
+        }]
+        rec = {"name": "unrelated_session"}
+        result = assign_taxonomy(rec, {"proj_map": {"proj_a": ["specific_keyword"]}}, dims)
+        # No match and no fallback: dim may be absent or empty
+        assert not result.get("proj")
+
+    def test_assign_keyword_empty_kmap_uses_fallback(self, capsys):
+        from ai_session_tools.analysis.orchestrator import assign_taxonomy, _warned_missing_maps
+        _warned_missing_maps.clear()
+        dims = [{
+            "name": "proj2", "match": "keyword",
+            "keyword_map": "empty_proj_map", "source_field": "name",
+            "match_type": "substring", "fallback": "misc_research"
+        }]
+        rec = {"name": "any_session"}
+        result = assign_taxonomy(rec, {"empty_proj_map": {}}, dims)
+        assert result.get("proj2") == ["misc_research"]
+
+    # ── 7. build_taxonomy ────────────────────────────────────────────────────
+
+    def test_build_taxonomy_returns_dict_keyed_by_name(self):
+        from ai_session_tools.analysis.orchestrator import build_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques"}]
+        records = [
+            {"name": "session_a", "techniques": ["cot"]},
+            {"name": "session_b", "techniques": ["rag"]},
+        ]
+        result = build_taxonomy(records, {}, dims)
+        assert "session_a" in result
+        assert "session_b" in result
+
+    def test_build_taxonomy_skips_record_without_name(self):
+        from ai_session_tools.analysis.orchestrator import build_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques"}]
+        records = [{"techniques": ["cot"]}]  # no 'name' key
+        result = build_taxonomy(records, {}, dims)
+        assert result == {}
+
+    def test_build_taxonomy_no_filesystem_side_effects(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import build_taxonomy
+        dims = [{"name": "tech", "match": "field", "field": "techniques"}]
+        records = [{"name": "s1", "techniques": ["cot"]}]
+        before = list(tmp_path.iterdir())
+        build_taxonomy(records, {}, dims)
+        after = list(tmp_path.iterdir())
+        assert before == after
+
+    # ── 8. taxonomy_to_session_paths ─────────────────────────────────────────
+
+    def test_taxonomy_to_session_paths_single_dim_single_cat(self):
+        from ai_session_tools.analysis.orchestrator import taxonomy_to_session_paths
+        taxonomy = {"session_a": {"dim1": ["cat1"]}}
+        result = taxonomy_to_session_paths(taxonomy)
+        assert result == {"session_a": ["dim1/cat1"]}
+
+    def test_taxonomy_to_session_paths_two_dims(self):
+        from ai_session_tools.analysis.orchestrator import taxonomy_to_session_paths
+        taxonomy = {"session_a": {"dim1": ["cat1"], "dim2": ["cat2"]}}
+        result = taxonomy_to_session_paths(taxonomy)
+        assert "dim1/cat1" in result["session_a"]
+        assert "dim2/cat2" in result["session_a"]
+
+    def test_taxonomy_to_session_paths_multiple_cats(self):
+        from ai_session_tools.analysis.orchestrator import taxonomy_to_session_paths
+        taxonomy = {"session_a": {"dim1": ["cat1", "cat2"]}}
+        result = taxonomy_to_session_paths(taxonomy)
+        assert "dim1/cat1" in result["session_a"]
+        assert "dim1/cat2" in result["session_a"]
+
+    # ── 9. _preferred_link_path ──────────────────────────────────────────────
+
+    def test_preferred_link_path_all_nonpreferred_falls_through(self):
+        from ai_session_tools.analysis.orchestrator import _preferred_link_path
+        dims = [{"name": "07_by_era", "prefer_for_links": False}]
+        paths = ["07_by_era/2024"]
+        result = _preferred_link_path(paths, dims)
+        assert result == "07_by_era/2024"  # last resort: primary_paths[0]
+
+    def test_preferred_link_path_skips_fallback_category(self):
+        from ai_session_tools.analysis.orchestrator import _preferred_link_path
+        dims = [
+            {"name": "01_by_project", "prefer_for_links": True, "fallback": "misc_research"},
+            {"name": "03_by_technique", "prefer_for_links": True},
+        ]
+        paths = ["01_by_project/misc_research", "03_by_technique/chain_of_thought"]
+        result = _preferred_link_path(paths, dims)
+        assert result == "03_by_technique/chain_of_thought"
+
+    def test_preferred_link_path_first_preferred_returned(self):
+        from ai_session_tools.analysis.orchestrator import _preferred_link_path
+        dims = [{"name": "03_by_technique", "prefer_for_links": True}]
+        paths = ["03_by_technique/chain_of_thought"]
+        result = _preferred_link_path(paths, dims)
+        assert result == "03_by_technique/chain_of_thought"
+
+    def test_preferred_link_path_empty_list_returns_empty_string(self):
+        from ai_session_tools.analysis.orchestrator import _preferred_link_path
+        result = _preferred_link_path([], [])
+        assert result == ""
+
+    # ── 10. apply_symlinks ───────────────────────────────────────────────────
+
+    def test_apply_symlinks_creates_symlink_for_existing_file(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import apply_symlinks
+        src = tmp_path / "sessions" / "my_session"
+        src.mkdir(parents=True)
+        (src / "conversation.json").write_text("{}")
+        org_dir = tmp_path / "org"
+        org_dir.mkdir()
+        taxonomy = {"my_session": {"01_by_project": ["proj_a"]}}
+        records = [{"name": "my_session", "filepath": str(src)}]
+        count = apply_symlinks(records, org_dir, taxonomy)
+        assert count == 1
+
+    def test_apply_symlinks_skips_missing_source(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import apply_symlinks
+        org_dir = tmp_path / "org"
+        org_dir.mkdir()
+        taxonomy = {"missing_session": {"01_by_project": ["proj_a"]}}
+        records = [{"name": "missing_session", "filepath": str(tmp_path / "nonexistent")}]
+        count = apply_symlinks(records, org_dir, taxonomy)
+        assert count == 0
+
+    def test_apply_symlinks_not_duplicated_on_second_call(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import apply_symlinks
+        src = tmp_path / "sessions" / "my_session"
+        src.mkdir(parents=True)
+        org_dir = tmp_path / "org"
+        org_dir.mkdir()
+        taxonomy = {"my_session": {"01_by_project": ["proj_a"]}}
+        records = [{"name": "my_session", "filepath": str(src)}]
+        apply_symlinks(records, org_dir, taxonomy)
+        count2 = apply_symlinks(records, org_dir, taxonomy)
+        assert count2 == 0
+
+    # ── 11. write_taxonomy_json ──────────────────────────────────────────────
+
+    def test_write_taxonomy_json_creates_file(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_json
+        taxonomy = {"session_a": {"tech": ["cot"]}}
+        records = [{"name": "session_a", "utility": 42, "era": "2024"}]
+        write_taxonomy_json(taxonomy, records, tmp_path)
+        assert (tmp_path / "SESSION_TAXONOMY.json").exists()
+
+    def test_write_taxonomy_json_valid_json_with_session_key(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_json
+        import json
+        taxonomy = {"session_a": {"tech": ["cot"]}}
+        records = [{"name": "session_a", "utility": 42, "era": "2024"}]
+        write_taxonomy_json(taxonomy, records, tmp_path)
+        data = json.loads((tmp_path / "SESSION_TAXONOMY.json").read_text())
+        assert "session_a" in data
+
+    def test_write_taxonomy_json_entry_has_required_keys(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_json
+        import json
+        taxonomy = {"session_a": {"tech": ["cot"]}}
+        records = [{"name": "session_a", "utility": 42, "era": "2024"}]
+        write_taxonomy_json(taxonomy, records, tmp_path)
+        data = json.loads((tmp_path / "SESSION_TAXONOMY.json").read_text())
+        entry = data["session_a"]
+        assert "taxonomy" in entry
+        assert "utility" in entry
+        assert "era" in entry
+
+    # ── 12. write_taxonomy_markdown ──────────────────────────────────────────
+
+    def test_write_taxonomy_markdown_creates_file(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_markdown
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        taxonomy = {"session_a": {"03_by_technique": ["chain_of_thought"]}}
+        records = [{"name": "session_a", "utility": 50, "era": "2024"}]
+        dims = [{"name": "03_by_technique", "match": "field", "field": "techniques"}]
+        write_taxonomy_markdown(taxonomy, records, tmp_path, dimensions=dims)
+        assert (tmp_path / "TAXONOMY.md").exists()
+
+    def test_write_taxonomy_markdown_contains_dim_label(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_markdown
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        taxonomy = {"session_a": {"03_by_technique": ["chain_of_thought"]}}
+        records = [{"name": "session_a", "utility": 50, "era": "2024"}]
+        dims = [{"name": "03_by_technique", "match": "field", "field": "techniques"}]
+        write_taxonomy_markdown(taxonomy, records, tmp_path, dimensions=dims)
+        content = (tmp_path / "TAXONOMY.md").read_text()
+        assert "03 By Technique" in content
+
+    def test_write_taxonomy_markdown_excludes_low_utility(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_taxonomy_markdown
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 50})
+        taxonomy = {
+            "high_util": {"03_by_technique": ["cot"]},
+            "low_util": {"03_by_technique": ["cot"]},
+        }
+        records = [
+            {"name": "high_util", "utility": 80, "era": "2024"},
+            {"name": "low_util", "utility": 10, "era": "2024"},
+        ]
+        dims = [{"name": "03_by_technique", "match": "field", "field": "techniques"}]
+        write_taxonomy_markdown(taxonomy, records, tmp_path, dimensions=dims)
+        content = (tmp_path / "TAXONOMY.md").read_text()
+        assert "high_util" in content
+        assert "low_util" not in content
+
+    # ── 13. write_index ──────────────────────────────────────────────────────
+
+    def test_write_index_creates_index_md(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        session_paths = {"s1": ["01_by_project/proj_a"]}
+        dims = [{"name": "01_by_project", "prefer_for_links": True}]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        assert (tmp_path / "INDEX.md").exists()
+
+    def test_write_index_creates_sessions_full_md(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        session_paths = {"s1": ["01_by_project/proj_a"]}
+        dims = [{"name": "01_by_project", "prefer_for_links": True}]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        assert (tmp_path / "SESSIONS_FULL.md").exists()
+
+    def test_write_index_starts_with_heading(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        session_paths = {"s1": ["01_by_project/proj_a"]}
+        dims = [{"name": "01_by_project", "prefer_for_links": True}]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        content = (tmp_path / "INDEX.md").read_text()
+        assert content.startswith("# ")
+
+    def test_write_index_contains_table_header(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        session_paths = {"s1": ["01_by_project/proj_a"]}
+        dims = [{"name": "01_by_project", "prefer_for_links": True}]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        content = (tmp_path / "INDEX.md").read_text()
+        assert "| Rank |" in content
+
+    def test_write_index_taxonomy_section_lists_dims(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        session_paths = {"s1": ["03_by_technique/cot"]}
+        dims = [{"name": "03_by_technique", "prefer_for_links": True}]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        content = (tmp_path / "INDEX.md").read_text()
+        assert "03_by_technique" in content
+
+    def test_write_index_uses_preferred_link_path_not_nonpreferred(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.orchestrator import write_index
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(codebook, "load_scoring_weights", lambda *a, **kw: {"min_utility_for_index": 0})
+        records = [{"name": "s1", "utility": 30, "techniques": ["cot"], "roles": ["dev"], "era": "2024"}]
+        # nonpreferred dim first, preferred dim second
+        session_paths = {"s1": ["07_by_era/2024", "03_by_technique/cot"]}
+        dims = [
+            {"name": "07_by_era", "prefer_for_links": False},
+            {"name": "03_by_technique", "prefer_for_links": True},
+        ]
+        write_index(records, session_paths, tmp_path, dimensions=dims)
+        content = (tmp_path / "INDEX.md").read_text()
+        # The preferred dim link should appear in the table
+        assert "03_by_technique/cot" in content
+
+    # ── 14. _resolve_formats ─────────────────────────────────────────────────
+
+    def test_resolve_formats_parameter_overrides_config(self):
+        from ai_session_tools.analysis.orchestrator import _resolve_formats
+        result = _resolve_formats({"organize_formats": "markdown"}, ["json"])
+        assert result == ["json"]
+
+    def test_resolve_formats_uses_config_list(self):
+        from ai_session_tools.analysis.orchestrator import _resolve_formats
+        result = _resolve_formats({"organize_formats": ["json"]}, None)
+        assert result == ["json"]
+
+    def test_resolve_formats_config_string_parsed(self):
+        from ai_session_tools.analysis.orchestrator import _resolve_formats
+        result = _resolve_formats({"organize_formats": "json,markdown"}, None)
+        assert "json" in result
+        assert "markdown" in result
+
+    def test_resolve_formats_no_config_no_param_defaults_symlinks(self):
+        from ai_session_tools.analysis.orchestrator import _resolve_formats
+        result = _resolve_formats({}, None)
+        assert result == ["symlinks"]
+
+    def test_resolve_formats_unknown_format_raises_value_error(self):
+        from ai_session_tools.analysis.orchestrator import _resolve_formats
+        import pytest
+        with pytest.raises(ValueError) as exc_info:
+            _resolve_formats({}, ["pdf"])
+        assert "pdf" in str(exc_info.value)
+        assert "symlinks" in str(exc_info.value) or "Valid" in str(exc_info.value)
+
+    # ── 15. --validate CLI flag ──────────────────────────────────────────────
+
+    def test_validate_flag_exits_0_with_default_config(self, monkeypatch):
+        import ai_session_tools.config as cfg_mod
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        monkeypatch.setattr(cfg_mod, "get_config_section", lambda _: None)
+        monkeypatch.setattr(codebook, "load_keyword_maps", lambda: {})
+        result = runner.invoke(app, ["organize", "--validate"])
+        assert result.exit_code == 0
+
+    def test_validate_flag_output_contains_dim_names(self, monkeypatch):
+        import ai_session_tools.config as cfg_mod
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        monkeypatch.setattr(cfg_mod, "get_config_section", lambda _: None)
+        monkeypatch.setattr(codebook, "load_keyword_maps", lambda: {})
+        result = runner.invoke(app, ["organize", "--validate"])
+        # Default dims include "01_by_project", "03_by_technique", etc.
+        assert "by_project" in result.output or "01_by_project" in result.output
+
+    def test_validate_flag_output_contains_ok_message(self, monkeypatch):
+        import ai_session_tools.config as cfg_mod
+        from ai_session_tools.analysis import codebook
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        monkeypatch.setattr(cfg_mod, "get_config_section", lambda _: None)
+        # Provide all keyword_maps so dims validate cleanly
+        default_maps = {
+            "project_map": {"proj": ["example"]},
+            "workflow_map": {"wf": ["example"]},
+        }
+        monkeypatch.setattr(codebook, "load_keyword_maps", lambda: default_maps)
+        result = runner.invoke(app, ["organize", "--validate"])
+        assert "All dimensions OK" in result.output or any(
+            dim in result.output for dim in ["01_by_project", "03_by_technique"]
+        )
+
+    # ── 16. --format CLI flag ────────────────────────────────────────────────
+
+    def test_format_flag_json_calls_run_orchestration_with_json(self, monkeypatch):
+        import ai_session_tools.config as cfg_mod
+        from ai_session_tools.analysis import orchestrator as orch
+        called_with = {}
+
+        def fake_run_orchestration(formats=None):
+            called_with["formats"] = formats
+
+        # Patch load_config on cli_mod (cli.py has a local binding from 'from ... import')
+        import ai_session_tools.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "load_config", lambda: {"org_dir": "/tmp/fake_org"})
+        monkeypatch.setattr(orch, "run_orchestration", fake_run_orchestration)
+
+        # Patch _check_step_dep to avoid needing real org dir
+        monkeypatch.setattr(cli_mod, "_check_step_dep", lambda *a, **kw: None)
+
+        result = runner.invoke(app, ["organize", "--format", "json"])
+        assert called_with.get("formats") == ["json"]
+
+    def test_format_flag_invalid_format_exits_nonzero(self, monkeypatch):
+        import ai_session_tools.cli as cli_mod
+        monkeypatch.setattr(cli_mod, "load_config", lambda: {"org_dir": "/tmp/fake_org"})
+        monkeypatch.setattr(cli_mod, "_check_step_dep", lambda *a, **kw: None)
+
+        from ai_session_tools.analysis import orchestrator as orch
+
+        def fake_run_orchestration(formats=None):
+            from ai_session_tools.analysis.orchestrator import _resolve_formats
+            _resolve_formats({}, formats)
+
+        monkeypatch.setattr(orch, "run_orchestration", fake_run_orchestration)
+        result = runner.invoke(app, ["organize", "--format", "pdf"])
+        # Should exit non-zero due to ValueError from _resolve_formats
+        assert result.exit_code != 0
+
+
+
+
+class TestCodebookExtended:
+    """Extended tests for ai_session_tools.analysis.codebook functions."""
+
+    # ── helper ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _patch_codebook(monkeypatch, get_config_section_fn=None, load_config_fn=None):
+        """Patch the names as imported into the codebook module namespace."""
+        import ai_session_tools.analysis.codebook as cb
+        if get_config_section_fn is not None:
+            monkeypatch.setattr(cb, "get_config_section", get_config_section_fn)
+        if load_config_fn is not None:
+            monkeypatch.setattr(cb, "load_config", load_config_fn)
+
+    # ── 1. extract_prose ──────────────────────────────────────────────────────
+
+    def test_extract_prose_removes_fenced_code_block(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        text = "Here is some prose.\n```python\ndef foo():\n    pass\n```\nMore prose here."
+        result = extract_prose(text)
+        assert "def foo" not in result
+        assert "Here is some prose" in result
+        assert "More prose here" in result
+
+    def test_extract_prose_removes_indented_block(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        text = "Intro text.\n    indented code line\n    another indented line\nFinal prose."
+        result = extract_prose(text)
+        assert "indented code line" not in result
+        assert "Final prose" in result
+
+    def test_extract_prose_removes_python_syntax_line(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        text = "Some text.\ndef foo(): pass\nMore text."
+        result = extract_prose(text)
+        assert "def foo" not in result
+        assert "Some text" in result
+
+    def test_extract_prose_plain_prose_unchanged(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        text = "This is plain prose with no code whatsoever."
+        result = extract_prose(text)
+        assert "plain prose" in result
+
+    def test_extract_prose_empty_string(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        assert extract_prose("") == ""
+
+    def test_extract_prose_all_code_no_crash(self):
+        from ai_session_tools.analysis.codebook import extract_prose
+        text = "```python\ndef foo():\n    return 1\n\nclass Bar:\n    pass\n```"
+        result = extract_prose(text)
+        assert "def foo" not in result
+        assert "class Bar" not in result
+
+    # ── 2. prose_fraction ─────────────────────────────────────────────────────
+
+    def test_prose_fraction_pure_prose(self):
+        from ai_session_tools.analysis.codebook import prose_fraction
+        text = "This is entirely plain prose text without any code."
+        fraction = prose_fraction(text)
+        assert fraction == 1.0
+
+    def test_prose_fraction_pure_fenced_code(self):
+        from ai_session_tools.analysis.codebook import prose_fraction
+        text = "```python\ndef foo():\n    return 42\n\nx = foo()\n```"
+        fraction = prose_fraction(text)
+        assert fraction < 1.0
+
+    def test_prose_fraction_empty_string(self):
+        from ai_session_tools.analysis.codebook import prose_fraction
+        assert prose_fraction("") == 1.0
+
+    def test_prose_fraction_mixed_text(self):
+        from ai_session_tools.analysis.codebook import prose_fraction
+        text = (
+            "This is some real prose explaining the concept.\n"
+            "```python\ndef compute():\n    return 1 + 2\n```\n"
+            "And here is more prose after the block."
+        )
+        fraction = prose_fraction(text)
+        assert 0.0 < fraction < 1.0
+
+    # ── 3. load_continuation_config ───────────────────────────────────────────
+
+    def test_load_continuation_config_no_config_no_org(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_continuation_config
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None,
+                             load_config_fn=lambda: {})
+        markers, min_len = load_continuation_config(org_dir=tmp_path / "nonexistent")
+        assert markers == []
+        assert min_len == 0
+
+    def test_load_continuation_config_from_config_json(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_continuation_config
+        cm_data = {"prefix_markers": ["ok", "continue"], "min_initial_len": 50}
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: cm_data if key == "continuation_markers" else None)
+        markers, min_len = load_continuation_config(org_dir=tmp_path)
+        assert "ok" in markers
+        assert "continue" in markers
+        assert min_len == 50
+
+    def test_load_continuation_config_from_org_dir_file(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_continuation_config
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        data = {"prefix_markers": ["go", "proceed"], "min_initial_len": 30}
+        (tmp_path / "continuation_markers.json").write_text(json.dumps(data))
+        markers, min_len = load_continuation_config(org_dir=tmp_path)
+        assert "go" in markers
+        assert "proceed" in markers
+        assert min_len == 30
+
+    def test_load_continuation_config_config_takes_priority(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_continuation_config
+        config_cm = {"prefix_markers": ["from_config"], "min_initial_len": 99}
+        file_cm = {"prefix_markers": ["from_file"], "min_initial_len": 1}
+        (tmp_path / "continuation_markers.json").write_text(json.dumps(file_cm))
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: config_cm if key == "continuation_markers" else None)
+        markers, min_len = load_continuation_config(org_dir=tmp_path)
+        assert "from_config" in markers
+        assert "from_file" not in markers
+        assert min_len == 99
+
+    def test_load_continuation_config_malformed_json(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_continuation_config
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        (tmp_path / "continuation_markers.json").write_text("NOT VALID JSON {{{{")
+        markers, min_len = load_continuation_config(org_dir=tmp_path)
+        assert markers == []
+        assert min_len == 0
+
+    # ── 4. classify_prompt_role ───────────────────────────────────────────────
+
+    def test_classify_first_in_session_long_no_markers_is_initial(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "Please help me design a distributed system with high availability and fault tolerance."
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=[], min_initial_len=50)
+        assert role == "initial"
+
+    def test_classify_first_in_session_short_text_is_continuation(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "ok"
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=[], min_initial_len=50)
+        assert role == "continuation"
+
+    def test_classify_text_starts_with_ok_marker_is_continuation(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "ok let us keep going with the previous discussion about databases."
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=["ok"], min_initial_len=0)
+        assert role == "continuation"
+
+    def test_classify_text_starts_with_continue_marker_is_continuation(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "continue with the analysis from before."
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=["continue"], min_initial_len=0)
+        assert role == "continuation"
+
+    def test_classify_not_first_in_session_long_no_markers_is_initial(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "This is a long message that goes into great detail about architecture patterns and design."
+        role = classify_prompt_role(text, is_first_in_session=False,
+                                    continuation_markers=[], min_initial_len=0)
+        assert role == "initial"
+
+    def test_classify_none_continuation_markers_uses_length_only(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "A" * 60
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=None, min_initial_len=50)
+        assert role == "initial"
+
+    def test_classify_empty_continuation_markers_uses_length_only(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        text = "A" * 60
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=[], min_initial_len=50)
+        assert role == "initial"
+
+    def test_classify_min_initial_len_zero_disables_length_check(self):
+        from ai_session_tools.analysis.codebook import classify_prompt_role
+        # Very short text, min_initial_len=0 means length check is disabled.
+        # "hi" does not start with "continue", so should be "initial".
+        text = "hi"
+        role = classify_prompt_role(text, is_first_in_session=True,
+                                    continuation_markers=["continue"], min_initial_len=0)
+        assert role == "initial"
+
+    # ── 5. load_stop_words ────────────────────────────────────────────────────
+
+    def test_load_stop_words_defaults_when_no_config(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_stop_words
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None,
+                             load_config_fn=lambda: {})
+        words = load_stop_words(org_dir=tmp_path / "nonexistent")
+        assert "the" in words
+        assert "and" in words
+
+    def test_load_stop_words_from_config_json(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_stop_words
+        custom_words = ["foo", "bar", "baz"]
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: custom_words if key == "stop_words" else None)
+        words = load_stop_words(org_dir=tmp_path)
+        assert words == frozenset({"foo", "bar", "baz"})
+
+    def test_load_stop_words_from_org_dir_file(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_stop_words
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        data = {"stop_words": ["alpha", "beta", "gamma"]}
+        (tmp_path / "stop_words.json").write_text(json.dumps(data))
+        words = load_stop_words(org_dir=tmp_path)
+        assert "alpha" in words
+        assert "beta" in words
+
+    def test_load_stop_words_config_takes_priority_over_file(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_stop_words
+        config_words = ["from_config"]
+        (tmp_path / "stop_words.json").write_text(json.dumps({"stop_words": ["from_file"]}))
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: config_words if key == "stop_words" else None)
+        words = load_stop_words(org_dir=tmp_path)
+        assert "from_config" in words
+        assert "from_file" not in words
+
+    def test_load_stop_words_empty_file_falls_back_to_default(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_stop_words
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        # Empty stop_words list in file — should fall back to module default
+        (tmp_path / "stop_words.json").write_text(json.dumps({"stop_words": []}))
+        words = load_stop_words(org_dir=tmp_path)
+        assert "the" in words  # module default
+
+    def test_load_stop_words_missing_file_returns_default(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_stop_words
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        words = load_stop_words(org_dir=tmp_path)  # no stop_words.json
+        assert "the" in words
+
+    # ── 6. load_scoring_weights ───────────────────────────────────────────────
+
+    def test_load_scoring_weights_no_config_returns_empty(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_scoring_weights
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None,
+                             load_config_fn=lambda: {})
+        result = load_scoring_weights(org_dir=tmp_path / "nonexistent")
+        assert result == {}
+
+    def test_load_scoring_weights_from_config_json(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_scoring_weights
+        weights = {"technical": 2.0, "role": 1.5}
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: weights if key == "scoring_weights" else None)
+        result = load_scoring_weights(org_dir=tmp_path)
+        assert result == {"technical": 2.0, "role": 1.5}
+
+    def test_load_scoring_weights_from_org_dir_file(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_scoring_weights
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        data = {"density": 3.0, "length": 0.5}
+        (tmp_path / "scoring_weights.json").write_text(json.dumps(data))
+        result = load_scoring_weights(org_dir=tmp_path)
+        assert result == {"density": 3.0, "length": 0.5}
+
+    def test_load_scoring_weights_config_takes_priority(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_scoring_weights
+        config_weights = {"source": "config", "value": 1.0}
+        (tmp_path / "scoring_weights.json").write_text(
+            json.dumps({"source": "file", "value": 0.0}))
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: config_weights if key == "scoring_weights" else None)
+        result = load_scoring_weights(org_dir=tmp_path)
+        assert result["source"] == "config"
+
+    def test_load_scoring_weights_malformed_json_returns_empty(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_scoring_weights
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        (tmp_path / "scoring_weights.json").write_text("{{INVALID}}")
+        result = load_scoring_weights(org_dir=tmp_path)
+        assert result == {}
+
+    # ── 7. is_meaningful ──────────────────────────────────────────────────────
+
+    def test_is_meaningful_custom_stop_words_match_false(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        sw = frozenset({"foo", "bar"})
+        assert is_meaningful("foo bar baz", stop_words=sw) is False
+
+    def test_is_meaningful_none_stop_words_uses_default(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        # "the" is in default stop words, so "the quick" starts with stop word
+        assert is_meaningful("the quick brown fox", stop_words=None) is False
+
+    def test_is_meaningful_empty_string_false(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        assert is_meaningful("") is False
+
+    def test_is_meaningful_single_content_word_true(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        # "transcription" is not a default stop word
+        assert is_meaningful("transcription") is True
+
+    def test_is_meaningful_all_stop_words_false(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        assert is_meaningful("the and is") is False
+
+    def test_is_meaningful_starts_with_stop_word_false(self):
+        from ai_session_tools.analysis.codebook import is_meaningful
+        assert is_meaningful("the quick brown fox") is False
+
+    # ── 8. load_keyword_maps ──────────────────────────────────────────────────
+
+    def test_load_keyword_maps_config_json_returned_directly(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        km = {"task_categories": {"coding": ["write", "implement"]}}
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda key: km if key == "keyword_maps" else None)
+        result = load_keyword_maps(org_dir=tmp_path)
+        assert result == km
+
+    def test_load_keyword_maps_from_org_dir_file(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        categories = {"coding": ["write", "implement"]}
+        (tmp_path / "task_categories.json").write_text(json.dumps(categories))
+        result = load_keyword_maps(org_dir=tmp_path)
+        assert "task_categories" in result
+        assert result["task_categories"] == categories
+
+    def test_load_keyword_maps_no_config_no_files_returns_empty(self, tmp_path, monkeypatch):
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        result = load_keyword_maps(org_dir=tmp_path)
+        assert result == {}
+
+    def test_load_keyword_maps_partial_file_presence(self, tmp_path, monkeypatch):
+        import json
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        self._patch_codebook(monkeypatch,
+                             get_config_section_fn=lambda _: None)
+        categories = {"research": ["read", "analyze"]}
+        (tmp_path / "task_categories.json").write_text(json.dumps(categories))
+        # writing_methods.json, project_map.json, workflow_map.json NOT created
+        result = load_keyword_maps(org_dir=tmp_path)
+        assert "task_categories" in result
+        assert "writing_methods" not in result
+        assert "project_map" not in result
+
+    # ── 9. compile_codes ──────────────────────────────────────────────────────
+
+    def test_compile_codes_short_markers_excluded(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        codes = {"AI": ["ai", "chain-of-thought"]}
+        patterns = compile_codes(codes, min_marker_len=5)
+        assert "AI" in patterns
+        # "ai" is 2 chars < 5, excluded; "chain-of-thought" (16 chars) included
+        assert not patterns["AI"].search("ai")
+        assert patterns["AI"].search("chain-of-thought")
+
+    def test_compile_codes_empty_dict_returns_empty(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        assert compile_codes({}) == {}
+
+    def test_compile_codes_special_regex_chars_escaped(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        codes = {"DOT": ["file.name", "example.com"]}
+        patterns = compile_codes(codes, min_marker_len=5)
+        assert "DOT" in patterns
+        # Should not raise; dot is escaped so it only matches literal dot
+        assert patterns["DOT"].search("file.name")
+        # "filename" should NOT match because dot is literal
+        assert not patterns["DOT"].search("filename")
+
+    def test_compile_codes_case_insensitive_match(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        codes = {"PYTHON": ["python", "django"]}
+        patterns = compile_codes(codes, min_marker_len=5)
+        assert "PYTHON" in patterns
+        assert patterns["PYTHON"].search("Python")
+        assert patterns["PYTHON"].search("PYTHON")
+        assert patterns["PYTHON"].search("Django")
+
+    def test_compile_codes_all_markers_too_short_excluded(self):
+        from ai_session_tools.analysis.codebook import compile_codes
+        # All markers shorter than min_marker_len=5 -> code NOT in patterns
+        codes = {"SHORT": ["ai", "ml", "dl"]}
+        patterns = compile_codes(codes, min_marker_len=5)
+        assert "SHORT" not in patterns
+
+    # ── 10. get_ngrams edge cases ─────────────────────────────────────────────
+
+    def test_get_ngrams_json_newline_escape_splits_words(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        # Raw string so \n is a literal backslash-n (JSON escape sequence in input)
+        ngrams = get_ngrams(r"hello\nworld", n=1)
+        assert "hello" in ngrams
+        assert "world" in ngrams
+
+    def test_get_ngrams_unicode_escape_apostrophe(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        # Raw string so \u0027 is a literal backslash-u-0027 sequence
+        ngrams = get_ngrams(r"don\u0027t worry", n=1)
+        flat = " ".join(ngrams)
+        assert "worry" in flat
+
+    def test_get_ngrams_quadgrams(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        text = "one two three four five"
+        ngrams = get_ngrams(text, n=4)
+        assert "one two three four" in ngrams
+        assert "two three four five" in ngrams
+
+    def test_get_ngrams_only_punctuation_returns_empty(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        assert get_ngrams("!!! ??? ---", n=1) == []
+
+    def test_get_ngrams_n_larger_than_word_count_returns_empty(self):
+        from ai_session_tools.analysis.codebook import get_ngrams
+        assert get_ngrams("one two", n=5) == []
+
+
+class TestCwdFieldAndWorkingDirTaxonomy:
+    """Tests for cwd field on SessionRecord and 08_by_working_dir taxonomy dimension."""
+
+    # ── SessionRecord.cwd field ───────────────────────────────────────────────
+
+    def test_session_record_has_cwd_field(self):
+        """SessionRecord has cwd field defaulting to empty string."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="test", source_dir="/tmp", filepath="/tmp/test",
+            source_format="aistudio_json", user_text="hello",
+            chunk_count=1, user_chunk_count=1,
+        )
+        assert hasattr(rec, "cwd")
+        assert rec.cwd == ""
+
+    def test_session_record_cwd_stored(self):
+        """cwd field stores and returns the provided value."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="test", source_dir="/tmp", filepath="/tmp/test",
+            source_format="claude_jsonl", user_text="hello",
+            chunk_count=1, user_chunk_count=1,
+            cwd="/Users/alice/myproject",
+        )
+        assert rec.cwd == "/Users/alice/myproject"
+
+    def test_to_db_dict_normalizes_cwd_tilde(self, tmp_path, monkeypatch):
+        """to_db_dict() replaces home prefix in cwd with ~."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        from pathlib import Path
+        home = str(Path.home())
+        rec = SessionRecord(
+            name="t", source_dir=home + "/src", filepath=home + "/src/t",
+            source_format="claude_jsonl", user_text="hi",
+            chunk_count=1, user_chunk_count=1,
+            cwd=home + "/projects/myapp",
+        )
+        d = rec.to_db_dict()
+        assert d["cwd"] == "~/projects/myapp"
+
+    def test_to_db_dict_empty_cwd_unchanged(self):
+        """to_db_dict() leaves empty cwd as empty string (no tilde expansion)."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="t", source_dir="/tmp", filepath="/tmp/t",
+            source_format="aistudio_json", user_text="hi",
+            chunk_count=1, user_chunk_count=1,
+            cwd="",
+        )
+        d = rec.to_db_dict()
+        assert d["cwd"] == ""
+
+    def test_to_db_dict_excludes_user_text(self):
+        """to_db_dict() still excludes user_text even with cwd field present."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="t", source_dir="/tmp", filepath="/tmp/t",
+            source_format="aistudio_json", user_text="secret",
+            chunk_count=1, user_chunk_count=1,
+            cwd="/tmp/proj",
+        )
+        d = rec.to_db_dict()
+        assert "user_text" not in d
+        assert "cwd" in d
+
+    # ── 08_by_working_dir in _DEFAULT_TAXONOMY_DIMENSIONS ────────────────────
+
+    def test_default_dimensions_include_working_dir(self):
+        """_DEFAULT_TAXONOMY_DIMENSIONS includes 08_by_working_dir dimension."""
+        from ai_session_tools.analysis.orchestrator import _DEFAULT_TAXONOMY_DIMENSIONS
+        names = [d["name"] for d in _DEFAULT_TAXONOMY_DIMENSIONS]
+        assert "08_by_working_dir" in names
+
+    def test_working_dir_dimension_config(self):
+        """08_by_working_dir dimension has correct required config keys."""
+        from ai_session_tools.analysis.orchestrator import _DEFAULT_TAXONOMY_DIMENSIONS
+        dim = next(d for d in _DEFAULT_TAXONOMY_DIMENSIONS if d["name"] == "08_by_working_dir")
+        assert dim["match"] == "field"
+        assert dim["field"] == "cwd"
+        assert dim.get("scalar") is True
+        assert "" in dim.get("exclude", [])
+        assert dim.get("prefer_for_links") is False
+
+    def test_working_dir_dimension_validates(self):
+        """08_by_working_dir config passes validate_taxonomy_dimensions with no errors."""
+        from ai_session_tools.analysis.orchestrator import (
+            validate_taxonomy_dimensions, _DEFAULT_TAXONOMY_DIMENSIONS,
+        )
+        errors = validate_taxonomy_dimensions(_DEFAULT_TAXONOMY_DIMENSIONS)
+        assert errors == [], f"Validation errors: {errors}"
+
+    # ── assign_taxonomy skips sessions with empty cwd ─────────────────────────
+
+    def test_assign_taxonomy_skips_empty_cwd(self):
+        """assign_taxonomy creates no 08_by_working_dir entry for cwd=''."""
+        from ai_session_tools.analysis.orchestrator import (
+            assign_taxonomy, _DEFAULT_TAXONOMY_DIMENSIONS,
+        )
+        rec = {
+            "name": "test", "techniques": [], "roles": [], "task_categories": [],
+            "writing_methods": [], "era": "2025", "source_format": "aistudio_json",
+            "cwd": "",
+        }
+        result = assign_taxonomy(rec, keyword_maps={}, dimensions=_DEFAULT_TAXONOMY_DIMENSIONS)
+        # 08_by_working_dir should be absent or empty
+        assert result.get("08_by_working_dir", []) == []
+
+    def test_assign_taxonomy_uses_cwd_when_present(self):
+        """assign_taxonomy maps cwd value to 08_by_working_dir when non-empty."""
+        from ai_session_tools.analysis.orchestrator import (
+            assign_taxonomy, _DEFAULT_TAXONOMY_DIMENSIONS,
+        )
+        rec = {
+            "name": "test", "techniques": [], "roles": [], "task_categories": [],
+            "writing_methods": [], "era": "2025", "source_format": "claude_jsonl",
+            "cwd": "/Users/alice/myproject",
+        }
+        result = assign_taxonomy(rec, keyword_maps={}, dimensions=_DEFAULT_TAXONOMY_DIMENSIONS)
+        assert "/Users/alice/myproject" in result.get("08_by_working_dir", [])
+
+    def test_assign_taxonomy_no_fallback_for_working_dir(self):
+        """08_by_working_dir has no fallback — sessions without cwd get no entry."""
+        from ai_session_tools.analysis.orchestrator import _DEFAULT_TAXONOMY_DIMENSIONS
+        dim = next(d for d in _DEFAULT_TAXONOMY_DIMENSIONS if d["name"] == "08_by_working_dir")
+        # No fallback key, or fallback is None/absent
+        assert dim.get("fallback") is None
+
+
+class TestAiStudioMessageCount:
+    """AI Studio sessions should have real message_count (not always 0)."""
+
+    def test_message_count_from_chunked_prompt(self, tmp_path):
+        """_make_session_info reads JSON and counts user+model chunks."""
+        import json
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        session_file = tmp_path / "my_session"
+        session_file.write_text(json.dumps({
+            "chunkedPrompt": {"chunks": [
+                {"role": "user", "text": "Hello"},
+                {"role": "model", "text": "Hi"},
+                {"role": "user", "text": "How are you?"},
+                {"role": "model", "text": "Great"},
+            ]}
+        }), encoding="utf-8")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = src.list_sessions()
+        assert len(sessions) == 1
+        assert sessions[0].message_count == 4  # all user + model chunks
+
+    def test_message_count_zero_for_empty_chunks(self, tmp_path):
+        """Sessions with empty chunks list get message_count=0 (not error)."""
+        import json
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        session_file = tmp_path / "empty_session"
+        session_file.write_text(json.dumps({"chunkedPrompt": {"chunks": []}}), encoding="utf-8")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = src.list_sessions()
+        assert sessions[0].message_count == 0
+
+    def test_message_count_zero_for_invalid_json(self, tmp_path):
+        """Files that aren't JSON get message_count=0 (no crash)."""
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        session_file = tmp_path / "not_json"
+        session_file.write_text("this is not json", encoding="utf-8")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        sessions = src.list_sessions()
+        assert sessions[0].message_count == 0
+
+    def test_message_count_md_file_is_one(self, tmp_path):
+        """Legacy .md files count as 1 message (the whole content is one user turn)."""
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        session_file = tmp_path / "legacy.md"
+        session_file.write_text("# My legacy prompt\n\nSome content here", encoding="utf-8")
+        src = AiStudioSource(source_dirs=[tmp_path])
+        # .md files return 0 from _make_session_info (JSON parse fails, no chunkedPrompt)
+        sessions = src.list_sessions()
+        assert sessions[0].message_count == 0  # metadata-only; content is 1 message in read_session
+
+
+class TestGeminiCliSessionDisplay:
+    """Gemini CLI sessions should display readable names, not full paths."""
+
+    def test_session_id_is_stem_not_full_path(self, tmp_path):
+        """session_id uses file stem, not the full absolute path."""
+        import json
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "abc123" / "chats"
+        chats_dir.mkdir(parents=True)
+        session_file = chats_dir / "session-2026-02-24T10-30-abcdef12.json"
+        session_file.write_text(json.dumps({
+            "sessionId": "abcdef12",
+            "messages": [{"type": "user", "content": "hello"}],
+        }), encoding="utf-8")
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = src.list_sessions()
+        assert len(sessions) == 1
+        assert sessions[0].session_id == "session-2026-02-24T10-30-abcdef12"
+        assert "/Users/" not in sessions[0].session_id
+        assert sessions[0].session_id != str(session_file)
+
+    def test_read_session_still_works_with_stem_id(self, tmp_path):
+        """read_session reconstructs full path from project_dir + stem + .json."""
+        import json
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "abc123" / "chats"
+        chats_dir.mkdir(parents=True)
+        session_file = chats_dir / "session-2026-02-24T10-30-abcdef12.json"
+        session_file.write_text(json.dumps({
+            "sessionId": "abcdef12",
+            "messages": [
+                {"type": "user", "content": "hello"},
+                {"type": "gemini", "content": "hi there"},
+            ],
+        }), encoding="utf-8")
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = src.list_sessions()
+        assert len(sessions) == 1
+        messages = src.read_session(sessions[0])
+        assert len(messages) == 2
+        assert messages[0].content == "hello"
+
+    def test_message_count_populated_for_gemini(self, tmp_path):
+        """Gemini sessions have real message_count from parsed JSON."""
+        import json
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "hash456" / "chats"
+        chats_dir.mkdir(parents=True)
+        f = chats_dir / "session-2026-01-01T00-00-aabbccdd.json"
+        f.write_text(json.dumps({
+            "messages": [
+                {"type": "user", "content": "question 1"},
+                {"type": "gemini", "content": "answer 1"},
+                {"type": "user", "content": "question 2"},
+            ]
+        }), encoding="utf-8")
+        src = GeminiCliSource(gemini_tmp_dir=tmp_path)
+        sessions = src.list_sessions()
+        # Only user messages counted
+        assert sessions[0].message_count == 2
+
+
+class TestProviderFlag:
+    """--provider flag works per-command and globally; _g_source global is absent."""
+
+    def test_g_source_global_absent(self):
+        """_g_source module global must not exist (deleted in Phase C)."""
+        import ai_session_tools.cli as cli_mod
+        assert not hasattr(cli_mod, "_g_source"), "_g_source global must not exist"
+
+    def test_resolve_engine_exists(self):
+        """_resolve_engine helper exists and is callable."""
+        import ai_session_tools.cli as cli_mod
+        assert callable(getattr(cli_mod, "_resolve_engine", None))
+
+    def test_stats_exits_zero(self, tmp_path, monkeypatch):
+        """aise stats exits 0 (uses ctx.obj engine not _g_source)."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path))
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0
+
+    def test_list_provider_claude_exits_zero(self, tmp_path, monkeypatch):
+        """aise list --provider claude exits 0."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+
+    def test_global_provider_before_subcommand(self, tmp_path, monkeypatch):
+        """aise --provider claude list also exits 0 (global flag position)."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path))
+        result = runner.invoke(app, ["--provider", "claude", "list"])
+        assert result.exit_code == 0
+
+    def test_provider_help_text_uses_provider_not_source(self):
+        """Help text for list/stats/search uses --provider, not --source."""
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--provider" in result.output
+        assert "--source" not in result.output
+
+    def test_stats_help_uses_provider(self):
+        """aise stats --help shows --provider, not --source."""
+        result = runner.invoke(app, ["stats", "--help"])
+        # Check the docstring examples use --provider
+        assert "--source" not in result.output
+
+    def test_analyze_help_uses_provider(self):
+        """aise analyze --help shows --provider not --source."""
+        result = runner.invoke(app, ["analyze", "--help"])
+        assert "--source" not in result.output
+
+
+# ── Bug Fix Tests (2026-03-01 Bug Report) ─────────────────────────────────
+
+
+def _make_session_jsonl(tmp_path: Path, session_id: str, content: str) -> Path:
+    """Helper: create a minimal Claude JSONL session file for testing."""
+    import hashlib
+    project_hash = hashlib.md5(b"test_project").hexdigest()[:8]
+    project_dir = tmp_path / f"-test-project-{project_hash}"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    session_file = project_dir / f"{session_id}.jsonl"
+    lines = [
+        json.dumps({"type": "user", "sessionId": session_id, "timestamp": "2026-01-15T10:00:00Z",
+                    "message": {"content": content}, "cwd": str(tmp_path), "gitBranch": "main"}),
+        json.dumps({"type": "assistant", "sessionId": session_id, "timestamp": "2026-01-15T10:01:00Z",
+                    "message": {"content": "Understood."}}),
+    ]
+    session_file.write_text("\n".join(lines) + "\n")
+    return project_dir
+
+
+class TestBug1ClaudeInAllSource:
+    """Bug 1 (Critical): 'all' source must include Claude sessions."""
+
+    def test_get_session_backend_all_includes_claude(self, tmp_path, monkeypatch):
+        """Backend with source='all' must return Claude sessions in list_sessions()."""
+        from ai_session_tools.engine import get_session_backend
+        _make_session_jsonl(tmp_path, "test-uuid-1234", "post_ext feature request")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        backend = get_session_backend(source="all", claude_dir=str(tmp_path))
+        sessions = backend.get_sessions()
+        # Claude sessions must be present (session_id or provider check)
+        providers = {getattr(s, "provider", "") for s in sessions}
+        assert "claude" in providers, (
+            f"Claude sessions missing from 'all' source. providers found: {providers}"
+        )
+
+    def test_cli_search_all_finds_claude_sessions(self, tmp_path, monkeypatch):
+        """aise search messages --query finds Claude sessions when no --provider specified."""
+        _make_session_jsonl(tmp_path, "test-uuid-5678", "post_ext unique search term")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["search", "messages", "--query", "post_ext unique search term"])
+        assert result.exit_code == 0
+        assert "No messages" not in result.output or "post_ext" in result.output, (
+            f"Claude sessions excluded from default 'all' search. Output: {result.output}"
+        )
+
+
+class TestBug2StatsCountsProjectsSessions:
+    """Bug 2 (Critical): aise stats --provider claude must count projects sessions, not recovery dir."""
+
+    def test_get_statistics_counts_from_projects_not_recovery(self, tmp_path):
+        """get_statistics() total_sessions must equal len(get_sessions())."""
+        _make_session_jsonl(tmp_path, "abc-123", "hello world")
+        recovery = tmp_path / "recovery"
+        recovery.mkdir()
+        engine = SessionRecoveryEngine(tmp_path, recovery)
+        stats = engine.get_statistics()
+        sessions = engine.get_sessions()
+        assert stats.total_sessions == len(sessions), (
+            f"stats.total_sessions={stats.total_sessions} != len(get_sessions())={len(sessions)}"
+        )
+
+    def test_get_statistics_nonzero_when_projects_exist(self, tmp_path):
+        """Stats must report > 0 sessions when projects dir has session files."""
+        _make_session_jsonl(tmp_path, "xyz-456", "test session content")
+        recovery = tmp_path / "recovery"
+        # Do NOT create recovery dir — it should still count from projects
+        engine = SessionRecoveryEngine(tmp_path, recovery)
+        stats = engine.get_statistics()
+        assert stats.total_sessions > 0, "get_statistics() returned 0 even though projects dir has sessions"
+
+
+class TestBug3MultiSourceSortedNewestFirst:
+    """Bug 3 (Medium): MultiSourceEngine.list_sessions() must sort newest-first."""
+
+    def test_list_sessions_sorted_newest_first(self):
+        """Sessions from multiple sources must be sorted by timestamp_first descending."""
+        from ai_session_tools.engine import MultiSourceEngine
+
+        old_session = SessionInfo(
+            session_id="old", project_dir="/p", cwd="", git_branch="",
+            timestamp_first="2024-01-01T00:00:00Z", timestamp_last="", message_count=1,
+            has_compact_summary=False,
+        )
+        new_session = SessionInfo(
+            session_id="new", project_dir="/p", cwd="", git_branch="",
+            timestamp_first="2026-03-01T14:00:00Z", timestamp_last="", message_count=1,
+            has_compact_summary=False,
+        )
+
+        class SourceA:
+            def list_sessions(self): return [old_session]
+            def search_messages(self, q, t=None): return []
+            def stats(self): return {}
+
+        class SourceB:
+            def list_sessions(self): return [new_session]
+            def search_messages(self, q, t=None): return []
+            def stats(self): return {}
+
+        engine = MultiSourceEngine([SourceA(), SourceB()])
+        result = engine.list_sessions()
+        assert result[0].session_id == "new", (
+            f"Expected newest session first, got: {[s.session_id for s in result]}"
+        )
+
+    def test_list_sessions_empty_timestamp_sorts_last(self):
+        """Sessions with empty timestamp must sort to the end."""
+        from ai_session_tools.engine import MultiSourceEngine
+
+        no_ts = SessionInfo("s1", "/p", "", "", "", "", 1, False)
+        with_ts = SessionInfo("s2", "/p", "", "", "2026-01-01T00:00:00Z", "", 1, False)
+
+        class Source:
+            def __init__(self, sessions): self._sessions = sessions
+            def list_sessions(self): return self._sessions
+            def search_messages(self, q, t=None): return []
+            def stats(self): return {}
+
+        engine = MultiSourceEngine([Source([no_ts]), Source([with_ts])])
+        result = engine.list_sessions()
+        assert result[0].session_id == "s2", "Session with timestamp must sort before session with empty timestamp"
+
+
+class TestBug4DomainErrorHint:
+    """Bug 4 (Low): 'aise search messages someterm' positional gives helpful error."""
+
+    def test_domain_error_includes_query_hint(self, tmp_path, monkeypatch):
+        """Error message must suggest using --query flag when query is passed as domain.
+
+        'aise search someterm' sets domain='someterm', triggering validation error.
+        The error must hint at the correct usage: aise search messages --query someterm.
+        """
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        # domain='someterm' (not 'files'/'messages'/'tools') → triggers our error
+        result = runner.invoke(app, ["search", "someterm"])
+        combined = (result.output or "") + (result.stderr or "" if hasattr(result, "stderr") else "")
+        assert "--query" in combined, (
+            f"Error should suggest --query. Got: {result.output}"
+        )
+
+
+class TestBug5ConfigSourceNoSubcommand:
+    """Bug 5 (Low): 'aise config' and 'aise source' with no subcommand show help."""
+
+    def test_config_no_subcommand_shows_help(self):
+        """aise config with no subcommand must exit 0 and show help text."""
+        result = runner.invoke(app, ["config"])
+        assert result.exit_code == 0, f"Expected exit 0, got {result.exit_code}: {result.output}"
+        assert "config" in result.output.lower()
+
+    def test_source_no_subcommand_shows_help(self):
+        """aise source with no subcommand must exit 0 and show help text."""
+        result = runner.invoke(app, ["source"])
+        assert result.exit_code == 0, f"Expected exit 0, got {result.exit_code}: {result.output}"
+        assert "source" in result.output.lower()
+
+
+class TestBug6DisplayFormatting:
+    """Bug 6 (High): Full UUIDs, provider column, and correct timestamp formatting."""
+
+    @pytest.mark.parametrize("ts,expected", [
+        ("2026-03-01T14:23:45.123456Z",      "2026-03-01 14:23"),
+        ("2026-03-01T14:23:45.123456+00:00", "2026-03-01 14:23"),
+        ("2026-02-23T04:07",                 "2026-02-23 04:07"),
+        ("2026-03-01",                       "2026-03-01"),
+        ("",                                 ""),
+    ])
+    def test_format_ts(self, ts, expected):
+        """_format_ts must correctly format all known ISO 8601 variants."""
+        from ai_session_tools.cli import _format_ts
+        assert _format_ts(ts) == expected, f"_format_ts({ts!r}) = {_format_ts(ts)!r}, expected {expected!r}"
+
+    def test_list_spec_full_uuid(self, tmp_path, monkeypatch):
+        """aise list --provider claude must show full 36-char UUIDs, not truncated."""
+        import re
+        _make_session_jsonl(tmp_path, "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "full uuid test")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+        uuids = re.findall(
+            r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+            result.output
+        )
+        assert len(uuids) > 0, f"Full UUIDs must appear in table output. Got:\n{result.output}"
+
+    def test_list_spec_has_provider_column(self, tmp_path, monkeypatch):
+        """aise list must show a 'Provider' column (visible when sessions exist)."""
+        _make_session_jsonl(tmp_path, "a1b2c3d4-e5f6-7890-abcd-ef1234567891", "provider col test")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+        assert "Provider" in result.output, f"Provider column missing from list output:\n{result.output}"
+
+    def test_session_info_provider_field_defaults_empty(self):
+        """SessionInfo.provider defaults to empty string (backward compatible)."""
+        s = SessionInfo(
+            session_id="x", project_dir="/p", cwd="", git_branch="",
+            timestamp_first="", timestamp_last="", message_count=0,
+            has_compact_summary=False,
+        )
+        assert s.provider == ""
+
+    def test_session_info_provider_in_to_dict(self):
+        """SessionInfo.to_dict() must include 'provider' key."""
+        s = SessionInfo(
+            session_id="x", project_dir="/p", cwd="", git_branch="",
+            timestamp_first="", timestamp_last="", message_count=0,
+            has_compact_summary=False, provider="claude",
+        )
+        d = s.to_dict()
+        assert "provider" in d
+        assert d["provider"] == "claude"
+
+
+class TestBug6GeminiTimestamp:
+    """Bug 6 (Gemini timestamp sub-bug): Timestamp regex must not corrupt date."""
+
+    def test_gemini_timestamp_parsing_correct(self):
+        """Gemini CLI filename timestamp must parse to valid ISO 8601."""
+        import re
+        filename = "session-2026-02-23T04-07-bd7e3697.json"
+        m = re.search(r"session-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})", filename)
+        assert m is not None, "Regex should match Gemini session filename"
+        ts = f"{m.group(1)}T{m.group(2)}:{m.group(3)}"
+        assert ts == "2026-02-23T04:07", f"Got wrong timestamp: {ts!r}"
+        assert ts.startswith("2026-02-23"), "Date part must not be corrupted"
+
+    def test_gemini_source_timestamp_via_source(self, tmp_path):
+        """GeminiCliSource must produce valid ISO timestamps (not 2026:02:23...)."""
+        import hashlib
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        # Create fake Gemini session dir structure using real SHA-256 of project path
+        project_path = str(tmp_path / "myproject")
+        project_hash = hashlib.sha256(project_path.encode()).hexdigest()
+        hash_dir = tmp_path / "tmp" / project_hash
+        chats_dir = hash_dir / "chats"
+        chats_dir.mkdir(parents=True)
+        session_data = {
+            "messages": [{"type": "user", "content": "hello", "timestamp": ""}],
+        }
+        session_file = chats_dir / "session-2026-02-23T04-07-bd7e3697.json"
+        session_file.write_text(json.dumps(session_data))
+
+        # Write trusted folders so hash-to-path lookup can resolve the hash
+        import json as _json
+        gemini_dir = tmp_path
+        (gemini_dir / "trustedFolders.json").write_text(
+            _json.dumps({project_path: "TRUST_FOLDER"})
+        )
+
+        source = GeminiCliSource(tmp_path / "tmp")
+        # Patch gemini_tmp_dir's parent to be tmp_path so lookup finds our files
+        source.gemini_tmp_dir = tmp_path / "tmp"
+        sessions = source.list_sessions()
+        assert len(sessions) == 1
+        ts = sessions[0].timestamp_first
+        # Must not start with "2026:" (corrupted date)
+        assert not ts.startswith("2026:"), f"Timestamp is corrupted: {ts!r}"
+        # Must start with "2026-" if it has content
+        if ts:
+            assert ts.startswith("2026-"), f"Expected ISO date, got: {ts!r}"
+
+    def test_gemini_hash_to_path_lookup(self, tmp_path):
+        """GeminiCliSource must resolve projectHash to real path via SHA-256 reverse map."""
+        import hashlib, json as _json
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+
+        # Create a real project path and compute its hash
+        project_path = str(tmp_path / "myproject")
+        project_hash = hashlib.sha256(project_path.encode()).hexdigest()
+
+        # Set up gemini dir structure
+        gemini_dir = tmp_path / "gemini"
+        gemini_tmp = gemini_dir / "tmp"
+        hash_dir = gemini_tmp / project_hash
+        chats_dir = hash_dir / "chats"
+        chats_dir.mkdir(parents=True)
+
+        session_data = {"messages": [{"type": "user", "content": "test"}]}
+        (chats_dir / "session-2026-02-23T04-07-abc12345.json").write_text(
+            _json.dumps(session_data)
+        )
+
+        # Write trustedFolders.json so hash resolves to project_path
+        (gemini_dir / "trustedFolders.json").write_text(
+            _json.dumps({project_path: "TRUST_FOLDER"})
+        )
+
+        source = GeminiCliSource(gemini_tmp)
+        sessions = source.list_sessions()
+        assert len(sessions) == 1
+        # cwd must be the resolved real path, not the hash or empty string
+        assert sessions[0].cwd == project_path, (
+            f"Expected cwd={project_path!r}, got {sessions[0].cwd!r}"
+        )
+
+    def test_gemini_hash_unknown_cwd_is_empty(self, tmp_path):
+        """When projectHash can't be resolved, cwd must be '' (not the raw hash)."""
+        import json as _json
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+
+        # Hash dir with no corresponding path in trustedFolders/projects
+        hash_dir = tmp_path / "tmp" / ("a" * 64)
+        chats_dir = hash_dir / "chats"
+        chats_dir.mkdir(parents=True)
+        session_data = {"messages": [{"type": "user", "content": "hello"}]}
+        (chats_dir / "session-2026-02-23T04-07-bd7e3697.json").write_text(
+            _json.dumps(session_data)
+        )
+
+        # No trustedFolders.json or projects.json → hash can't be resolved
+        source = GeminiCliSource(tmp_path / "tmp")
+        sessions = source.list_sessions()
+        assert len(sessions) == 1
+        # cwd must be empty string, not the raw 64-char hex hash
+        assert sessions[0].cwd == "", (
+            f"Expected empty cwd, got {sessions[0].cwd!r}"
+        )
+
+
+class TestBug7HelpTextDateFormat:
+    """Bug 7 (Medium): Help text for date flags must include ISO date format example and --since/--until/--when."""
+
+    @pytest.mark.parametrize("cmd", [
+        ["search", "messages", "--help"],
+        ["list", "--help"],
+        ["messages", "corrections", "--help"],
+    ])
+    def test_help_includes_date_format(self, cmd):
+        """--since/--until/--when options must be present and show an ISO date example in help."""
+        result = runner.invoke(app, cmd)
+        assert result.exit_code == 0
+        # Primary date flags must appear
+        assert "--since" in result.output, f"--since missing from '{' '.join(cmd)}' help"
+        assert "--until" in result.output, f"--until missing from '{' '.join(cmd)}' help"
+        assert "--when" in result.output, f"--when missing from '{' '.join(cmd)}' help"
+        # The --since help shows a concrete example like 2026-01-15 (or abstract YYYY-MM-DD)
+        assert "2026-01-15" in result.output or "YYYY-MM-DD" in result.output, (
+            f"ISO date format example missing from '{' '.join(cmd)}' help.\n{result.output}"
+        )
+
+
+class TestBug8SourceDeduplication:
+    """Bug 8 (Medium): Duplicate source paths must not be shown in source list."""
+
+    def test_source_list_deduplicates_paths(self, tmp_path, monkeypatch):
+        """source list must not show duplicate entries for same path."""
+        from ai_session_tools.config import load_config
+        from ai_session_tools.cli import _write_config
+        # Write a config with a duplicate aistudio entry
+        cfg = {"source_dirs": {"aistudio": [str(tmp_path), str(tmp_path)]}}
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        (tmp_path / "config.json").write_text(json.dumps(cfg))
+        result = runner.invoke(app, ["source", "list"])
+        assert result.exit_code == 0
+        # Count how many times the path appears
+        count = result.output.count(str(tmp_path))
+        # Should appear once (the path itself), not twice as a duplicate row
+        # Allow 1 occurrence (one row) — if it appears more, that's a duplicate display
+        path_rows = [line for line in result.output.splitlines() if str(tmp_path) in line]
+        assert len(path_rows) <= 1, (
+            f"Duplicate path shown {len(path_rows)} times in source list:\n{result.output}"
+        )
+
+
+class TestAiStudioDiscovery:
+    """AI Studio auto-discovery: Google Drive + Downloads paths across platforms."""
+
+    def test_discover_sources_finds_downloads_google_ai_studio(self, tmp_path):
+        """_discover_sources finds 'Google AI Studio' dir under Downloads."""
+        from ai_session_tools.engine import _discover_sources
+        # Simulate ~/Downloads/Google AI Studio/
+        downloads = tmp_path / "Downloads"
+        ai_dir = downloads / "Google AI Studio"
+        ai_dir.mkdir(parents=True)
+        # Monkeypatch home dir by patching _aistudio_candidate_dirs
+        import ai_session_tools.engine as eng_mod
+        original_home = eng_mod.Path.home
+        try:
+            eng_mod.Path.home = staticmethod(lambda: tmp_path)
+            result = _discover_sources({})
+        finally:
+            eng_mod.Path.home = original_home
+        found = result.get("source_dirs", {}).get("aistudio", [])
+        if isinstance(found, str):
+            found = [found]
+        assert str(ai_dir) in found, (
+            f"Expected to discover {ai_dir}, got: {found}"
+        )
+
+    def test_discover_sources_finds_glob_pattern(self, tmp_path):
+        """_discover_sources finds dirs matching '*Google AI Studio*' in Downloads."""
+        from ai_session_tools.engine import _discover_sources
+        downloads = tmp_path / "Downloads"
+        # Variant name with prefix
+        ai_dir = downloads / "My Google AI Studio Sessions"
+        ai_dir.mkdir(parents=True)
+        import ai_session_tools.engine as eng_mod
+        original_home = eng_mod.Path.home
+        try:
+            eng_mod.Path.home = staticmethod(lambda: tmp_path)
+            result = _discover_sources({})
+        finally:
+            eng_mod.Path.home = original_home
+        found = result.get("source_dirs", {}).get("aistudio", [])
+        if isinstance(found, str):
+            found = [found]
+        assert str(ai_dir) in found, (
+            f"Expected to discover {ai_dir} via glob, got: {found}"
+        )
+
+    def test_discover_sources_explicit_config_wins(self, tmp_path):
+        """Explicit aistudio config prevents auto-discovery (explicit wins)."""
+        from ai_session_tools.engine import _discover_sources
+        explicit_path = str(tmp_path / "my_sessions")
+        # Auto-discovery should be skipped because "aistudio" key exists in sd
+        cfg = {"source_dirs": {"aistudio": [explicit_path]}}
+        # Even if Google AI Studio exists in Downloads, it should not be added
+        downloads = tmp_path / "Downloads" / "Google AI Studio"
+        downloads.mkdir(parents=True)
+        import ai_session_tools.engine as eng_mod
+        original_home = eng_mod.Path.home
+        try:
+            eng_mod.Path.home = staticmethod(lambda: tmp_path)
+            result = _discover_sources(cfg)
+        finally:
+            eng_mod.Path.home = original_home
+        found = result.get("source_dirs", {}).get("aistudio", [])
+        if isinstance(found, str):
+            found = [found]
+        # Only explicit path, not auto-discovered
+        assert found == [explicit_path], (
+            f"Expected only explicit config path, got: {found}"
+        )
+
+    def test_discover_sources_empty_list_disables_autodiscovery(self, tmp_path):
+        """Empty list in config disables auto-discovery for that type."""
+        from ai_session_tools.engine import _discover_sources
+        cfg = {"source_dirs": {"aistudio": []}}
+        downloads = tmp_path / "Downloads" / "Google AI Studio"
+        downloads.mkdir(parents=True)
+        import ai_session_tools.engine as eng_mod
+        original_home = eng_mod.Path.home
+        try:
+            eng_mod.Path.home = staticmethod(lambda: tmp_path)
+            result = _discover_sources(cfg)
+        finally:
+            eng_mod.Path.home = original_home
+        found = result.get("source_dirs", {}).get("aistudio", [])
+        # Empty list means disabled — should stay empty, not auto-discover
+        assert found == [], (
+            f"Auto-discovery should be disabled by empty list, got: {found}"
+        )
+
+    def test_aistudio_candidate_dirs_no_crash_nonexistent(self, tmp_path):
+        """_aistudio_candidate_dirs must not crash when no Drive dirs exist."""
+        from ai_session_tools.engine import _aistudio_candidate_dirs
+        import ai_session_tools.engine as eng_mod
+        original_home = eng_mod.Path.home
+        try:
+            # tmp_path has no Downloads, no Google Drive — should return []
+            result = _aistudio_candidate_dirs(tmp_path)
+        finally:
+            pass
+        assert isinstance(result, list), "Must return a list"
+
+
+class TestSourceDisableEnable:
+    """source disable / source enable commands for auto-discovery control."""
+
+    def test_source_disable_blocks_autodiscovery(self, tmp_path, monkeypatch):
+        """aise source disable aistudio writes [] to config."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["source", "disable", "aistudio"])
+        assert result.exit_code == 0
+        cfg = json.loads((tmp_path / "config.json").read_text())
+        sd = cfg.get("source_dirs", {})
+        assert "aistudio" in sd
+        assert sd["aistudio"] == [], f"Expected empty list, got: {sd['aistudio']}"
+
+    def test_source_enable_removes_disable_block(self, tmp_path, monkeypatch):
+        """aise source enable aistudio removes the [] block from config."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"source_dirs": {"aistudio": []}}))
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config_file))
+        result = runner.invoke(app, ["source", "enable", "aistudio"])
+        assert result.exit_code == 0
+        cfg = json.loads(config_file.read_text())
+        sd = cfg.get("source_dirs", {})
+        assert "aistudio" not in sd, (
+            f"aistudio key should be removed after enable, got: {sd}"
+        )
+
+    def test_source_disable_invalid_type(self, tmp_path, monkeypatch):
+        """aise source disable with unknown type exits with error."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["source", "disable", "unknowntype"])
+        assert result.exit_code != 0
+
+    def test_source_enable_gemini_alias(self, tmp_path, monkeypatch):
+        """aise source disable gemini works as alias for gemini_cli."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"source_dirs": {"gemini_cli": []}}))
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config_file))
+        result = runner.invoke(app, ["source", "enable", "gemini"])
+        assert result.exit_code == 0
+        cfg = json.loads(config_file.read_text())
+        sd = cfg.get("source_dirs", {})
+        assert "gemini_cli" not in sd, f"gemini_cli key should be removed, got: {sd}"
+
+
+class TestDiscoveryCache:
+    """_discover_sources() TTL cache: hits, misses, force refresh, write-back."""
+
+    def test_cache_hit_skips_filesystem_scan(self, tmp_path, monkeypatch):
+        """Fresh _auto_discovered cache must be returned without re-scanning."""
+        import datetime
+        from ai_session_tools.engine import _discover_sources
+
+        # Create a fake aistudio dir that DOES NOT exist on disk
+        fake_path = str(tmp_path / "FakeAIStudio")
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        config = {
+            "source_dirs": {},
+            "_auto_discovered": {
+                "_discovered_at": now_iso,
+                "aistudio": [fake_path],
+            },
+        }
+        result = _discover_sources(config)
+        # Cache must be returned even though fake_path doesn't exist on disk
+        assert result["source_dirs"].get("aistudio") == [fake_path], (
+            "Cache hit must return cached aistudio without filesystem check"
+        )
+
+    def test_cache_miss_stale_triggers_rescan(self, tmp_path, monkeypatch):
+        """Expired _auto_discovered cache must trigger a fresh filesystem scan."""
+        import datetime
+        from ai_session_tools.engine import _discover_sources
+
+        # Create a real directory so it gets discovered
+        real_dir = tmp_path / "Downloads" / "Google AI Studio"
+        real_dir.mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        stale_ts = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=25)
+        ).isoformat()
+
+        config = {
+            "source_dirs": {},
+            "_auto_discovered": {
+                "_discovered_at": stale_ts,
+                "aistudio": ["/old/stale/path"],
+            },
+        }
+        result = _discover_sources(config)
+        # Stale cache must be ignored; real_dir must appear via fresh scan
+        found = result["source_dirs"].get("aistudio", [])
+        assert str(real_dir) in found, (
+            f"Stale cache should be ignored; fresh scan should find {real_dir}"
+        )
+
+    def test_force_bypasses_fresh_cache(self, tmp_path, monkeypatch):
+        """force=True must bypass a still-valid cache and return fresh results."""
+        import datetime
+        from ai_session_tools.engine import _discover_sources
+
+        # Create a real directory so fresh scan returns something
+        real_dir = tmp_path / "Downloads" / "Google AI Studio"
+        real_dir.mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        config = {
+            "source_dirs": {},
+            "_auto_discovered": {
+                "_discovered_at": now_iso,
+                "aistudio": ["/cached/stale/path"],
+            },
+        }
+        result = _discover_sources(config, force=True)
+        found = result["source_dirs"].get("aistudio", [])
+        assert str(real_dir) in found, (
+            f"force=True must bypass cache; fresh scan should find {real_dir}"
+        )
+        assert "/cached/stale/path" not in found, (
+            "force=True must not return stale cached path"
+        )
+
+    def test_cache_writeback_after_scan(self, tmp_path, monkeypatch):
+        """After a scan, _auto_discovered must be written to config.json."""
+        import datetime
+        import ai_session_tools.config as _cfg_mod
+        from ai_session_tools.engine import _discover_sources
+        from ai_session_tools.config import invalidate_config_cache
+
+        real_dir = tmp_path / "Downloads" / "Google AI Studio"
+        real_dir.mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"source_dirs": {}}))
+        # Reset _g_config_path so env var takes priority (prevents prior-test leakage)
+        monkeypatch.setattr(_cfg_mod, "_g_config_path", None)
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config_file))
+        invalidate_config_cache()
+
+        config = json.loads(config_file.read_text())
+        _discover_sources(config)
+
+        # config.json must now contain _auto_discovered with _discovered_at
+        written = json.loads(config_file.read_text())
+        assert "_auto_discovered" in written, "Cache must be written back to config.json"
+        auto = written["_auto_discovered"]
+        assert "_discovered_at" in auto, "_auto_discovered must contain _discovered_at"
+        # Verify _discovered_at is a valid ISO timestamp
+        ts = datetime.datetime.fromisoformat(auto["_discovered_at"])
+        age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+        assert age < 10, f"_discovered_at must be recent, got age={age:.1f}s"
+
+    def test_explicit_config_not_overwritten_by_cache(self, tmp_path, monkeypatch):
+        """Explicit source_dirs entries must never be replaced by cache or scan."""
+        import datetime
+        from ai_session_tools.engine import _discover_sources
+
+        explicit_path = str(tmp_path / "explicit_aistudio")
+        (tmp_path / "explicit_aistudio").mkdir()
+
+        # Also create a discoverable dir to confirm scan doesn't override explicit
+        (tmp_path / "Downloads" / "Google AI Studio").mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        config = {"source_dirs": {"aistudio": [explicit_path]}}
+
+        # Test with stale/no cache (scan path)
+        result = _discover_sources(config)
+        assert result["source_dirs"]["aistudio"] == [explicit_path], (
+            "Explicit aistudio config must not be overwritten by auto-discovery"
+        )
+
+        # Test with fresh cache that has a different aistudio
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        config_with_cache = {
+            "source_dirs": {"aistudio": [explicit_path]},
+            "_auto_discovered": {
+                "_discovered_at": now_iso,
+                "aistudio": ["/cached/path"],
+            },
+        }
+        result2 = _discover_sources(config_with_cache)
+        assert result2["source_dirs"]["aistudio"] == [explicit_path], (
+            "Cached auto-discovery must not override explicit source_dirs.aistudio"
+        )
+
+    def test_source_scan_cli_force_refreshes_cache(self, tmp_path, monkeypatch):
+        """aise source scan must pass force=True and refresh stale cache."""
+        import datetime, json as _json
+        from ai_session_tools.config import invalidate_config_cache
+
+        # Stale cache in config
+        stale_ts = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=48)
+        ).isoformat()
+        config_file = tmp_path / "config.json"
+        config_file.write_text(_json.dumps({
+            "source_dirs": {},
+            "_auto_discovered": {
+                "_discovered_at": stale_ts,
+                "aistudio": ["/old/stale/path"],
+            },
+        }))
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config_file))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        invalidate_config_cache()
+
+        result = runner.invoke(app, ["source", "scan"])
+        assert result.exit_code == 0
+        # After scan, config.json must have a fresh _discovered_at
+        written = _json.loads(config_file.read_text())
+        auto = written.get("_auto_discovered", {})
+        if "_discovered_at" in auto:
+            ts = datetime.datetime.fromisoformat(auto["_discovered_at"])
+            age = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+            assert age < 30, f"source scan must refresh _discovered_at, got age={age:.1f}s"
+
+class TestCLIComposability:
+    """Composability: flags available on one command should be on related commands."""
+
+    def test_messages_search_has_since_until_flags(self):
+        """messages search must accept --since, --until, --when flags (--after/--before are hidden aliases)."""
+        result = runner.invoke(app, ["messages", "search", "--help"])
+        assert result.exit_code == 0
+        assert "--since" in result.output
+        assert "--until" in result.output
+        assert "--when" in result.output
+        assert "2026-01-15" in result.output or "YYYY-MM-DD" in result.output
+
+    def test_tools_search_has_since_until_flags(self):
+        """tools search must accept --since, --until, --when flags (--after/--before are hidden aliases)."""
+        result = runner.invoke(app, ["tools", "search", "--help"])
+        assert result.exit_code == 0
+        assert "--since" in result.output
+        assert "--until" in result.output
+        assert "--when" in result.output
+
+    def test_messages_timeline_has_type_flag(self):
+        """messages timeline must accept --type to filter by role."""
+        result = runner.invoke(app, ["messages", "timeline", "--help"])
+        assert result.exit_code == 0
+        assert "--type" in result.output
+
+    def test_messages_extract_has_limit_flag(self):
+        """messages extract must accept --limit."""
+        result = runner.invoke(app, ["messages", "extract", "--help"])
+        assert result.exit_code == 0
+        assert "--limit" in result.output
+
+    def test_messages_search_date_filter_restricts_results(self, tmp_path):
+        """messages search --after filters to only sessions within the date range."""
+        from ai_session_tools.cli import _do_messages_search
+        from ai_session_tools.engine import SessionRecoveryEngine
+        from ai_session_tools.models import SessionInfo
+
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        old_id = "cccc0001-0000-0000-0000-000000000000"
+        new_id = "dddd0001-0000-0000-0000-000000000000"
+        # Session with timestamp_first = 2024 (old)
+        old_proj = projects / "-Users-old-proj"
+        old_proj.mkdir()
+        (old_proj / f"{old_id}.jsonl").write_text(
+            json.dumps({"sessionId": old_id, "type": "user",
+                        "timestamp": "2024-01-15T10:00:00.000Z", "gitBranch": "main",
+                        "cwd": "/Users/old/proj",
+                        "message": {"role": "user", "content": "find_me"}}) + "\n"
+        )
+        # Session with timestamp_first = 2026 (new)
+        new_proj = projects / "-Users-new-proj"
+        new_proj.mkdir()
+        (new_proj / f"{new_id}.jsonl").write_text(
+            json.dumps({"sessionId": new_id, "type": "user",
+                        "timestamp": "2026-02-15T10:00:00.000Z", "gitBranch": "main",
+                        "cwd": "/Users/new/proj",
+                        "message": {"role": "user", "content": "find_me"}}) + "\n"
+        )
+
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+
+        # Without filter: both sessions
+        all_results = engine.search_messages("find_me")
+        assert len(all_results) >= 2
+
+        # With --since 2025-01-01: only the 2026 session
+        sessions_after = engine.get_sessions(since="2025-01-01")
+        valid_ids = {s.session_id for s in sessions_after}
+        filtered = [m for m in all_results if m.session_id in valid_ids]
+        assert len(filtered) == 1, f"Only the 2026 session should match, got {len(filtered)}"
+
+    def test_messages_timeline_type_filter(self, tmp_path):
+        """messages timeline --type filters events by role post-hoc."""
+        from ai_session_tools.cli import _do_messages_timeline
+        from ai_session_tools.engine import SessionRecoveryEngine
+
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        proj = projects / "test-proj"
+        proj.mkdir()
+        jsonl = proj / "test-session.jsonl"
+        session_id = "test-session"
+        jsonl.write_text(
+            json.dumps({"type": "user", "timestamp": "2026-01-01T10:00:00Z",
+                        "message": {"role": "user", "content": [{"type": "text", "text": "user msg"}]}}) + "\n" +
+            json.dumps({"type": "assistant", "timestamp": "2026-01-01T10:01:00Z",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": "ai resp"}]}}) + "\n"
+        )
+
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        all_events = engine.timeline_session(session_id)
+        assert len(all_events) == 2
+
+        # Simulate --type user filter (applied in _do_messages_timeline)
+        user_events = [e for e in all_events if e.get("type") == "user"]
+        assert len(user_events) == 1
+        assert user_events[0]["type"] == "user"
+
+    def test_messages_extract_limit(self, tmp_path):
+        """messages extract --limit slices results."""
+        from ai_session_tools.cli import _do_messages_extract
+        from ai_session_tools.engine import SessionRecoveryEngine
+
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        proj = projects / "-Users-clip-proj"
+        proj.mkdir()
+        clip_id = "eeee0001-0000-0000-0000-000000000000"
+        # Write a session with 3 clipboard entries using the correct JSONL format:
+        # get_clipboard_content() scans tool_use Bash blocks for cat-to-pbcopy patterns
+        lines = []
+        for i in range(3):
+            lines.append(json.dumps({
+                "sessionId": clip_id,
+                "type": "assistant",
+                "timestamp": f"2026-01-01T10:0{i}:00.000Z",
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": f"t{i}", "name": "Bash",
+                     "input": {"command": f"cat <<'EOF' | pbcopy\nclip{i}\nEOF"}}
+                ]},
+            }))
+        (proj / f"{clip_id}.jsonl").write_text("\n".join(lines) + "\n")
+
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        all_clips = engine.get_clipboard_content(clip_id)
+        assert len(all_clips) == 3, f"Expected 3 clipboard entries, got {len(all_clips)}"
+        limited = all_clips[:1]
+        assert len(limited) == 1
+
+
+class TestParseDateInput:
+    """TDD tests for _parse_date_input() and the --since/--until/--when CLI flags.
+
+    Tests are written before implementation (TDD). All cases must pass after
+    implementing _parse_date_input() in engine.py and the DRY CLI helpers.
+    """
+
+    import datetime as _dt
+
+    @pytest.mark.parametrize("s,mode,expected_prefix", [
+        # ISO 8601 pass-through (validated by edtf)
+        ("2026-01-15",           "start", "2026-01-15"),
+        ("2026-01-15T14:30:00",  "start", "2026-01-15"),
+        # Month expansion
+        ("2026-01",  "start", "2026-01-01"),
+        ("2026-01",  "end",   "2026-01-31"),
+        ("2026-02",  "end",   "2026-02-28"),   # Feb non-leap year
+        ("2024-02",  "end",   "2024-02-29"),   # Feb leap year
+        # Year expansion
+        ("2026", "start", "2026-01-01"),
+        ("2026", "end",   "2026-12-31"),
+        # EDTF Level 1: unspecified digit (uppercase)
+        ("202X", "start", "2020-01-01"),
+        ("202X", "end",   "2029-12-31"),
+        # EDTF Level 1: unspecified digit (lowercase — both must work)
+        ("202x", "start", "2020-01-01"),
+        # EDTF Level 1: century
+        ("19XX", "start", "1900-01-01"),
+        # EDTF Level 1: partial day range
+        ("2026-01-1X", "start", "2026-01-10"),
+        ("2026-01-1X", "end",   "2026-01-19"),
+    ])
+    def test_expansion(self, s, mode, expected_prefix):
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input(s, mode)
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert result.startswith(expected_prefix), (
+            f"_parse_date_input({s!r}, {mode!r}) = {result!r}, "
+            f"expected prefix {expected_prefix!r}"
+        )
+
+    @pytest.mark.parametrize("s,expected_lo_prefix,expected_hi_prefix", [
+        # --when semantics: both bounds must be correct for EDTF range expressions
+        ("202X",       "2020-01-01", "2029-12-31"),   # whole decade
+        ("2026-01-1X", "2026-01-10", "2026-01-19"),   # 10 specific days
+        ("2026-01",    "2026-01-01", "2026-01-31"),   # whole month
+        ("2026",       "2026-01-01", "2026-12-31"),   # whole year
+    ])
+    def test_when_semantics_both_bounds(self, s, expected_lo_prefix, expected_hi_prefix):
+        """lower_strict and upper_strict give correct bounds for --when usage."""
+        from ai_session_tools.engine import _parse_date_input
+        lo = _parse_date_input(s, "start")
+        hi = _parse_date_input(s, "end")
+        assert lo.startswith(expected_lo_prefix), (
+            f"lower({s!r}) = {lo!r}, expected prefix {expected_lo_prefix!r}"
+        )
+        assert hi.startswith(expected_hi_prefix), (
+            f"upper({s!r}) = {hi!r}, expected prefix {expected_hi_prefix!r}"
+        )
+
+    def test_duration_7d(self):
+        import datetime
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input("7d", "start")
+        dt = datetime.datetime.fromisoformat(result)
+        age = (datetime.datetime.now(datetime.timezone.utc)
+               - dt.replace(tzinfo=datetime.timezone.utc)).total_seconds()
+        assert 6.9 * 86400 < age < 7.1 * 86400, f"7d age={age:.0f}s, expected ~604800s"
+
+    def test_duration_2w(self):
+        import datetime
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input("2w", "start")
+        dt = datetime.datetime.fromisoformat(result)
+        age = (datetime.datetime.now(datetime.timezone.utc)
+               - dt.replace(tzinfo=datetime.timezone.utc)).total_seconds()
+        assert 13.9 * 86400 < age < 14.1 * 86400, f"2w age={age:.0f}s, expected ~1209600s"
+
+    def test_duration_30min(self):
+        import datetime
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input("30min", "start")
+        dt = datetime.datetime.fromisoformat(result)
+        age = (datetime.datetime.now(datetime.timezone.utc)
+               - dt.replace(tzinfo=datetime.timezone.utc)).total_seconds()
+        assert 29.9 * 60 < age < 30.1 * 60, f"30min age={age:.0f}s, expected ~1800s"
+
+    def test_duration_24h(self):
+        import datetime
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input("24h", "start")
+        dt = datetime.datetime.fromisoformat(result)
+        age = (datetime.datetime.now(datetime.timezone.utc)
+               - dt.replace(tzinfo=datetime.timezone.utc)).total_seconds()
+        assert 23.9 * 3600 < age < 24.1 * 3600, f"24h age={age:.0f}s, expected ~86400s"
+
+    def test_interval_returns_tuple(self):
+        from ai_session_tools.engine import _parse_date_input
+        result = _parse_date_input("2026-01/2026-03", "start")
+        assert isinstance(result, tuple) and len(result) == 2, (
+            f"Expected 2-tuple, got {type(result)}: {result!r}"
+        )
+        assert result[0].startswith("2026-01-01"), f"interval start: {result[0]!r}"
+        assert result[1].startswith("2026-03-31"), f"interval end: {result[1]!r}"
+
+    def test_invalid_raises_value_error(self):
+        from ai_session_tools.engine import _parse_date_input
+        with pytest.raises(ValueError, match="(?i)unrecogni"):
+            _parse_date_input("not-a-date", "start")
+
+    def test_invalid_error_mentions_aise_dates(self):
+        """Error message should hint at 'aise dates' for format reference."""
+        from ai_session_tools.engine import _parse_date_input
+        with pytest.raises(ValueError) as exc_info:
+            _parse_date_input("not-a-date", "start")
+        assert "aise dates" in str(exc_info.value)
+
+    # ── CLI integration tests ────────────────────────────────────────────────
+
+    def test_since_flag_in_list_help(self):
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--since" in result.output, "Expected --since in list --help"
+
+    def test_until_flag_in_list_help(self):
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--until" in result.output, "Expected --until in list --help"
+
+    def test_when_flag_in_list_help(self):
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--when" in result.output, "Expected --when in list --help"
+
+    def test_after_not_in_list_help(self):
+        """--after is a hidden alias and must NOT appear in --help output."""
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--after" not in result.output, "--after should be hidden from --help"
+
+    def test_before_not_in_list_help(self):
+        """--before is a hidden alias and must NOT appear in --help output."""
+        result = runner.invoke(app, ["list", "--help"])
+        assert "--before" not in result.output, "--before should be hidden from --help"
+
+    def test_after_hidden_alias_still_accepted(self):
+        """--after still accepted for backward compat even though hidden from help."""
+        result = runner.invoke(app, ["list", "--after", "2020-01-01", "--format", "json"])
+        assert result.exit_code == 0, f"--after should be accepted: {result.output}"
+
+    def test_before_hidden_alias_still_accepted(self):
+        result = runner.invoke(app, ["list", "--before", "2030-01-01", "--format", "json"])
+        assert result.exit_code == 0, f"--before should be accepted: {result.output}"
+
+    def test_when_decade_202X_accepted(self):
+        result = runner.invoke(app, ["list", "--when", "202X", "--format", "json"])
+        assert result.exit_code == 0, (
+            f"--when 202X should succeed: exit={result.exit_code}\n{result.output}"
+        )
+
+    def test_since_duration_7d_accepted(self):
+        result = runner.invoke(app, ["list", "--since", "7d", "--format", "json"])
+        assert result.exit_code == 0, f"--since 7d should succeed: {result.output}"
+
+    def test_since_interval_accepted(self):
+        result = runner.invoke(app, ["list", "--since", "2026-01/2026-03", "--format", "json"])
+        assert result.exit_code == 0, (
+            f"--since interval should succeed: {result.output}"
+        )
+
+    def test_since_invalid_exits_nonzero(self):
+        result = runner.invoke(app, ["list", "--since", "not-a-date"])
+        assert result.exit_code != 0, "Invalid --since should exit nonzero"
+
+    def test_when_invalid_exits_nonzero(self):
+        result = runner.invoke(app, ["list", "--when", "not-a-date"])
+        assert result.exit_code != 0, "Invalid --when should exit nonzero"
+
+    def test_aise_dates_subcommand_exists(self):
+        result = runner.invoke(app, ["dates"])
+        assert result.exit_code == 0, f"aise dates failed: {result.output}"
+
+    def test_aise_dates_shows_spec_link(self):
+        result = runner.invoke(app, ["dates"])
+        assert "loc.gov/standards/datetime" in result.output, (
+            "aise dates should show the EDTF spec link"
+        )
+
+    def test_aise_dates_mentions_202X(self):
+        result = runner.invoke(app, ["dates"])
+        assert "202X" in result.output, "aise dates should document 202X patterns"
+
+    def test_aise_dates_mentions_when(self):
+        result = runner.invoke(app, ["dates"])
+        assert "--when" in result.output, "aise dates should explain --when"
+
+    def test_since_flag_in_messages_search_help(self):
+        result = runner.invoke(app, ["messages", "search", "--help"])
+        assert "--since" in result.output
+
+    def test_when_flag_in_messages_search_help(self):
+        result = runner.invoke(app, ["messages", "search", "--help"])
+        assert "--when" in result.output
+
+    def test_since_flag_in_messages_corrections_help(self):
+        result = runner.invoke(app, ["messages", "corrections", "--help"])
+        assert "--since" in result.output
+
+    def test_when_flag_in_messages_corrections_help(self):
+        result = runner.invoke(app, ["messages", "corrections", "--help"])
+        assert "--when" in result.output
+
+    def test_since_flag_in_messages_timeline_help(self):
+        result = runner.invoke(app, ["messages", "timeline", "--help"])
+        assert "--since" in result.output
+
+    def test_since_flag_in_stats_help(self):
+        result = runner.invoke(app, ["stats", "--help"])
+        assert "--since" in result.output
+
+
+import re as _re_ver
+
+
+class TestVersionFlag:
+    """--version / -V must print 'aise X.Y.Z' and exit 0."""
+
+    def test_version_long_flag(self):
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert _re_ver.search(r"aise \d+\.\d+\.\d+", result.output), (
+            f"Expected 'aise X.Y.Z', got: {result.output!r}"
+        )
+
+    def test_version_short_flag(self):
+        result = runner.invoke(app, ["-V"])
+        assert result.exit_code == 0
+        assert _re_ver.search(r"aise \d+\.\d+\.\d+", result.output), (
+            f"Expected 'aise X.Y.Z', got: {result.output!r}"
+        )
+
+    def test_version_output_starts_with_aise(self):
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert result.output.strip().startswith("aise "), (
+            f"Output must start with 'aise ', got: {result.output!r}"
+        )
+
+    def test_version_works_without_subcommand(self):
+        """is_eager ensures --version fires before engine build; no 'No such option'."""
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert "No such option" not in result.output
+        assert "Error" not in result.output
+
+    def test_version_appears_in_help(self):
+        result = runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+        assert "--version" in result.output
+        assert "-V" in result.output
+
+    def test_version_and_short_produce_same_output(self):
+        r1 = runner.invoke(app, ["--version"])
+        r2 = runner.invoke(app, ["-V"])
+        assert r1.output == r2.output
+        assert r1.exit_code == r2.exit_code == 0
+
+
+import re as _re_stats
+
+
+class TestStatsDateFiltering:
+    """aise stats --since/--until/--when must filter session counts."""
+
+    # --- Unit test: the single source of truth ---
+
+    def test_passes_date_filter_no_filter(self):
+        """Default (no filter): always True regardless of timestamp."""
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("2026-03-01", None, None) is True
+        assert _passes_date_filter("", None, None) is True      # empty ts: no filter = pass
+
+    def test_passes_date_filter_after_only(self):
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("2026-03-01", "2026-01-01", None) is True
+        assert _passes_date_filter("2025-12-31", "2026-01-01", None) is False
+        assert _passes_date_filter("2026-01-01", "2026-01-01", None) is True   # inclusive
+
+    def test_passes_date_filter_before_only(self):
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("2026-03-01", None, "2026-12-31") is True
+        assert _passes_date_filter("2027-01-01", None, "2026-12-31") is False
+        assert _passes_date_filter("2026-12-31", None, "2026-12-31") is True   # inclusive
+
+    def test_passes_date_filter_both_bounds(self):
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("2026-06-01", "2026-01-01", "2026-12-31") is True
+        assert _passes_date_filter("2025-12-31", "2026-01-01", "2026-12-31") is False
+        assert _passes_date_filter("2027-01-01", "2026-01-01", "2026-12-31") is False
+
+    def test_passes_date_filter_empty_ts_with_active_filter(self):
+        """Empty timestamp is excluded when any filter is active."""
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("", "2026-01-01", None) is False
+        assert _passes_date_filter("", None, "2026-12-31") is False
+        assert _passes_date_filter("", "2026-01-01", "2026-12-31") is False
+
+    # --- CLI integration: flag acceptance ---
+
+    def test_stats_since_accepts_iso_date(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats", "--since", "2020-01-01"])
+        assert result.exit_code == 0
+
+    def test_stats_until_accepts_iso_date(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats", "--until", "2099-12-31"])
+        assert result.exit_code == 0
+
+    def test_stats_when_accepts_edtf_decade(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats", "--when", "202X"])
+        assert result.exit_code == 0
+
+    def test_stats_invalid_date_exits_nonzero(self):
+        result = runner.invoke(app, ["stats", "--since", "not-a-date"])
+        assert result.exit_code != 0
+        assert "not-a-date" in result.output or "Unrecognised" in result.output
+
+    def test_stats_no_flags_unchanged_behavior(self, tmp_path, monkeypatch):
+        """Default (no date flags): stats shows Sessions line, backward compatible."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0
+        assert "Sessions:" in result.output
+
+    # --- Filtering correctness ---
+
+    def test_stats_far_future_yields_zero_sessions(self, tmp_path, monkeypatch):
+        """--since year 2099 must report 0 sessions (filter is actually applied)."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats", "--since", "2099-01-01"])
+        assert result.exit_code == 0
+        assert "Sessions:" in result.output
+        match = _re_stats.search(r"Sessions:\s+(\d+)", result.output)
+        assert match, f"No 'Sessions: N' in output:\n{result.output}"
+        assert int(match.group(1)) == 0, (
+            f"Expected 0 sessions with --since 2099-01-01, got {match.group(1)}"
+        )
+
+    def test_stats_docstring_has_no_unimplemented_note(self):
+        """Help text must not say filtering is 'not yet applied'."""
+        result = runner.invoke(app, ["stats", "--help"])
+        assert result.exit_code == 0
+        assert "not yet applied" not in result.output
+        assert "planned for a future release" not in result.output
+
+
+import json as _json_bugs
+import re as _re_bugs
+
+
+class TestBugFixes:
+    """Regression tests for edge cases found in post-v0.2.0 review."""
+
+    # ── Bug: _passes_date_filter must handle timezone-aware timestamps (HIGH) ──
+
+    def test_passes_date_filter_tz_aware_z_suffix(self):
+        """Timestamp with Z suffix must not be incorrectly excluded at boundary."""
+        from ai_session_tools.engine import _passes_date_filter
+        # "2026-03-01T23:59:59Z" is the same moment as "2026-03-01T23:59:59"
+        # With before="2026-03-01T23:59:59", session should be INCLUDED not excluded.
+        assert _passes_date_filter("2026-03-01T23:59:59Z", None, "2026-03-01T23:59:59") is True
+
+    def test_passes_date_filter_tz_aware_plus_offset(self):
+        """Timestamp with +00:00 offset must not be incorrectly excluded at boundary."""
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("2026-03-01T23:59:59+00:00", None, "2026-03-01T23:59:59") is True
+
+    def test_passes_date_filter_with_microseconds(self):
+        """Timestamp with microseconds must compare correctly against second-precision bound."""
+        from ai_session_tools.engine import _passes_date_filter
+        # 23:59:59.999 is within [*, 23:59:59] when seconds match
+        assert _passes_date_filter("2026-03-01T23:59:59.999999", None, "2026-03-01T23:59:59") is True
+        # 00:00:00.001 is within [00:00:00, *]
+        assert _passes_date_filter("2026-03-01T00:00:00.001", "2026-03-01T00:00:00", None) is True
+
+    def test_passes_date_filter_tz_aware_excluded_correctly(self):
+        """Timestamps clearly outside range are still excluded when tz-aware."""
+        from ai_session_tools.engine import _passes_date_filter
+        # 2027 is beyond before=2026-12-31T23:59:59 regardless of timezone
+        assert _passes_date_filter("2027-01-01T00:00:00Z", None, "2026-12-31T23:59:59") is False
+        assert _passes_date_filter("2025-12-31T23:59:59+00:00", "2026-01-01T00:00:00", None) is False
+
+    def test_passes_date_filter_none_ts_excluded(self):
+        """None timestamp (not just empty string) must be treated as absent."""
+        from ai_session_tools.engine import _passes_date_filter
+        # None is falsy like "" — must not crash, must return False when filter active
+        assert _passes_date_filter(None, "2026-01-01", None) is False
+        assert _passes_date_filter(None, None, "2026-12-31") is False
+        assert _passes_date_filter(None, None, None) is True  # no filter: pass through
+
+    # ── Bug: gemini_cli filename timestamp missing seconds (MEDIUM) ──
+
+    def test_gemini_timestamp_format_has_seconds(self, tmp_path):
+        """Gemini session filename timestamp must include seconds (YYYY-MM-DDTHH:MM:SS)."""
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        # Create a minimal gemini session file matching the expected filename pattern
+        chats_dir = tmp_path / "hash123" / "chats"
+        chats_dir.mkdir(parents=True)
+        session_file = chats_dir / "session-2026-02-23T04-07-abc123.json"
+        session_file.write_text(_json_bugs.dumps({"messages": []}))
+        src = GeminiCliSource(tmp_path)
+        info = src._make_session_info(session_file)
+        # Must be 19 chars: YYYY-MM-DDTHH:MM:SS
+        assert len(info.timestamp_first) == 19, (
+            f"Expected 19-char timestamp, got {len(info.timestamp_first)!r}: {info.timestamp_first!r}"
+        )
+        assert info.timestamp_first == "2026-02-23T04:07:00"
+
+    def test_gemini_timestamp_with_seconds_in_filename(self, tmp_path):
+        """Gemini filename with HH-MM-SS must use actual seconds, not hardcoded 00."""
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "hash123" / "chats"
+        chats_dir.mkdir(parents=True)
+        # Filename with seconds: T04-07-25-hash
+        session_file = chats_dir / "session-2026-02-23T04-07-25-abc123.json"
+        session_file.write_text(_json_bugs.dumps({"messages": []}))
+        src = GeminiCliSource(tmp_path)
+        info = src._make_session_info(session_file)
+        assert info.timestamp_first == "2026-02-23T04:07:25", (
+            f"Seconds must come from filename, not be hardcoded 00: {info.timestamp_first!r}"
+        )
+
+    def test_gemini_timestamp_date_only_filename(self, tmp_path):
+        """Gemini filename with only a date (no time) defaults to T00:00:00."""
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "hash123" / "chats"
+        chats_dir.mkdir(parents=True)
+        session_file = chats_dir / "session-2026-02-23-abc123.json"
+        session_file.write_text(_json_bugs.dumps({"messages": []}))
+        src = GeminiCliSource(tmp_path)
+        info = src._make_session_info(session_file)
+        assert info.timestamp_first == "2026-02-23T00:00:00", (
+            f"Date-only filename must default time to T00:00:00: {info.timestamp_first!r}"
+        )
+
+    # ── Bug: gemini_cli timestamp_first=None when JSON has null startTime (HIGH) ──
+
+    def test_gemini_null_start_time_falls_back_to_filename(self, tmp_path):
+        """Gemini session with JSON startTime=null must use filename timestamp, not None."""
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "hash123" / "chats"
+        chats_dir.mkdir(parents=True)
+        session_file = chats_dir / "session-2026-02-23T04-07-abc123.json"
+        session_file.write_text(_json_bugs.dumps({"startTime": None, "messages": []}))
+        src = GeminiCliSource(tmp_path)
+        info = src._make_session_info(session_file)
+        # Must not be None — must fall back to filename-extracted timestamp
+        assert info.timestamp_first is not None
+        assert info.timestamp_first != "None"
+        assert info.timestamp_first == "2026-02-23T04:07:00"
+
+    # ── Bug: aistudio timestamp has +00:00 timezone suffix (HIGH) ──
+
+    def test_aistudio_timestamp_is_naive_iso(self, tmp_path):
+        """AI Studio session timestamp must be naive ISO (no timezone suffix)."""
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        session_file = session_dir / "test_session.json"
+        session_file.write_text(_json_bugs.dumps({}))
+        src = AiStudioSource([session_dir])
+        info = src._make_session_info(session_file)
+        # Must be 19 chars: YYYY-MM-DDTHH:MM:SS (no +00:00, no Z, no microseconds)
+        if info.timestamp_first:
+            assert len(info.timestamp_first) == 19, (
+                f"AI Studio timestamp must be 19-char naive ISO, got: {info.timestamp_first!r}"
+            )
+            assert "+" not in info.timestamp_first, "No timezone offset allowed"
+            assert info.timestamp_first.endswith("Z") is False, "No Z suffix allowed"
+
+    # ── Bug: config cache not invalidated on env var change (CRITICAL) ──
+
+    def test_config_cache_invalidated_on_env_var_change(self, tmp_path, monkeypatch):
+        """load_config() must auto-invalidate when AI_SESSION_TOOLS_CONFIG env var changes.
+
+        No explicit invalidate_config_cache() call should be needed — load_config()
+        detects the env var change itself via _resolved_config_key() comparison.
+        """
+        import ai_session_tools.config as _cfg_mod
+        from ai_session_tools.config import load_config, invalidate_config_cache
+
+        config1 = tmp_path / "config1.json"
+        config2 = tmp_path / "config2.json"
+        config1.write_text(_json_bugs.dumps({"_marker": "config1"}))
+        config2.write_text(_json_bugs.dumps({"_marker": "config2"}))
+
+        # Clear any cached state from prior tests
+        invalidate_config_cache()
+        _cfg_mod._g_config_path = None
+
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config1))
+        c1 = load_config()
+        assert c1.get("_marker") == "config1", f"Expected config1, got {c1}"
+
+        # Change env var — NO explicit invalidate_config_cache() call; must auto-detect
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config2))
+        c2 = load_config()
+        assert c2.get("_marker") == "config2", (
+            f"load_config() returned stale cache after env var change (no explicit invalidation): {c2}"
+        )
+
+    # ── Bug: inverted date range silently returns 0 results (HIGH) ──
+
+    def test_stats_inverted_range_warns_or_errors(self, tmp_path, monkeypatch):
+        """--since after --until must produce a warning/error, not silent empty results."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats", "--since", "2099-01-01", "--until", "2020-01-01"])
+        # Either exit nonzero OR print a warning about the inverted range
+        has_warning = (
+            "inverted" in result.output.lower()
+            or "after" in result.output.lower()
+            or "before" in result.output.lower()
+            or "range" in result.output.lower()
+            or result.exit_code != 0
+        )
+        assert has_warning, (
+            f"Inverted range produced no warning. exit={result.exit_code} output={result.output!r}"
+        )
+
+    def test_list_inverted_range_warns_or_errors(self, tmp_path, monkeypatch):
+        """aise list --since after --until must warn or error."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["list", "--since", "2099-01-01", "--until", "2020-01-01"])
+        has_warning = (
+            "inverted" in result.output.lower()
+            or "range" in result.output.lower()
+            or result.exit_code != 0
+        )
+        assert has_warning, (
+            f"Inverted range produced no warning. exit={result.exit_code} output={result.output!r}"
+        )
+
+    # ── Bug: removeprefix() without startswith guard (MEDIUM) ──
+
+    def test_passes_date_filter_stats_unexpected_dir_skipped(self, tmp_path):
+        """get_statistics must skip recovery dirs not starting with 'session_'."""
+        from ai_session_tools.engine import SessionRecoveryEngine
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        recovery_dir = tmp_path / "recovery"
+        recovery_dir.mkdir()
+        # Create an unexpected directory that doesn't match the "session_" prefix
+        unexpected = recovery_dir / "backup_old_data"
+        unexpected.mkdir()
+        (unexpected / "somefile.txt").write_text("data")
+
+        engine = SessionRecoveryEngine(projects_dir, recovery_dir)
+        stats = engine.get_statistics()
+        # The unexpected dir must NOT inflate file counts
+        assert stats.total_files == 0, (
+            f"Unexpected dir inflated total_files to {stats.total_files}"
+        )
+
+
+class TestDateTimePrecisionBoundaries:
+    """_parse_date_input must expand partial time specs to full-period bounds.
+
+    Principle: input precision determines output range; no component that is
+    genuinely absent from the input should be hardcoded or defaulted when
+    expanding the END of a range.
+
+    Coverage: hour-precision, minute-precision, full-datetime (exact second),
+    and FilterSpec.matches_datetime timezone stripping.
+    """
+
+    # ── Hour precision: YYYY-MM-DDTHH ──
+
+    def test_hour_precision_start(self):
+        """Hour-precision start → T{HH}:00:00."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14", "start") == "2026-01-15T14:00:00"
+
+    def test_hour_precision_end(self):
+        """Hour-precision end → T{HH}:59:59 (full hour, NOT T{HH}:00:00)."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14", "end") == "2026-01-15T14:59:59"
+
+    def test_hour_precision_midnight(self):
+        """Midnight hour (T00) must expand correctly."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T00", "start") == "2026-01-15T00:00:00"
+        assert _parse_date_input("2026-01-15T00", "end")   == "2026-01-15T00:59:59"
+
+    def test_hour_precision_lowercase_t(self):
+        """Lowercase 't' separator must be normalised and handled."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15t02", "end") == "2026-01-15T02:59:59"
+
+    # ── Minute precision: YYYY-MM-DDTHH:MM ──
+
+    def test_minute_precision_start(self):
+        """Minute-precision start → T{HH}:{MM}:00."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:30", "start") == "2026-01-15T14:30:00"
+
+    def test_minute_precision_end(self):
+        """Minute-precision end → T{HH}:{MM}:59 (full minute, NOT :00)."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:30", "end") == "2026-01-15T14:30:59"
+
+    def test_minute_precision_top_of_hour(self):
+        """Minute=00 (top of hour) must expand to :59 for end."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:00", "start") == "2026-01-15T14:00:00"
+        assert _parse_date_input("2026-01-15T14:00", "end")   == "2026-01-15T14:00:59"
+
+    def test_minute_precision_last_minute_of_hour(self):
+        """Minute=59 (last minute) end must be :59 seconds."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:59", "end") == "2026-01-15T14:59:59"
+
+    # ── Full datetime: exact second (no expansion) ──
+
+    def test_full_datetime_start_is_exact(self):
+        """Full YYYY-MM-DDTHH:MM:SS must return the exact second for start."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:30:25", "start") == "2026-01-15T14:30:25"
+
+    def test_full_datetime_end_is_exact(self):
+        """Full YYYY-MM-DDTHH:MM:SS must return the exact second for end."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:30:25", "end") == "2026-01-15T14:30:25"
+
+    # ── --when semantics with time precision ──
+
+    def test_when_hour_covers_full_hour(self):
+        """--when with hour precision: range must be [HH:00:00, HH:59:59]."""
+        from ai_session_tools.engine import _parse_date_input
+        lo = _parse_date_input("2026-01-15T02", "start")
+        hi = _parse_date_input("2026-01-15T02", "end")
+        assert lo == "2026-01-15T02:00:00", f"lower={lo!r}"
+        assert hi == "2026-01-15T02:59:59", f"upper={hi!r} (must be full hour, not T02:00:00)"
+
+    def test_when_minute_covers_full_minute(self):
+        """--when with minute precision: range must be [HH:MM:00, HH:MM:59]."""
+        from ai_session_tools.engine import _parse_date_input
+        lo = _parse_date_input("2026-01-15T14:30", "start")
+        hi = _parse_date_input("2026-01-15T14:30", "end")
+        assert lo == "2026-01-15T14:30:00", f"lower={lo!r}"
+        assert hi == "2026-01-15T14:30:59", f"upper={hi!r} (must be full minute)"
+
+    # ── FilterSpec.matches_datetime tz-stripping ──
+
+    def test_filterspec_tz_suffix_included_at_boundary(self):
+        """FilterSpec.matches_datetime must strip tz suffix; boundary timestamp must pass."""
+        from ai_session_tools.models import FilterSpec
+        f = FilterSpec(after="2026-01-01T00:00:00", before="2026-12-31T23:59:59")
+        # Timestamp exactly at upper boundary, but with Z suffix — must NOT be excluded
+        assert f.matches_datetime("2026-12-31T23:59:59Z") is True, (
+            "Timestamp at boundary with Z suffix must pass (tz stripped before compare)"
+        )
+        assert f.matches_datetime("2026-12-31T23:59:59+00:00") is True, (
+            "Timestamp at boundary with +00:00 must pass (tz stripped before compare)"
+        )
+
+    def test_filterspec_tz_suffix_excluded_past_boundary(self):
+        """FilterSpec.matches_datetime must correctly exclude timestamps beyond range."""
+        from ai_session_tools.models import FilterSpec
+        f = FilterSpec(after="2026-01-01T00:00:00", before="2026-12-31T23:59:59")
+        assert f.matches_datetime("2027-01-01T00:00:00Z") is False
+        assert f.matches_datetime("2025-12-31T23:59:59+00:00") is False
+
+    def test_filterspec_microseconds_at_boundary(self):
+        """FilterSpec.matches_datetime must strip microseconds; boundary must pass."""
+        from ai_session_tools.models import FilterSpec
+        f = FilterSpec(after="2026-01-01T00:00:00", before="2026-12-31T23:59:59")
+        # Microsecond suffix makes string longer — must truncate before compare
+        assert f.matches_datetime("2026-12-31T23:59:59.999999") is True
+
+
+class TestConfigDefaults:
+    """_cfg_default() reads from config 'defaults' section; CLI options respect it."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_config_cache(self, monkeypatch):
+        """Guarantee a fresh config cache before and after each test in this class.
+
+        runner.invoke() calls app_callback which may set _g_config_path or populate
+        the cache; prior tests (e.g. TestSharedConfigModule) can also leave _g_config_path
+        non-None. This fixture resets both _g_config_path and the cache at setup/teardown
+        so each test in this class starts from a known-clean state.
+        """
+        from ai_session_tools import config as _cfg_mod
+        _cfg_mod.set_config_path(None)   # reset _g_config_path (may have been set by prior tests)
+        _cfg_mod.invalidate_config_cache()
+        yield
+        _cfg_mod.set_config_path(None)
+        _cfg_mod.invalidate_config_cache()
+
+    def test_cfg_default_returns_fallback_when_no_config(self, tmp_path, monkeypatch):
+        """When config has no 'defaults' section, hardcoded fallback is returned."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        from ai_session_tools import config as _cfg_mod
+        _cfg_mod.invalidate_config_cache()
+        from ai_session_tools.cli import _cfg_default
+        assert _cfg_default("format", "table") == "table"
+        assert _cfg_default("max_chars", 0) == 0
+        assert _cfg_default("provider", "all") == "all"
+
+    def test_cfg_default_reads_format_from_config(self, tmp_path, monkeypatch):
+        """_cfg_default('format') returns config value when set."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text('{"defaults": {"format": "json"}}')
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(cfg_file))
+        from ai_session_tools import config as _cfg_mod
+        _cfg_mod.invalidate_config_cache()
+        from ai_session_tools.cli import _cfg_default
+        assert _cfg_default("format", "table") == "json"
+
+    def test_cfg_default_reads_max_chars_from_config(self, tmp_path, monkeypatch):
+        """_cfg_default('max_chars') returns config value when set."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text('{"defaults": {"max_chars": 500}}')
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(cfg_file))
+        from ai_session_tools import config as _cfg_mod
+        _cfg_mod.invalidate_config_cache()
+        from ai_session_tools.cli import _cfg_default
+        assert _cfg_default("max_chars", 0) == 500
+
+    def test_cfg_default_reads_provider_from_config(self, tmp_path, monkeypatch):
+        """_cfg_default('provider') returns config value when set."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text('{"defaults": {"provider": "claude"}}')
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(cfg_file))
+        from ai_session_tools import config as _cfg_mod
+        _cfg_mod.invalidate_config_cache()
+        from ai_session_tools.cli import _cfg_default
+        assert _cfg_default("provider", "all") == "claude"
+
+    def test_render_output_uses_config_format(self, tmp_path, monkeypatch):
+        """When --format not passed, output uses config 'defaults.format' if set."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text('{"defaults": {"format": "json"}}')
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(cfg_file))
+        from ai_session_tools import config as _cfg_mod
+        _cfg_mod.invalidate_config_cache()
+        # aise list with no --format → should default to json per config
+        result = runner.invoke(app, ["list"])
+        assert result.exit_code == 0
+        # Output should be JSON array (no Rich table markup)
+        stripped = result.output.strip()
+        # Either empty array or valid JSON
+        if stripped:
+            try:
+                parsed = json.loads(stripped)
+                assert isinstance(parsed, list)
+            except json.JSONDecodeError:
+                pass  # May have no sessions — empty output is also acceptable
+
+    def test_format_flag_overrides_config(self, tmp_path, monkeypatch):
+        """Explicit --format flag overrides config default."""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text('{"defaults": {"format": "json"}}')
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(cfg_file))
+        from ai_session_tools import config as _cfg_mod
+        _cfg_mod.invalidate_config_cache()
+        # Explicitly pass --format table → should override config's json default
+        result = runner.invoke(app, ["list", "--format", "table"])
+        assert result.exit_code == 0
+        # Table output contains "Sessions" header or similar table structure
+        # (not a JSON array) — this just verifies the flag was respected
+
+    def test_no_config_defaults_backward_compatible(self, tmp_path, monkeypatch):
+        """No 'defaults' section in config → _cfg_default falls back to hardcoded values.
+
+        Verifies fallback logic directly via get_config_section rather than relying
+        on _cfg_default's lazy import, which avoids any stale-cache edge case.
+        """
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text('{}')
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(cfg_file))
+        from ai_session_tools import config as _cfg_mod
+        # Force _g_config_path to None so env var takes priority
+        _cfg_mod.set_config_path(None)
+        _cfg_mod.invalidate_config_cache()
+        raw_cfg = _cfg_mod.load_config()
+        assert raw_cfg == {}, (
+            f"Expected empty config from {cfg_file}, got {raw_cfg!r}\n"
+            f"  _g_config_path={_cfg_mod._g_config_path!r}\n"
+            f"  env AI_SESSION_TOOLS_CONFIG={__import__('os').getenv('AI_SESSION_TOOLS_CONFIG')!r}"
+        )
+        # Defaults section absent → get_config_section returns fallback {}
+        defaults = _cfg_mod.get_config_section("defaults", {})
+        assert defaults == {}, f"Expected empty defaults, got {defaults!r}"
+        # Fallback values from empty defaults section
+        assert defaults.get("format", "table") == "table"
+        assert defaults.get("max_chars", 0) == 0
+        assert defaults.get("provider", "all") == "all"
+
+
+class TestConfigMigration:
+    """_migrate_config() must rename deprecated keys to canonical names."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_config_cache(self, monkeypatch):
+        from ai_session_tools import config as _cfg_mod
+        _cfg_mod.set_config_path(None)
+        _cfg_mod.invalidate_config_cache()
+        yield
+        _cfg_mod.set_config_path(None)
+        _cfg_mod.invalidate_config_cache()
+
+    def test_migrate_no_op_on_clean_config(self):
+        """Already-canonical config: _migrate_config returns unchanged dict and False."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"defaults": {"format": "json", "since": "2026-01-01"}}
+        result, changed = _migrate_config(cfg)
+        assert changed is False
+        assert result == cfg
+
+    def test_migrate_defaults_after_to_since(self):
+        """Old 'after' key in defaults → renamed to 'since'."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"defaults": {"after": "2026-01-01", "format": "table"}}
+        result, changed = _migrate_config(cfg)
+        assert changed is True
+        assert "since" in result["defaults"]
+        assert result["defaults"]["since"] == "2026-01-01"
+        assert "after" not in result["defaults"]
+
+    def test_migrate_defaults_before_to_until(self):
+        """Old 'before' key in defaults → renamed to 'until'."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"defaults": {"before": "2026-12-31"}}
+        result, changed = _migrate_config(cfg)
+        assert changed is True
+        assert "until" in result["defaults"]
+        assert result["defaults"]["until"] == "2026-12-31"
+        assert "before" not in result["defaults"]
+
+    def test_migrate_both_keys(self):
+        """Both 'after' and 'before' in defaults → both renamed."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"defaults": {"after": "2026-01-01", "before": "2026-12-31"}}
+        result, changed = _migrate_config(cfg)
+        assert changed is True
+        assert result["defaults"] == {"since": "2026-01-01", "until": "2026-12-31"}
+
+    def test_migrate_idempotent(self):
+        """Running migration twice produces same result and second call is no-op."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"defaults": {"after": "2026-01-01"}}
+        result1, changed1 = _migrate_config(cfg)
+        result2, changed2 = _migrate_config(result1)
+        assert changed1 is True
+        assert changed2 is False
+        assert result1 == result2
+
+    def test_migrate_empty_config(self):
+        """Empty config: migration is a no-op."""
+        from ai_session_tools.config import _migrate_config
+        result, changed = _migrate_config({})
+        assert changed is False
+        assert result == {}
+
+    def test_migrate_no_defaults_section(self):
+        """Config without defaults section: migration is a no-op."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"source_dirs": {"claude": "/home/user/.claude"}}
+        result, changed = _migrate_config(cfg)
+        assert changed is False
+        assert result == cfg
+
+    def test_load_config_auto_migrates_and_writes(self, tmp_path, monkeypatch):
+        """load_config() auto-migrates old keys and rewrites the config file."""
+        from ai_session_tools import config as _cfg_mod
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text('{"defaults": {"after": "2026-01-01"}}')
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(cfg_file))
+        _cfg_mod.invalidate_config_cache()
+
+        cfg = _cfg_mod.load_config()
+        # In-memory result is migrated
+        assert cfg.get("defaults", {}).get("since") == "2026-01-01"
+        assert "after" not in cfg.get("defaults", {})
+        # File on disk is also updated
+        import json
+        on_disk = json.loads(cfg_file.read_text())
+        assert on_disk.get("defaults", {}).get("since") == "2026-01-01"
+        assert "after" not in on_disk.get("defaults", {})

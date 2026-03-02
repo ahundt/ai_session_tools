@@ -262,6 +262,11 @@ class FilterSpec:
         """
         if not datetime_str:
             return not (self.after or self.before)
+        if self.after or self.before:
+            # Truncate to 19 chars to strip timezone designators (+00:00, Z) and
+            # sub-second precision so that all sources compare correctly against
+            # the naive ISO strings produced by _parse_date_input.
+            datetime_str = datetime_str[:19]
         if self.after and datetime_str < self.after:
             return False
         if self.before and datetime_str > self.before:
@@ -362,6 +367,7 @@ class SessionInfo:
     timestamp_last: str    # ISO 8601, latest message timestamp
     message_count: int     # count of lines where type == "user" or "assistant"
     has_compact_summary: bool  # True if any line has isCompactSummary == true
+    provider: str = ""     # "claude" | "aistudio" | "gemini_cli" | ""
 
     @property
     def project_display(self) -> str:
@@ -391,6 +397,7 @@ class SessionInfo:
             "timestamp_last": self.timestamp_last,
             "message_count": self.message_count,
             "has_compact_summary": self.has_compact_summary,
+            "provider": self.provider,
         }
 
 
