@@ -1666,8 +1666,14 @@ def _do_messages_timeline(
         events = [e for e in events if (e.get("timestamp") or "") <= until]
     if not events:
         # Distinguish "session file not found" from "session has no user/assistant events"
-        session_files = engine._find_session_files(session_id)
-        if not session_files:
+        # Cross-backend session existence check: use _find_session_files() for Claude,
+        # fall back to get_messages() for multi-source backends (AISession).
+        _backend = getattr(engine, "_backend", None)
+        if _backend is not None and hasattr(_backend, "_find_session_files"):
+            session_exists = bool(_backend._find_session_files(session_id))
+        else:
+            session_exists = bool(engine.get_messages(session_id))
+        if not session_exists:
             err_console.print(f"[red]No session found matching:[/red] {session_id!r}")
         else:
             err_console.print(
@@ -2051,7 +2057,7 @@ def files_search(
         aise files search -i py,md --since 2026-01-15      # Python/Markdown since Jan 15
         aise files search --when 202X                      # files edited in the 2020s decade
     """
-    engine = _resolve_engine(ctx, provider)
+    engine = _resolve_engine(ctx, provider or "claude")  # file ops are Claude-only
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2126,7 +2132,7 @@ def files_extract(
         aise files extract cli.py --restore --dry-run    # preview restore
         aise files extract cli.py --output-dir ./backup  # write to ./backup/
     """
-    engine = _resolve_engine(ctx, provider)
+    engine = _resolve_engine(ctx, provider or "claude")  # file ops are Claude-only
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2168,7 +2174,7 @@ def files_history(
         aise files history cli.py --stdout                  # all versions to stdout
     """
     since, until = _normalize_date_range(since, until, when, after, before)
-    engine = _resolve_engine(ctx, provider)
+    engine = _resolve_engine(ctx, provider or "claude")  # file ops are Claude-only
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2211,7 +2217,7 @@ def files_cross_ref(
         aise files cross-ref ./engine.py --session ab841016
         aise files cross-ref ./cli.py --format json
     """
-    engine = _resolve_engine(ctx, provider)
+    engine = _resolve_engine(ctx, provider or "claude")  # file ops are Claude-only
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2556,7 +2562,7 @@ def messages_extract(
         aise messages extract dddd0001 pbcopy --limit 3
     """
     since, until = _normalize_date_range(since, until, when, after, before)
-    engine = _resolve_engine(ctx, provider)
+    engine = _resolve_engine(ctx, provider or "claude")  # clipboard ops are Claude-only
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2823,7 +2829,7 @@ def history(
     Equivalent to 'aise files history'. Creates a table of all recorded versions.
     READ-ONLY — no files are written unless you use --export or --stdout.
     """
-    engine = _resolve_engine(ctx, provider)
+    engine = _resolve_engine(ctx, provider or "claude")  # file ops are Claude-only
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)

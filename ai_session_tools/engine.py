@@ -2011,7 +2011,7 @@ class AISession:
         """Print graceful warning for Claude-only feature on non-Claude backend."""
         from rich.console import Console
         Console(stderr=True).print(
-            f"[yellow]{feature} requires --source claude (Claude Code sessions only)[/yellow]"
+            f"[yellow]{feature} requires --provider claude (Claude Code sessions only)[/yellow]"
         )
 
     def _claude_only(self, method_name: str, default: object, *args: object, **kwargs: object) -> object:
@@ -2049,7 +2049,10 @@ class AISession:
                 return self._backend.search_messages_with_context(
                     query, context, message_type, tool
                 )
-            # Non-Claude: no context support, return plain messages
+            # Non-Claude: context not available; wrap plain results as ContextMatch
+            # so callers always receive list[ContextMatch] when context>0 (consistent API).
+            plain = self._backend.search_messages(query, message_type)
+            return [ContextMatch(match=m, context_before=[], context_after=[]) for m in plain]
         if self._is_claude:
             return self._backend.search_messages(query, message_type, tool)
         if tool:
@@ -2232,7 +2235,11 @@ class AISession:
         patterns: "list | None" = None,
         limit: int = 50,
     ) -> "list[CorrectionMatch]":
-        """Find user messages where Claude was corrected. Claude-only.
+        """Find user messages where corrections were given to the AI.
+
+        For Claude Code sessions: fast direct JSONL scan.
+        For AI Studio / Gemini CLI sessions: uses get_sessions() + get_messages() API.
+        Both return list[CorrectionMatch] sorted by timestamp descending.
 
         Args:
             since:          Only search sessions after this date.
@@ -2244,14 +2251,48 @@ class AISession:
         Returns:
             list[CorrectionMatch] sorted by timestamp descending.
         """
-        return self._claude_only(
-            "find_corrections", [],
-            project_filter=project_filter,
-            since=since,
-            until=until,
-            patterns=patterns,
-            limit=limit,
+        if self._is_claude:
+            return self._backend.find_corrections(
+                project_filter=project_filter,
+                since=since,
+                until=until,
+                patterns=patterns,
+                limit=limit,
+            )
+        # Generic fallback: iterate sessions + messages
+        _patterns = patterns or DEFAULT_CORRECTION_PATTERNS
+        compiled = [
+            (cat, re.compile("|".join(kws), re.IGNORECASE), kws)
+            for cat, kws in _patterns
+        ]
+        results: list = []
+        sessions = self.get_sessions(
+            project_filter=project_filter, since=since, until=until
         )
+        for session_info in sessions:
+            messages = self.get_messages(session_info.session_id, message_type="user")
+            for msg in messages:
+                if since and msg.timestamp and msg.timestamp < since:
+                    continue
+                if until and msg.timestamp and msg.timestamp > until:
+                    continue
+                content = msg.content or ""
+                if not content:
+                    continue
+                for cat, regex, _kws in compiled:
+                    m = regex.search(content)
+                    if m:
+                        results.append(CorrectionMatch(
+                            session_id=session_info.session_id,
+                            project_dir=getattr(session_info, "project_dir", ""),
+                            timestamp=msg.timestamp,
+                            content=content,
+                            category=cat,
+                            matched_pattern=m.group(0),
+                        ))
+                        break
+        results.sort(key=lambda x: x.timestamp, reverse=True)
+        return results[:limit] if limit else results
 
     def get_planning_usage(
         self,
@@ -2262,7 +2303,11 @@ class AISession:
         until: "str | None" = None,
         limit: int = 50,
     ) -> "list[PlanningCommandCount]":
-        """Count slash command usage across sessions. Claude-only.
+        """Count slash command usage across sessions.
+
+        For Claude Code sessions: fast direct JSONL scan.
+        For AI Studio / Gemini CLI sessions: uses get_sessions() + get_messages() API.
+        Both return list[PlanningCommandCount] sorted by count descending.
 
         Args:
             commands:       Filter to specific command strings. Default None = all.
@@ -2274,16 +2319,71 @@ class AISession:
         Returns:
             list[PlanningCommandCount] sorted by count descending.
         """
-        results = self._claude_only(
-            "analyze_planning_usage", [],
-            commands=commands,
-            project_filter=project_filter,
-            since=since,
-            until=until,
+        if self._is_claude:
+            results = self._backend.analyze_planning_usage(
+                commands=commands,
+                project_filter=project_filter,
+                since=since,
+                until=until,
+            )
+            return results[:limit] if limit else results
+        # Generic fallback: iterate sessions + messages
+        discovery_mode = commands is None
+        compiled = (
+            []
+            if discovery_mode
+            else [(cmd, re.compile(cmd, re.IGNORECASE)) for cmd in commands]  # type: ignore[union-attr]
         )
-        if limit:
-            results = results[:limit]
-        return results
+        from collections import defaultdict as _defaultdict
+        counts: dict = _defaultdict(int)
+        session_ids_by_cmd: dict = _defaultdict(set)
+        project_dirs_by_cmd: dict = _defaultdict(set)
+        sessions = self.get_sessions(
+            project_filter=project_filter, since=since, until=until
+        )
+        for session_info in sessions:
+            messages = self.get_messages(
+                session_info.session_id,
+                message_type="user" if discovery_mode else None,
+            )
+            for msg in messages:
+                if since and msg.timestamp and msg.timestamp < since:
+                    continue
+                if until and msg.timestamp and msg.timestamp > until:
+                    continue
+                content = msg.content or ""
+                if not content:
+                    continue
+                if discovery_mode:
+                    m = _SLASH_CMD_DISCOVERY_RE.match(content.lstrip())
+                    if m:
+                        cmd = m.group(0)
+                        counts[cmd] += 1
+                        session_ids_by_cmd[cmd].add(msg.session_id)
+                        project_dirs_by_cmd[cmd].add(
+                            getattr(session_info, "project_dir", "")
+                        )
+                else:
+                    for cmd, regex in compiled:
+                        if regex.search(content):
+                            counts[cmd] += 1
+                            session_ids_by_cmd[cmd].add(msg.session_id)
+                            project_dirs_by_cmd[cmd].add(
+                                getattr(session_info, "project_dir", "")
+                            )
+        if not counts:
+            return []
+        results = [
+            PlanningCommandCount(
+                command=cmd,
+                count=cnt,
+                session_ids=sorted(session_ids_by_cmd[cmd]),
+                project_dirs=sorted(project_dirs_by_cmd[cmd]),
+            )
+            for cmd, cnt in counts.items()
+        ]
+        results.sort(key=lambda x: x.count, reverse=True)
+        return results[:limit] if limit else results
 
     def get_file_edits(
         self,
@@ -2315,11 +2415,48 @@ class AISession:
         )
 
     def get_session_markdown(self, session_id: str) -> str:
-        """Export session messages as a markdown string. Claude-only.
+        """Export session messages as a markdown string.
 
-        Returns markdown string — caller handles writing to file.
+        For Claude Code sessions: full markdown including git branch, cwd metadata.
+        For AI Studio / Gemini CLI sessions: markdown from message content (project display name used).
+
+        Returns:
+            Markdown string — caller handles writing to file.
+            Returns "" if session not found.
         """
-        return self._claude_only("export_session_markdown", "", session_id)
+        if self._is_claude:
+            return self._claude_only("export_session_markdown", "", session_id)
+        # Generic fallback: build markdown from messages API
+        messages = self.get_messages(session_id)
+        if not messages:
+            return ""
+        # Look up session info for display name
+        sessions = self.get_sessions()
+        session_info = next(
+            (s for s in sessions
+             if s.session_id.startswith(session_id) or session_id.startswith(s.session_id[:8])),
+            None,
+        )
+        ts_first = messages[0].timestamp if messages else ""
+        project = session_info.project_display if session_info else session_id[:8]
+        provider = getattr(session_info, "provider", self._source or "unknown")
+        short_id = session_id[:8]
+        header = (
+            f"# Session {short_id}\n\n"
+            f"**Date**: {ts_first}\n"
+            f"**Project**: {project}\n"
+            f"**Source**: {provider}\n"
+            f"**Messages**: {len(messages)}\n\n"
+            f"---\n\n"
+        )
+        lines_md = []
+        for msg in messages:
+            msg_type = msg.type.value if hasattr(msg.type, "value") else str(msg.type)
+            if msg_type == "system":
+                continue
+            ts_short = msg.timestamp[:16].replace("T", " ") if msg.timestamp else "\u2014"
+            lines_md.append(f"## [{msg_type}] {ts_short}\n\n{msg.content}\n\n---\n")
+        return header + "\n".join(lines_md)
 
     def export_sessions_markdown(
         self,
@@ -2327,8 +2464,9 @@ class AISession:
         until: "str | None" = None,
         project_filter: "str | None" = None,
     ) -> "list[str]":
-        """Export multiple sessions as markdown strings. Claude-only.
+        """Export multiple sessions as markdown strings.
 
+        Works for all backends (Claude, AI Studio, Gemini CLI).
         Bulk version of get_session_markdown(). Returns one markdown string per
         session, newest-first.
 
@@ -2352,16 +2490,71 @@ class AISession:
         return self._claude_only("get_clipboard_content", [], session_id)
 
     def get_session_analysis(self, session_id: str) -> "SessionAnalysis | None":
-        """Per-session statistics: message counts, tool usage, files touched. Claude-only."""
-        return self._claude_only("analyze_session", None, session_id)
+        """Per-session statistics: message counts, tool usage, and files touched.
+
+        For Claude Code sessions: full analysis including tool usage and files touched.
+        For AI Studio / Gemini CLI sessions: message counts and timestamps only
+        (tool_uses_by_name={}, files_touched=[] — not tracked by non-Claude backends).
+        """
+        if self._is_claude:
+            return self._backend.analyze_session(session_id)
+        # Generic fallback: compute stats from messages API
+        messages = self.get_messages(session_id)
+        if not messages:
+            return None
+        # Look up session info for project_dir
+        sessions = self.get_sessions()
+        session_info = next(
+            (s for s in sessions
+             if s.session_id.startswith(session_id) or session_id.startswith(s.session_id[:8])),
+            None,
+        )
+        project_dir = getattr(session_info, "project_dir", "") if session_info else ""
+        sid = session_info.session_id if session_info else session_id
+        user_count = sum(1 for m in messages if m.type == MessageType.USER)
+        assistant_count = sum(1 for m in messages if m.type == MessageType.ASSISTANT)
+        ts_first = messages[0].timestamp if messages else ""
+        ts_last = messages[-1].timestamp if messages else ""
+        return SessionAnalysis(
+            session_id=sid,
+            project_dir=project_dir,
+            total_lines=len(messages),
+            user_count=user_count,
+            assistant_count=assistant_count,
+            tool_uses_by_name={},   # not tracked by non-Claude backends
+            files_touched=[],        # not tracked by non-Claude backends
+            timestamp_first=ts_first,
+            timestamp_last=ts_last,
+        )
 
     def get_session_timeline(
         self,
         session_id: str,
         preview_chars: int = 150,
     ) -> "list[dict]":
-        """Chronological event timeline for one session. Claude-only."""
-        return self._claude_only("timeline_session", [], session_id, preview_chars)
+        """Chronological event timeline for one session.
+
+        For Claude Code sessions: full timeline including tool call counts per message.
+        For AI Studio / Gemini CLI sessions: message type, timestamp, and content preview
+        (tool_count=0 — tool invocations are not tracked by non-Claude backends).
+        """
+        if self._is_claude:
+            return self._backend.timeline_session(session_id, preview_chars)
+        # Generic fallback: build from messages API
+        messages = self.get_messages(session_id)
+        events = []
+        for msg in messages:
+            content = msg.content or ""
+            msg_type = msg.type.value if hasattr(msg.type, "value") else str(msg.type)
+            if msg_type == "system":
+                continue  # skip system messages; consistent with Claude's timeline_session()
+            events.append({
+                "type": msg_type,
+                "timestamp": msg.timestamp,
+                "tool_count": 0,   # tool invocations not tracked in non-Claude message format
+                "content_preview": content[:preview_chars],
+            })
+        return events
 
     def get_original_path(self, filename: str) -> "str | None":
         return self._claude_only("get_original_path", None, filename)

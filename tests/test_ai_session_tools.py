@@ -5301,34 +5301,261 @@ class TestSessionBackendSearchMessages:
 
 
 class TestSessionBackendDegradation:
-    """Test graceful degradation of Claude-only operations on multi-source backend."""
+    """Test graceful degradation and generic fallbacks on multi-source backend."""
 
-    def test_find_corrections_returns_empty_on_aistudio(self):
-        """find_corrections (Claude-only) returns [] on non-Claude with no crash."""
+    def _make_mock_multi_source(self, sessions_data: list | None = None):
+        """Build a minimal MockSource + MultiSourceEngine with known sessions/messages."""
         from ai_session_tools.engine import AISession, MultiSourceEngine
-        engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
-        result = engine.find_corrections()
-        assert result == []
+        from ai_session_tools.models import MessageType, SessionInfo, SessionMessage
 
-    def test_export_session_returns_empty_string_on_aistudio(self):
-        """get_session_markdown (Claude-only) returns "" on non-Claude."""
+        class MockSource:
+            def list_sessions(self):
+                if not sessions_data:
+                    return []
+                return [
+                    SessionInfo(
+                        session_id=sd["session_id"],
+                        project_dir=sd.get("project_dir", "test"),
+                        cwd=sd.get("cwd", "/tmp"),
+                        git_branch=sd.get("git_branch", "main"),
+                        timestamp_first=sd.get("ts", "2026-01-01T00:00:00"),
+                        timestamp_last=sd.get("ts", "2026-01-01T01:00:00"),
+                        message_count=len(sd.get("messages", [])),
+                        has_compact_summary=False,
+                        provider="mock",
+                    )
+                    for sd in sessions_data
+                ]
+
+            def read_session(self, session_info):
+                if not sessions_data:
+                    return []
+                for sd in sessions_data:
+                    if sd["session_id"] == session_info.session_id:
+                        return [
+                            SessionMessage(
+                                type=MessageType(m["type"]),
+                                timestamp=m.get("ts", "2026-01-01T00:00:00"),
+                                content=m["content"],
+                                session_id=session_info.session_id,
+                            )
+                            for m in sd.get("messages", [])
+                        ]
+                return []
+
+            def search_messages(self, query: str, message_type: str | None = None):
+                """Support MultiSourceEngine.search_messages() iteration."""
+                import re
+                results = []
+                for sd in (sessions_data or []):
+                    for m in sd.get("messages", []):
+                        if message_type and m["type"] != message_type:
+                            continue
+                        if re.search(query, m["content"], re.IGNORECASE):
+                            results.append(SessionMessage(
+                                type=MessageType(m["type"]),
+                                timestamp=m.get("ts", "2026-01-01T00:00:00"),
+                                content=m["content"],
+                                session_id=sd["session_id"],
+                            ))
+                return results
+
+            def stats(self):
+                return {"mock_sessions": len(sessions_data or [])}
+
+        return AISession._from_backend(MultiSourceEngine([MockSource()]), "aistudio")
+
+    # ── Regression: Bug #34 — search_messages(context=N) on multi-source ───────
+
+    def test_search_messages_context_returns_context_match_on_multi_source(self):
+        """Regression #34: search_messages(context=N>0) ALWAYS returns list[ContextMatch],
+        not list[SessionMessage], even on multi-source backends."""
         from ai_session_tools.engine import AISession, MultiSourceEngine
+        from ai_session_tools.models import ContextMatch
         engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
-        result = engine.get_session_markdown("session-id")
+        result = engine.search_messages("anything", context=2)
+        # Even with no results, return type must be list (not crash)
+        assert isinstance(result, list)
+        # If any results, they must all be ContextMatch (not SessionMessage)
+        for item in result:
+            assert isinstance(item, ContextMatch), (
+                f"search_messages(context=2) must return ContextMatch, got {type(item)}"
+            )
+
+    def test_search_messages_context_wraps_plain_messages_as_context_match(self):
+        """Regression #34: non-Claude search results with context>0 are wrapped as ContextMatch."""
+        from ai_session_tools.models import ContextMatch
+        sessions_data = [
+            {
+                "session_id": "s1",
+                "ts": "2026-01-01T00:00:00",
+                "messages": [
+                    {"type": "user", "content": "hello world", "ts": "2026-01-01T00:00:00"},
+                    {"type": "assistant", "content": "hi there", "ts": "2026-01-01T00:01:00"},
+                ],
+            }
+        ]
+        engine = self._make_mock_multi_source(sessions_data)
+        result = engine.search_messages("hello", context=1)
+        # Must be ContextMatch, not SessionMessage
+        assert isinstance(result, list)
+        for item in result:
+            assert isinstance(item, ContextMatch), (
+                f"Expected ContextMatch, got {type(item).__name__}"
+            )
+
+    def test_search_messages_no_context_returns_session_messages_on_multi_source(self):
+        """search_messages(context=0) still returns list[SessionMessage] on multi-source."""
+        from ai_session_tools.models import SessionMessage
+        sessions_data = [
+            {
+                "session_id": "s1",
+                "ts": "2026-01-01T00:00:00",
+                "messages": [
+                    {"type": "user", "content": "hello world", "ts": "2026-01-01T00:00:00"},
+                ],
+            }
+        ]
+        engine = self._make_mock_multi_source(sessions_data)
+        result = engine.search_messages("hello", context=0)
+        assert isinstance(result, list)
+        for item in result:
+            assert isinstance(item, SessionMessage), (
+                f"context=0 must return SessionMessage, got {type(item).__name__}"
+            )
+
+    # ── Generalized operations now work on multi-source ─────────────────────────
+
+    def test_get_session_analysis_works_on_multi_source(self):
+        """Regression #35: get_session_analysis() now works for non-Claude backends."""
+        from ai_session_tools.models import SessionAnalysis
+        sessions_data = [
+            {
+                "session_id": "s1",
+                "project_dir": "test-project",
+                "ts": "2026-01-01T00:00:00",
+                "messages": [
+                    {"type": "user", "content": "hi", "ts": "2026-01-01T00:00:00"},
+                    {"type": "assistant", "content": "hello", "ts": "2026-01-01T00:01:00"},
+                ],
+            }
+        ]
+        engine = self._make_mock_multi_source(sessions_data)
+        result = engine.get_session_analysis("s1")
+        assert result is not None, "get_session_analysis must return SessionAnalysis on non-Claude"
+        assert isinstance(result, SessionAnalysis)
+        assert result.user_count == 1
+        assert result.assistant_count == 1
+        assert result.total_lines == 2
+
+    def test_get_session_analysis_returns_none_for_unknown_session(self):
+        """get_session_analysis() returns None when session not found on non-Claude."""
+        engine = self._make_mock_multi_source([])
+        result = engine.get_session_analysis("nonexistent")
+        assert result is None
+
+    def test_get_session_timeline_works_on_multi_source(self):
+        """Regression #35: get_session_timeline() now works for non-Claude backends."""
+        sessions_data = [
+            {
+                "session_id": "s1",
+                "ts": "2026-01-01T00:00:00",
+                "messages": [
+                    {"type": "user", "content": "how are you?", "ts": "2026-01-01T00:00:00"},
+                    {"type": "assistant", "content": "fine thanks", "ts": "2026-01-01T00:01:00"},
+                ],
+            }
+        ]
+        engine = self._make_mock_multi_source(sessions_data)
+        result = engine.get_session_timeline("s1")
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["type"] == "user"
+        assert result[0]["tool_count"] == 0  # not tracked for non-Claude
+        assert "content_preview" in result[0]
+        assert "how are you?" in result[0]["content_preview"]
+
+    def test_get_session_markdown_works_on_multi_source(self):
+        """Regression #35: get_session_markdown() now works for non-Claude backends."""
+        sessions_data = [
+            {
+                "session_id": "s1",
+                "ts": "2026-01-01T00:00:00",
+                "messages": [
+                    {"type": "user", "content": "test message", "ts": "2026-01-01T00:00:00"},
+                ],
+            }
+        ]
+        engine = self._make_mock_multi_source(sessions_data)
+        result = engine.get_session_markdown("s1")
+        assert isinstance(result, str)
+        assert len(result) > 0
+        assert "test message" in result
+
+    def test_get_session_markdown_returns_empty_for_unknown_session(self):
+        """get_session_markdown() returns "" when session not found on non-Claude."""
+        engine = self._make_mock_multi_source([])
+        result = engine.get_session_markdown("nonexistent")
         assert result == ""
 
-    def test_analyze_planning_usage_returns_empty_on_aistudio(self):
-        """get_planning_usage (Claude-only) returns [] on non-Claude."""
+    def test_find_corrections_works_on_multi_source(self):
+        """Regression #35: find_corrections() now works for non-Claude backends."""
+        from ai_session_tools.models import CorrectionMatch
+        sessions_data = [
+            {
+                "session_id": "s1",
+                "ts": "2026-01-01T00:00:00",
+                "messages": [
+                    {"type": "user", "content": "you deleted my code", "ts": "2026-01-01T00:00:00"},
+                    {"type": "user", "content": "normal message", "ts": "2026-01-01T00:01:00"},
+                ],
+            }
+        ]
+        engine = self._make_mock_multi_source(sessions_data)
+        result = engine.find_corrections()
+        assert isinstance(result, list)
+        # "you deleted" matches the "regression" correction pattern
+        assert len(result) >= 1
+        assert all(isinstance(r, CorrectionMatch) for r in result)
+        assert any("deleted" in r.content for r in result)
+
+    def test_get_planning_usage_works_on_multi_source(self):
+        """Regression #35: get_planning_usage() now works for non-Claude backends."""
+        from ai_session_tools.models import PlanningCommandCount
+        sessions_data = [
+            {
+                "session_id": "s1",
+                "ts": "2026-01-01T00:00:00",
+                "messages": [
+                    {"type": "user", "content": "/commit fix the bug", "ts": "2026-01-01T00:00:00"},
+                    {"type": "user", "content": "/commit another commit", "ts": "2026-01-01T00:01:00"},
+                    {"type": "assistant", "content": "done", "ts": "2026-01-01T00:02:00"},
+                ],
+            }
+        ]
+        engine = self._make_mock_multi_source(sessions_data)
+        result = engine.get_planning_usage()
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        assert all(isinstance(r, PlanningCommandCount) for r in result)
+        commit_cmd = next((r for r in result if r.command == "/commit"), None)
+        assert commit_cmd is not None, "/commit should be discovered"
+        assert commit_cmd.count == 2
+
+    # ── Truly Claude-only ops still return empty/None on non-Claude ──────────────
+
+    def test_search_files_returns_empty_on_multi_source(self):
+        """search_files (file ops) returns [] on non-Claude with graceful warning."""
         from ai_session_tools.engine import AISession, MultiSourceEngine
         engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
-        result = engine.get_planning_usage()
+        result = engine.search_files("*.py")
         assert result == []
 
-    def test_timeline_session_returns_empty_on_aistudio(self):
-        """get_session_timeline (Claude-only) returns [] on non-Claude."""
+    def test_get_versions_returns_empty_on_multi_source(self):
+        """get_versions (file ops) returns [] on non-Claude with graceful warning."""
         from ai_session_tools.engine import AISession, MultiSourceEngine
         engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
-        result = engine.get_session_timeline("session-id")
+        result = engine.get_versions("cli.py")
         assert result == []
 
     def test_get_statistics_always_returns_dict(self):
