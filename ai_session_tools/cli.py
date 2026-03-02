@@ -1159,13 +1159,51 @@ def _do_extract(  # noqa: C901
             raise typer.Exit(code=1)
 
 
-def _do_history_display(engine: SessionRecoveryEngine, name: str, versions: Optional[List[FileVersion]] = None) -> None:
-    """Show version history table (read-only, no disk writes)."""
+def _do_history_display(
+    engine: SessionRecoveryEngine,
+    name: str,
+    versions: Optional[List[FileVersion]] = None,
+    fmt: Optional[str] = None,
+) -> None:
+    """Show version history table (read-only, no disk writes).
+
+    Supports fmt='table' (Rich table), 'json', 'csv', 'plain'.
+    """
+    if fmt is None:
+        fmt = _cfg_default("format", "table")
     if versions is None:
         versions = engine.get_versions(name)
     if not versions:
         console.print(f"[yellow]No versions found for:[/yellow] {name}")
         return
+
+    # Build row dicts with delta (needs prev-row context, so computed before render)
+    rows = []
+    prev_lines = None
+    for v in versions:
+        if prev_lines is None:
+            delta = "—"
+        elif v.line_count >= prev_lines:
+            delta = f"+{v.line_count - prev_lines}"
+        else:
+            delta = str(v.line_count - prev_lines)
+        rows.append({
+            "version": f"v{v.version_num}",
+            "lines": v.line_count,
+            "delta_lines": delta,
+            "timestamp": v.timestamp or "—",
+            "session": v.session_id[:8],
+        })
+        prev_lines = v.line_count
+
+    if fmt == "json":
+        sys.stdout.write(json.dumps(rows, indent=2) + "\n")
+        return
+    if fmt in ("csv", "plain"):
+        for r in rows:
+            console.print(f"{r['version']}  {r['lines']}  {r['delta_lines']}  {r['timestamp']}  {r['session']}")
+        return
+    # Default: Rich table
     from rich.table import Table
     table = Table(title=f"Version history: {name}  ({len(versions)} versions)")
     table.add_column("Version", style="cyan", justify="right")
@@ -1173,17 +1211,8 @@ def _do_history_display(engine: SessionRecoveryEngine, name: str, versions: Opti
     table.add_column("\u0394Lines", justify="right")
     table.add_column("Timestamp", style="dim")
     table.add_column("Session", style="blue")
-    prev_lines = None
-    for v in versions:
-        if prev_lines is None:
-            delta = "\u2014"
-        elif v.line_count >= prev_lines:
-            delta = f"+{v.line_count - prev_lines}"
-        else:
-            delta = str(v.line_count - prev_lines)
-        short_session = v.session_id[:8]
-        table.add_row(f"v{v.version_num}", str(v.line_count), delta, v.timestamp or "\u2014", short_session)
-        prev_lines = v.line_count
+    for r in rows:
+        table.add_row(r["version"], str(r["lines"]), r["delta_lines"], r["timestamp"], r["session"])
     console.print(table)
 
 
@@ -1856,8 +1885,15 @@ def _do_get(
     console.print(f"\n[bold]Found {len(messages_list)} messages[/bold]")
 
 
-def _do_stats(engine, after: Optional[str] = None, before: Optional[str] = None) -> None:
+def _do_stats(
+    engine,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    fmt: Optional[str] = None,
+) -> None:
     """Show recovery statistics. Default after=None, before=None: all sessions shown."""
+    if fmt is None:
+        fmt = _cfg_default("format", "table")
     stats_data = engine.get_statistics(after=after, before=before)
     if isinstance(stats_data, dict):
         sessions = stats_data.get("total_sessions", 0)
@@ -1879,11 +1915,31 @@ def _do_stats(engine, after: Optional[str] = None, before: Optional[str] = None)
         largest_edits = stats_data.largest_file_edits
         per_source = {}
 
+    if fmt == "json":
+        out = {
+            "total_sessions": sessions,
+            "total_files": files,
+            "total_versions": versions,
+            "largest_file": largest,
+            "largest_file_edits": largest_edits,
+        }
+        if per_source:
+            out["per_source"] = per_source
+        sys.stdout.write(json.dumps(out, indent=2) + "\n")
+        return
+
     breakdown = ""
     if len(per_source) > 1:
         breakdown = "\n" + "\n".join(
             f"    {src:<14} {count}" for src, count in sorted(per_source.items())
         )
+
+    if fmt in ("csv", "plain"):
+        console.print(f"Sessions: {sessions}")
+        console.print(f"Files: {files}")
+        console.print(f"Versions: {versions}")
+        console.print(f"Largest File: {largest} ({largest_edits} edits)")
+        return
 
     console.print(
         f"""
@@ -2717,13 +2773,15 @@ def history(
     export_dir: Optional[str] = typer.Option(None, "--export-dir", help="Where to write exported files."),
     stdout_mode: bool = typer.Option(False, "--stdout", help="Print all versions to stdout with === v1 === headers."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --export: show what would be written without writing."),
+    fmt: Optional[str] = _OPT_FORMAT,
+    provider: Optional[str] = _OPT_PROVIDER,
 ) -> None:
     """Show all recorded versions of a file across sessions.
 
     Equivalent to 'aise files history'. Creates a table of all recorded versions.
     READ-ONLY — no files are written unless you use --export or --stdout.
     """
-    engine = ctx.obj.get("engine") if ctx.obj else None
+    engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
@@ -2739,7 +2797,7 @@ def history(
     if stdout_mode:
         _do_history_stdout(engine, name, versions=versions)
     else:
-        _do_history_display(engine, name, versions=versions)
+        _do_history_display(engine, name, versions=versions, fmt=fmt)
         if export:
             _do_history_export(engine, name, export_dir=export_dir, dry_run=dry_run, versions=versions)
         elif dry_run:
@@ -2777,6 +2835,7 @@ def get(
 def stats(
     ctx: typer.Context,
     provider: Optional[str] = _OPT_PROVIDER,
+    fmt: Optional[str] = _OPT_FORMAT,
     since: Optional[str] = _OPT_SINCE,
     until: Optional[str] = _OPT_UNTIL,
     when: Optional[str] = _OPT_WHEN,
@@ -2789,6 +2848,7 @@ def stats(
         aise stats                              # all configured sources (no date restriction)
         aise stats --provider aistudio         # AI Studio only
         aise stats --provider claude           # Claude Code only
+        aise stats --format json               # machine-readable output
         aise stats --since 7d                  # sessions from the last 7 days
         aise stats --when 202X                 # sessions in the 2020s decade
         aise stats --since 2026-01 --until 2026-03  # January through March 2026
@@ -2798,7 +2858,7 @@ def stats(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    _do_stats(engine, after=after, before=before)
+    _do_stats(engine, after=after, before=before, fmt=fmt)
 
 
 # ── Config app ───────────────────────────────────────────────────────────────
