@@ -1053,11 +1053,16 @@ def _filter_versions(
     # --exclude-sessions: remove matching sessions
     if exclude_sessions:
         result = [v for v in result if not any(v.session_id.startswith(i) for i in exclude_sessions)]
-    # --since / --until: filter by version timestamp
+    # --since / --until: filter by version timestamp.
+    # FileVersion.timestamp uses space separator ("2026-01-15 14:23") while since/until
+    # use "T" separator ("2026-01-15T00:00:00").  Normalise the comparison string to use
+    # space so ASCII-order comparison is consistent: space (32) matches space (32).
     if since:
-        result = [v for v in result if v.timestamp and v.timestamp >= since[:len(v.timestamp)]]
+        since_cmp = since.replace("T", " ")
+        result = [v for v in result if v.timestamp and v.timestamp >= since_cmp[:len(v.timestamp)]]
     if until:
-        result = [v for v in result if v.timestamp and v.timestamp <= until[:len(v.timestamp)]]
+        until_cmp = until.replace("T", " ")
+        result = [v for v in result if v.timestamp and v.timestamp <= until_cmp[:len(v.timestamp)]]
     return result
 
 

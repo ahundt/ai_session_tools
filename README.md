@@ -36,6 +36,13 @@ JSON and dig through dozens of folders.
 
 Works as a CLI tool (`aise`) and as an importable Python library (`from ai_session_tools import ...`).
 
+### Claude Code slash command
+
+`aise` is also available as a Claude Code slash command via the
+[autorun](https://github.com/ahundt/autorun) plugin.  Install autorun, then
+use `/ar:claude-session-tools` inside Claude Code to search and analyse your
+AI session history without leaving the editor.
+
 ## Install
 
 ```bash

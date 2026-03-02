@@ -90,11 +90,19 @@ def load_config() -> dict:
         content = config_path.read_text(encoding="utf-8")
         raw = json.loads(content)
         migrated, changed = _migrate_config(raw)
-        if changed:
-            # Silently rewrite the config file with canonical key names.
-            config_path.write_text(json.dumps(migrated, indent=2), encoding="utf-8")
+        # Cache the migrated config BEFORE attempting the write so that a
+        # write failure (e.g. read-only filesystem) does not leave _config_cache
+        # unset, which would cause load_config() to fall through and return {}
+        # (silently losing all user config for the duration of the process).
         _config_cache = migrated
         _config_cache_key = current_key
+        if changed:
+            # Silently rewrite the config file with canonical key names.
+            # A write failure must NOT affect the in-process cache — use a
+            # separate suppress context so OSError from write doesn't abort
+            # the outer block before _config_cache is set.
+            with contextlib.suppress(OSError):
+                config_path.write_text(json.dumps(migrated, indent=2), encoding="utf-8")
         return _config_cache
 
     # File missing/unreadable: cache empty dict keyed to this path so we don't re-hit disk

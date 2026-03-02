@@ -311,6 +311,19 @@ class FilterSpec:
             return False
         return True
 
+    def __post_init__(self) -> None:
+        """Normalize since/until if they look like duration shorthands or non-ISO strings.
+
+        Allows ``FilterSpec(since="7d")`` to work correctly even without using the
+        builder methods.  Builder methods (``with_since``, ``with_until``, etc.) call
+        ``_resolve_date`` themselves, so the double-resolution is idempotent for
+        already-resolved ISO strings (they start with four digits).
+        """
+        if self.since and not self.since[:4].isdigit():
+            self.since = _resolve_date(self.since, "start")
+        if self.until and not self.until[:4].isdigit():
+            self.until = _resolve_date(self.until, "end")
+
     def matches_datetime(self, datetime_str: Optional[str]) -> bool:
         """Check if datetime falls within since/until range.
 
@@ -321,11 +334,13 @@ class FilterSpec:
             datetime_str: ISO datetime string (e.g. "2026-02-22" or "2026-02-22T14:30:00"), or None.
 
         Returns:
-            True if datetime passes filter. Files with no datetime (None) pass when no filter is set;
-            are excluded when a filter IS set (conservative: unknown datetime treated as out-of-range).
+            True if datetime passes filter. Files with no datetime (None or empty string) pass
+            when no filter is set; are excluded when a filter IS set (conservative: unknown
+            datetime treated as out-of-range).
         """
-        if not datetime_str:
-            return not (self.since or self.until)
+        # Use explicit equality checks rather than truthiness to avoid "0" being falsy
+        if datetime_str is None or datetime_str == "":
+            return self.since is None and self.until is None
         if self.since or self.until:
             # Truncate to 19 chars to strip timezone designators (+00:00, Z) and
             # sub-second precision so that all sources compare correctly against

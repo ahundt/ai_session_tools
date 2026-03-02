@@ -85,15 +85,24 @@ class Filter(Generic[T]):
         """OR composition: item must pass at LEAST ONE of the two filters.
 
         Wrapped as a single disjunctive predicate to preserve AND-chain semantics.
+        An empty filter (no predicates) contributes nothing to OR — it is treated as
+        "no match" rather than "match all" to avoid vacuous truth surprising behaviour.
+        Use a plain ``Filter()`` / ``SearchFilter()`` with no predicates to pass all items.
 
         Example::
             py_or_ts = SearchFilter().by_extension("py") | SearchFilter().by_extension("ts")
+            # Only files with .py OR .ts extension are returned.
+            # (SearchFilter() | py_filter) == py_filter — empty side is ignored.
         """
         left_preds = list(self._predicates)
         right_preds = list(other._predicates)
 
         def _or_predicate(item: T) -> bool:
-            return all(p(item) for p in left_preds) or all(p(item) for p in right_preds)
+            # Guard against vacuous truth: all([]) == True would make an empty filter
+            # pass everything in an OR. Instead, an empty predicate list means "no match".
+            left_pass = bool(left_preds) and all(p(item) for p in left_preds)
+            right_pass = bool(right_preds) and all(p(item) for p in right_preds)
+            return left_pass or right_pass
 
         result = type(self)()
         result._predicates.append(_or_predicate)

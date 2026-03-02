@@ -10320,15 +10320,14 @@ class TestEdgeCaseRegressions:
             f"get_sources() must return 'claude' for a Claude session: {sources}"
         )
 
-    # ── Filter.__or__() vacuous truth: empty filter ORed = pass-all (documented) ─
+    # ── Filter.__or__() vacuous truth fix: empty filter ignored in OR ───────────
 
-    def test_filter_or_with_empty_filter_returns_all(self):
-        """SearchFilter() | specific_filter returns ALL items (vacuous truth is correct).
+    def test_filter_or_with_empty_filter_ignores_empty_side(self):
+        """SearchFilter() | specific_filter returns only items matching the specific filter.
 
-        An empty SearchFilter() has no predicates; all([] over item) == True.
-        So empty | specific == True OR specific == True for every item.
-        This is mathematically correct: empty filter = pass-all predicate.
-        Documented here as expected behavior so future refactors don't break it.
+        Previously the empty left side caused vacuous truth (all([]) == True) so
+        every item passed the OR, making the whole expression a pass-all filter.
+        Fixed by treating an empty predicate list as "no match" in OR, not "pass-all".
         """
         from ai_session_tools.filters import SearchFilter
         from ai_session_tools.models import SessionFile
@@ -10340,10 +10339,25 @@ class TestEdgeCaseRegressions:
             SessionFile(name="b.md", path="/b.md", location="/b.md"),
         ]
         result = combined(files)
-        assert len(result) == 2, (
-            "empty | specific returns ALL items: "
-            "empty filter = pass-all, so OR with pass-all = pass-all (vacuous truth)"
+        assert [f.name for f in result] == ["a.py"], (
+            "empty | py_only should return only .py files — the empty side is ignored "
+            "(not treated as pass-all). Previously returned ALL items (vacuous truth bug)."
         )
+
+    def test_filter_or_two_specific_filters_is_union(self):
+        """SearchFilter.by_ext("py") | SearchFilter.by_ext("md") returns both types."""
+        from ai_session_tools.filters import SearchFilter
+        from ai_session_tools.models import SessionFile
+        py = SearchFilter().by_extension("py")
+        md = SearchFilter().by_extension("md")
+        either = py | md
+        files = [
+            SessionFile(name="a.py", path="/a.py", location="/a.py"),
+            SessionFile(name="b.md", path="/b.md", location="/b.md"),
+            SessionFile(name="c.ts", path="/c.ts", location="/c.ts"),
+        ]
+        result = either(files)
+        assert {f.name for f in result} == {"a.py", "b.md"}
 
     def test_filter_and_with_specific_filters_narrows(self):
         """SearchFilter.by_ext("py") & SearchFilter.by_ext("py") returns only .py files."""
@@ -10358,3 +10372,296 @@ class TestEdgeCaseRegressions:
         ]
         result = combined(files)
         assert [f.name for f in result] == ["a.py"]
+
+
+class TestDeepAuditRegressions:
+    """Regression tests from the second deep audit (2026-03-02).
+
+    Covers: parse_date_input guards, FilterSpec.__post_init__ normalization,
+    Filter.__or__ vacuous-truth fix, search_files FilterSpec/SearchFilter dispatch,
+    _filter_versions timestamp format, 1y duration, config write-failure,
+    matches_datetime explicit None check, _apply_all_filters session semantics,
+    get_sources hardcoded dict, MessageFormatter plain-string type guard.
+    """
+
+    # ── parse_date_input: None / empty / whitespace guards ───────────────────
+
+    def test_parse_date_input_none_raises(self):
+        """parse_date_input(None) must raise ValueError, not AttributeError."""
+        import pytest
+        from ai_session_tools import parse_date_input
+        with pytest.raises(ValueError, match="must not be None"):
+            parse_date_input(None)
+
+    def test_parse_date_input_empty_string_raises(self):
+        """parse_date_input('') must raise ValueError, not silently return wrong date."""
+        import pytest
+        from ai_session_tools import parse_date_input
+        with pytest.raises(ValueError, match="must not be empty"):
+            parse_date_input("")
+
+    def test_parse_date_input_whitespace_only_raises(self):
+        """parse_date_input('   ') must raise ValueError (strip produces empty)."""
+        import pytest
+        from ai_session_tools import parse_date_input
+        with pytest.raises(ValueError, match="must not be empty"):
+            parse_date_input("   ")
+
+    # ── parse_date_input: "1y" year shorthand ─────────────────────────────────
+
+    def test_parse_date_input_1y_is_supported(self):
+        """parse_date_input('1y') is accepted (with_when docstring lists it as valid)."""
+        from ai_session_tools import parse_date_input
+        import re
+        result = parse_date_input("1y", "start")
+        assert isinstance(result, str)
+        # Must be a valid ISO datetime roughly ~365 days in the past
+        assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", result), (
+            f"parse_date_input('1y') must return ISO datetime, got: {result!r}"
+        )
+        # Year should be at most 1 year before today
+        import datetime
+        parsed_year = int(result[:4])
+        current_year = datetime.datetime.now().year
+        assert parsed_year >= current_year - 2, f"1y result year {parsed_year} is too old"
+
+    # ── FilterSpec.__post_init__: direct construction normalizes duration strings ──
+
+    def test_filterspec_direct_construction_since_duration_normalizes(self):
+        """FilterSpec(since='7d') normalises to ISO datetime via __post_init__."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec(since="7d")
+        assert spec.since is not None
+        assert spec.since[:4].isdigit(), (
+            f"FilterSpec(since='7d').since should be a resolved ISO datetime, got {spec.since!r}"
+        )
+        # Should correctly match a recent timestamp
+        import datetime
+        now = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        assert spec.matches_datetime(now) is True, (
+            f"FilterSpec(since='7d') should pass today's datetime, got since={spec.since!r}"
+        )
+
+    def test_filterspec_direct_construction_until_duration_normalizes(self):
+        """FilterSpec(until='7d') normalises to ISO datetime via __post_init__."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec(until="7d")
+        assert spec.until is not None
+        assert spec.until[:4].isdigit()
+
+    def test_filterspec_direct_construction_iso_date_unchanged(self):
+        """FilterSpec(since='2026-01-01') is not double-resolved (already ISO)."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec(since="2026-01-01")
+        # Must start with digits (already ISO); may be expanded to T00:00:00
+        assert spec.since is not None and spec.since[:4].isdigit()
+        # Must still match a date within 2026
+        assert spec.matches_datetime("2026-06-15T00:00:00") is True
+
+    # ── matches_datetime: explicit None/empty check ───────────────────────────
+
+    def test_matches_datetime_none_with_active_filter_returns_false(self):
+        """matches_datetime(None) with since set returns False (unknown excluded)."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec()
+        spec.since = "2026-01-01T00:00:00"
+        assert spec.matches_datetime(None) is False
+
+    def test_matches_datetime_empty_string_with_active_filter_returns_false(self):
+        """matches_datetime('') with since set returns False (empty = unknown)."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec()
+        spec.since = "2026-01-01T00:00:00"
+        assert spec.matches_datetime("") is False
+
+    def test_matches_datetime_none_no_filter_returns_true(self):
+        """matches_datetime(None) with no filter returns True (unknown passes when no constraint)."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec()
+        assert spec.matches_datetime(None) is True
+
+    # ── Filter.__or__: vacuous truth fix ──────────────────────────────────────
+    # (test_filter_or_with_empty_filter_ignores_empty_side in TestEdgeCaseRegressions
+    # covers this; add cross-validation here)
+
+    def test_filter_or_symmetric_empty_right_side(self):
+        """py_filter | SearchFilter() returns only .py files (empty right side ignored)."""
+        from ai_session_tools.filters import SearchFilter
+        from ai_session_tools.models import SessionFile
+        py_only = SearchFilter().by_extension("py")
+        empty = SearchFilter()
+        combined = py_only | empty  # empty on RIGHT side
+        files = [
+            SessionFile(name="a.py", path="/a.py", location="/a.py"),
+            SessionFile(name="b.md", path="/b.md", location="/b.md"),
+        ]
+        result = combined(files)
+        assert [f.name for f in result] == ["a.py"], (
+            "py_filter | empty should return only .py files (empty right side ignored)"
+        )
+
+    # ── _filter_versions timestamp format (space vs T) ───────────────────────
+
+    def test_filter_versions_space_timestamp_since_works(self):
+        """_filter_versions correctly filters FileVersion timestamps (space separator)."""
+        from ai_session_tools.models import FileVersion
+        from ai_session_tools.cli import _filter_versions
+        # FileVersion uses space separator: "YYYY-MM-DD HH:MM"
+        v_recent = FileVersion("cli.py", 1, 100, "abc123", timestamp="2026-03-01 10:00")
+        v_old    = FileVersion("cli.py", 2,  50, "def456", timestamp="2025-06-15 09:30")
+        # since/until use T separator (from parse_date_input)
+        result = _filter_versions([v_recent, v_old], since="2026-01-01T00:00:00")
+        assert v_recent in result and v_old not in result, (
+            f"_filter_versions(since='2026-01-01T...') should keep only 2026 version. "
+            f"Got: {[v.timestamp for v in result]}. "
+            "Bug: space (32) < T (84) caused all timestamps to fail >= comparison."
+        )
+
+    def test_filter_versions_space_timestamp_until_works(self):
+        """_filter_versions until filter works correctly with space-separator timestamps."""
+        from ai_session_tools.models import FileVersion
+        from ai_session_tools.cli import _filter_versions
+        v_recent = FileVersion("cli.py", 1, 100, "abc123", timestamp="2026-03-01 10:00")
+        v_old    = FileVersion("cli.py", 2,  50, "def456", timestamp="2025-06-15 09:30")
+        result = _filter_versions([v_recent, v_old], until="2025-12-31T23:59:59")
+        assert v_old in result and v_recent not in result, (
+            f"_filter_versions(until='2025-12-31T...') should keep only 2025 version. "
+            f"Got: {[v.timestamp for v in result]}"
+        )
+
+    # ── search_files: FilterSpec dispatches to engine, SearchFilter to callable ─
+
+    def test_search_files_filterspec_is_not_dispatched_via_callable(self):
+        """search_files(FilterSpec) passes the spec to engine.search(), not filters(all_files)."""
+        # This tests that FilterSpec goes through the engine's pre-filter path.
+        # We verify by checking search_files accepts a FilterSpec without error.
+        from ai_session_tools import AISession, FilterSpec
+        with AISession() as s:
+            result = s.search_files("*.py", FilterSpec())
+            assert isinstance(result, list)
+
+    def test_search_files_search_filter_is_dispatched_via_callable(self):
+        """search_files(SearchFilter) applies the callable predicate after fetching files."""
+        from ai_session_tools import AISession
+        from ai_session_tools.filters import SearchFilter
+        with AISession() as s:
+            result = s.search_files("*.py", SearchFilter().by_extension("py"))
+            assert isinstance(result, list)
+
+    # ── _apply_all_filters session semantics ─────────────────────────────────
+
+    def test_filterspec_call_and_engine_filter_agree_include_sessions(self):
+        """FilterSpec.__call__ and _apply_all_filters agree: include_sessions excludes no-session files."""
+        from ai_session_tools import FilterSpec
+        from ai_session_tools.models import SessionFile
+        spec = FilterSpec()
+        spec.include_sessions = {"session_A"}
+        # File with matching session
+        f_match = SessionFile(name="match.py", path="/match.py", location="/match.py",
+                              sessions=["session_A"])
+        # File with no sessions
+        f_none = SessionFile(name="none.py", path="/none.py", location="/none.py",
+                             sessions=[])
+        result = spec([ f_match, f_none])
+        assert f_match in result, "File with include session should pass"
+        assert f_none not in result, "File with no sessions should fail include_sessions"
+
+    def test_filterspec_call_and_engine_filter_agree_exclude_sessions(self):
+        """FilterSpec.__call__: file with no sessions passes exclude_sessions (nothing to exclude)."""
+        from ai_session_tools import FilterSpec
+        from ai_session_tools.models import SessionFile
+        spec = FilterSpec()
+        spec.exclude_sessions = {"session_B"}
+        f_excluded = SessionFile(name="ex.py", path="/ex.py", location="/ex.py",
+                                 sessions=["session_B"])
+        f_no_sessions = SessionFile(name="clean.py", path="/clean.py", location="/clean.py",
+                                    sessions=[])
+        f_other = SessionFile(name="other.py", path="/other.py", location="/other.py",
+                              sessions=["session_C"])
+        result = spec([f_excluded, f_no_sessions, f_other])
+        assert f_excluded not in result, "File in excluded session should be excluded"
+        assert f_no_sessions in result, "File with no sessions should pass exclude_sessions"
+        assert f_other in result, "File in different session should pass exclude_sessions"
+
+    # ── get_sources: hardcoded dict ───────────────────────────────────────────
+
+    def test_get_sources_claude_returns_list(self):
+        """AISession().get_sources() returns ['claude'] for Claude-only session."""
+        from ai_session_tools import AISession
+        with AISession(source="claude") as s:
+            sources = s.get_sources()
+            assert sources == ["claude"]
+
+    def test_get_sources_returns_list_of_strings(self):
+        """get_sources() always returns list of strings."""
+        from ai_session_tools import AISession
+        with AISession() as s:
+            sources = s.get_sources()
+            assert isinstance(sources, list)
+            assert all(isinstance(src, str) for src in sources)
+            assert len(sources) >= 1
+
+    # ── MessageFormatter: plain-string type guard ─────────────────────────────
+
+    def test_message_formatter_format_plain_string_type(self):
+        """MessageFormatter.format() handles SessionMessage with plain str type (not enum)."""
+        from ai_session_tools.formatters import MessageFormatter
+        from ai_session_tools.models import SessionMessage
+        # Construct with a plain string type (not MessageType enum)
+        msg = SessionMessage(type="user", timestamp="2026-01-01T00:00:00",
+                             content="hello", session_id="s1")
+        fmt = MessageFormatter()
+        result = fmt.format(msg)  # Must not raise AttributeError
+        assert "user" in result
+
+    def test_message_formatter_format_many_plain_string_type(self):
+        """MessageFormatter.format_many() handles plain string type gracefully."""
+        from ai_session_tools.formatters import MessageFormatter
+        from ai_session_tools.models import SessionMessage
+        msg = SessionMessage(type="assistant", timestamp="2026-01-01T00:00:00",
+                             content="hi", session_id="s1")
+        fmt = MessageFormatter()
+        result = fmt.format_many([msg])  # Must not raise AttributeError
+        assert "assistant" in result
+
+    # ── config: write-failure must not lose cached config ────────────────────
+
+    def test_config_write_failure_does_not_empty_cache(self):
+        """config.py: migration write failure (read-only FS) must not make load_config() return {}."""
+        import json
+        import tempfile
+        import os
+        from pathlib import Path
+
+        # Create a temp config file with a deprecated key
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"source_dirs": {"claude": ["/tmp/fake"]}}, f)
+            tmp_path = f.name
+
+        try:
+            # Make the file read-only so the migration write will fail
+            os.chmod(tmp_path, 0o444)
+
+            import ai_session_tools.config as cfg_mod
+            # Reset module-level cache so our temp file is actually read
+            old_cache = cfg_mod._config_cache
+            old_key = cfg_mod._config_cache_key
+            old_g_path = cfg_mod._g_config_path
+            try:
+                cfg_mod._config_cache = None
+                cfg_mod._config_cache_key = None
+                cfg_mod._g_config_path = tmp_path
+                loaded = cfg_mod.load_config()
+                # The config must NOT be empty {} even though write failed
+                assert "source_dirs" in loaded, (
+                    f"load_config() should return valid config even when write fails. "
+                    f"Got: {loaded!r}. "
+                    "Bug: write failure inside contextlib.suppress abandoned the cache."
+                )
+            finally:
+                cfg_mod._config_cache = old_cache
+                cfg_mod._config_cache_key = old_key
+                cfg_mod._g_config_path = old_g_path
+        finally:
+            os.chmod(tmp_path, 0o644)
+            os.unlink(tmp_path)

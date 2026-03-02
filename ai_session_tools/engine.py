@@ -67,11 +67,24 @@ def parse_date_input(s: str, mode: str = "start") -> "str | tuple[str, str]":
     import re as _re
     import time as _time
 
+    # Guard against None/empty input before calling .strip()
+    if s is None:
+        raise ValueError(
+            "parse_date_input: date string must not be None. "
+            "Run 'aise dates' for supported formats."
+        )
     s = s.strip()
+    if not s:
+        raise ValueError(
+            "parse_date_input: date string must not be empty. "
+            "Run 'aise dates' for supported formats.\n"
+            "Quick formats: 2026-01-15, 2026-01, 2026, 202X, 7d, 2w, 1m, 24h, 1y"
+        )
 
-    # ── Duration shorthand (7d, 2w, 1m, 24h, 30min) ─────────────────────────
+    # ── Duration shorthand (7d, 2w, 1m, 24h, 30min, 1y) ─────────────────────
     # Handled before edtf: "1m" is not valid EDTF and would fail parsing.
-    _dur = _re.fullmatch(r"(\d+)(min|[dwmh])", s, _re.IGNORECASE)
+    # "y" (years) approximated as 365 days, matching with_when docstring examples.
+    _dur = _re.fullmatch(r"(\d+)(min|[dwmhy])", s, _re.IGNORECASE)
     if _dur:
         n, unit = int(_dur.group(1)), _dur.group(2).lower()
         _deltas = {
@@ -80,6 +93,7 @@ def parse_date_input(s: str, mode: str = "start") -> "str | tuple[str, str]":
             "h":   datetime.timedelta(hours=n),
             "m":   datetime.timedelta(days=n * 30),   # 1m ≈ 30 days (approximate)
             "min": datetime.timedelta(minutes=n),
+            "y":   datetime.timedelta(days=n * 365),  # 1y ≈ 365 days (approximate)
         }
         dt = datetime.datetime.now(datetime.timezone.utc) - _deltas[unit]
         return dt.strftime("%Y-%m-%dT%H:%M:%S")
@@ -448,11 +462,18 @@ class SessionRecoveryEngine:
         if not filters.matches_datetime(file_info.last_modified):
             return False
 
-        if file_info.sessions:
-            if not any(filters.matches_session(s) for s in file_info.sessions):
+        # Session filter: apply include and exclude independently to mirror
+        # FilterSpec.__call__() semantics (the two callsites must agree).
+        # include_sessions: at least one of the file's sessions must be in the set.
+        # exclude_sessions: NONE of the file's sessions may be in the set.
+        # Files with no sessions fail include_sessions (they cannot satisfy inclusion)
+        # but pass exclude_sessions (nothing to exclude matches).
+        if filters.include_sessions:
+            if not any(s in filters.include_sessions for s in (file_info.sessions or [])):
                 return False
-        elif filters.include_sessions:
-            return False
+        if filters.exclude_sessions:
+            if any(s in filters.exclude_sessions for s in (file_info.sessions or [])):
+                return False
 
         if not filters.matches_edits(file_info.edits):
             return False
@@ -2191,9 +2212,18 @@ class AISession:
         """
         if self._is_claude:
             return ["claude"]
+        # Hardcoded mapping avoids fragile string manipulation that could produce
+        # wrong names for third-party source classes or classes whose name contains
+        # "source" or "cli" in unexpected positions.
+        _SOURCE_NAMES = {
+            "AiStudioSource":  "aistudio",
+            "GeminiCliSource": "gemini_cli",
+            "ClaudeSource":    "claude",
+        }
         sources = []
         for src in getattr(self._backend, "_sources", []):
-            name = type(src).__name__.lower().replace("source", "").replace("cli", "_cli")
+            cls_name = type(src).__name__
+            name = _SOURCE_NAMES.get(cls_name, cls_name.lower())
             sources.append(name)
         return sources or [self._source]
 
@@ -2224,8 +2254,16 @@ class AISession:
                 files = s.search_files("*", py | ts)
         """
         from .filters import SearchFilter as _SF
-        if filters is not None and callable(filters) and not isinstance(filters, type):
-            # Duck-typed: both FilterSpec and SearchFilter are callable
+        from .models import FilterSpec as _FS
+        if filters is None or isinstance(filters, _FS):
+            # FilterSpec: pass directly to the engine's native search() which applies
+            # pre-filters (extension, size, date) efficiently before returning results.
+            return self._claude_only("search", [], pattern, filters)
+        if callable(filters) and not isinstance(filters, type):
+            # SearchFilter (or any custom callable): fetch unfiltered file list first,
+            # then apply the callable predicate chain.  This path handles SearchFilter's
+            # | (OR) and & (AND) operator compositions that cannot be expressed as a
+            # declarative FilterSpec.
             all_files = self._claude_only("search", [], pattern, None)
             return list(filters(all_files))
         return self._claude_only("search", [], pattern, filters)

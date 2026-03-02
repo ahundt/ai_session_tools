@@ -173,10 +173,20 @@ class MessageFormatter(ResultFormatter):
         """Initialize with max_chars. 0 = full content (no truncation)."""
         self.max_chars = max_chars
 
+    @staticmethod
+    def _type_str(msg_type: Any) -> str:
+        """Return the string representation of a message type.
+
+        Guards against plain-string type values (e.g. ``type="user"`` without the
+        ``MessageType`` enum), which would raise ``AttributeError: 'str' has no .value``.
+        SessionMessage.to_dict() already has this guard; we mirror it here.
+        """
+        return msg_type.value if hasattr(msg_type, "value") else str(msg_type)
+
     def format(self, data: SessionMessage) -> str:
         """Format single message."""
         text = data.preview(self.max_chars) if self.max_chars else data.content.replace("\n", " ")
-        return f"""Type:       {data.type.value}
+        return f"""Type:       {self._type_str(data.type)}
 Session:    {data.session_id}
 Timestamp:  {data.timestamp}
 Content:    {text}
@@ -187,7 +197,7 @@ Length:     {len(data.content)} chars"""
         lines = []
         for msg in items:
             text = msg.preview(self.max_chars) if self.max_chars else msg.content.replace("\n", " ")
-            lines.append(f"[{msg.type.value}] {msg.timestamp[:19]} - {text}")
+            lines.append(f"[{self._type_str(msg.type)}] {msg.timestamp[:19]} - {text}")
         return "\n".join(lines)
 
 
