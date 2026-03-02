@@ -158,6 +158,13 @@ def parse_date_input(s: str, mode: str = "start") -> "str | tuple[str, str]":
         parsed = parse_edtf(s)
         lo = _st(parsed.lower_strict())
         hi = _st(parsed.upper_strict())
+        # EDTF upper_strict() returns midnight (T00:00:00) for dates without time precision
+        # (day, month, year).  For "end" mode we want the end of that period, not midnight.
+        # Replace trailing midnight with 23:59:59 so filters include the full last day.
+        # Full datetimes (YYYY-MM-DDTHH:MM:SS) are handled by the exact-second path above
+        # and never reach here, so this substitution is safe.
+        if hi.endswith("T00:00:00"):
+            hi = hi[:-8] + "23:59:59"
         # EDTF interval syntax contains "/": return 2-tuple so caller splits after+before
         if "/" in s:
             return (lo, hi)
@@ -2049,8 +2056,14 @@ class AISession:
                 return self._backend.search_messages_with_context(
                     query, context, message_type, tool
                 )
-            # Non-Claude: context not available; wrap plain results as ContextMatch
+            # Non-Claude: context window not available; wrap plain results as ContextMatch
             # so callers always receive list[ContextMatch] when context>0 (consistent API).
+            if tool:
+                from rich.console import Console as _Console
+                _Console(stderr=True).print(
+                    "[yellow]--tool filter not supported for non-Claude sources "
+                    "(ignored when context>0)[/yellow]"
+                )
             plain = self._backend.search_messages(query, message_type)
             return [ContextMatch(match=m, context_before=[], context_after=[]) for m in plain]
         if self._is_claude:
@@ -2159,7 +2172,7 @@ class AISession:
             return None
         latest = sessions[0]  # newest first
         messages = self.get_messages(latest.session_id)
-        if message_limit:
+        if message_limit and message_limit > 0:
             messages = messages[:message_limit]
         return (latest, messages)
 
@@ -2342,9 +2355,14 @@ class AISession:
             project_filter=project_filter, since=since, until=until
         )
         for session_info in sessions:
+            # Always fetch user messages only — slash commands appear in user messages.
+            # Fetching all message types in pattern mode could match assistant messages
+            # that *discuss* a command (e.g. "you can use /ar:plannew to…"), producing
+            # false positives. Consistent with the Claude-backend path which pre-filters
+            # to '"type":"user"' at the JSONL level before scanning for commands.
             messages = self.get_messages(
                 session_info.session_id,
-                message_type="user" if discovery_mode else None,
+                message_type="user",
             )
             for msg in messages:
                 if since and msg.timestamp and msg.timestamp < since:

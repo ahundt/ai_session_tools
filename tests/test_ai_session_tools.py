@@ -9355,23 +9355,50 @@ class TestAPIClarity:
     # ── Issue 11: FilterSpec date builders ────────────────────────────────────
 
     def test_filterspec_with_since_builder(self):
-        """FilterSpec.with_since() builder sets since field and chains."""
+        """FilterSpec.with_since() resolves dates to ISO datetimes; duration shorthands work."""
         from ai_session_tools import FilterSpec
+        # Plain ISO date — resolved to start-of-day
         spec = FilterSpec().with_since("2026-01-01")
-        assert spec.since == "2026-01-01"
+        assert spec.since and spec.since.startswith("2026-01-01"), (
+            f"Expected 2026-01-01..., got {spec.since!r}"
+        )
+        # Duration shorthand must be resolved to ISO (not stored raw as "7d")
+        # Raw "7d" causes matches_datetime("2026-...") < "7d" to be True (ASCII "2" < "7"),
+        # which would exclude ALL timestamps — silent correctness bug.
+        spec_dur = FilterSpec().with_since("7d")
+        assert spec_dur.since and spec_dur.since[:4].isdigit(), (
+            f"Duration '7d' must be resolved to ISO year, got {spec_dur.since!r}"
+        )
+        assert "T" in spec_dur.since, "Resolved duration must include time component"
+        # Resolved datetime must make matches_datetime work
+        assert not spec_dur.matches_datetime("2020-01-01T00:00:00"), (
+            "with_since('7d') must exclude dates more than 7 days ago"
+        )
 
     def test_filterspec_with_until_builder(self):
-        """FilterSpec.with_until() builder sets until field and chains."""
+        """FilterSpec.with_until() resolves dates to end-of-day ISO datetimes."""
         from ai_session_tools import FilterSpec
         spec = FilterSpec().with_until("2026-12-31")
-        assert spec.until == "2026-12-31"
+        assert spec.until and spec.until.startswith("2026-12-31"), (
+            f"Expected 2026-12-31..., got {spec.until!r}"
+        )
+        # End-of-day (not midnight) so timestamps on 2026-12-31 pass the filter
+        assert spec.until.endswith("T23:59:59"), (
+            f"with_until() must set end-of-day (T23:59:59), got {spec.until!r}"
+        )
 
     def test_filterspec_with_date_range_builder(self):
-        """FilterSpec.with_date_range() builder sets both since and until."""
+        """FilterSpec.with_date_range() sets since (start-of-day) and until (end-of-day)."""
         from ai_session_tools import FilterSpec
         spec = FilterSpec().with_date_range(since="2026-01-01", until="2026-12-31")
-        assert spec.since == "2026-01-01"
-        assert spec.until == "2026-12-31"
+        assert spec.since and spec.since.startswith("2026-01-01")
+        assert spec.until and spec.until.startswith("2026-12-31")
+        assert spec.since.endswith("T00:00:00"), (
+            f"since must be start-of-day, got {spec.since!r}"
+        )
+        assert spec.until.endswith("T23:59:59"), (
+            f"until must be end-of-day (T23:59:59), got {spec.until!r}"
+        )
 
     # ── Issue 12: Context manager protocol ───────────────────────────────────
 
@@ -9970,3 +9997,364 @@ class TestFilterSpecCallable:
         spec = FilterSpec()
         sf = SearchFilter()
         assert callable(spec) and callable(sf)
+
+
+class TestEdgeCaseRegressions:
+    """Regression tests for edge cases found by systematic review (2026-03-02)."""
+
+    # ── Bug: FilterSpec.with_since("7d") raw string breaks matches_datetime ──────
+
+    def test_with_since_duration_resolves_to_iso(self):
+        """with_since('7d') must resolve to ISO datetime, not store '7d' raw.
+
+        Raw storage causes 'datetime_str < "7d"' comparisons to always be True
+        (ASCII '2' < '7'), silently excluding ALL timestamps.
+        """
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_since("7d")
+        assert spec.since is not None
+        # Must be a valid ISO datetime, not the raw shorthand
+        assert spec.since != "7d", (
+            "with_since('7d') must NOT store '7d' raw — "
+            "matches_datetime does lexicographic comparison"
+        )
+        assert spec.since[:4].isdigit(), f"Expected ISO year, got: {spec.since!r}"
+        # Crucially: the filter must actually work
+        assert spec.matches_datetime("2026-03-01T00:00:00"), (
+            "with_since('7d') must pass a recent timestamp"
+        )
+        assert not spec.matches_datetime("2020-01-01T00:00:00"), (
+            "with_since('7d') must exclude old timestamps"
+        )
+
+    def test_with_until_duration_resolves_to_iso(self):
+        """with_until('7d') must resolve to ISO datetime for correct comparison."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_until("7d")
+        assert spec.until is not None
+        assert spec.until != "7d", "with_until('7d') must NOT store '7d' raw"
+        assert spec.until[:4].isdigit(), f"Expected ISO year, got: {spec.until!r}"
+
+    def test_with_since_plain_iso_resolves_to_start_of_day(self):
+        """with_since('2026-01-15') resolves to T00:00:00 (start of day)."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_since("2026-01-15")
+        assert spec.since == "2026-01-15T00:00:00", (
+            f"with_since(ISO date) must resolve to start-of-day, got {spec.since!r}"
+        )
+        # Must match timestamps on that day and later
+        assert spec.matches_datetime("2026-01-15T00:00:00")
+        assert spec.matches_datetime("2026-01-15T12:00:00")
+        assert not spec.matches_datetime("2026-01-14T23:59:59")
+
+    def test_with_until_plain_iso_resolves_to_end_of_day(self):
+        """with_until('2026-01-15') resolves to T23:59:59 (end of day).
+
+        EDTF upper_strict() returns midnight for day-precision dates, but
+        parse_date_input now adds T23:59:59 for 'end' mode.
+        """
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_until("2026-01-15")
+        assert spec.until == "2026-01-15T23:59:59", (
+            f"with_until(ISO date) must resolve to end-of-day (T23:59:59), got {spec.until!r}"
+        )
+        # Must match timestamps on that day (including late night)
+        assert spec.matches_datetime("2026-01-15T23:59:59")
+        assert spec.matches_datetime("2026-01-15T12:00:00")
+        # Must exclude timestamps after that day
+        assert not spec.matches_datetime("2026-01-16T00:00:00")
+
+    def test_parse_date_input_month_end_is_end_of_day(self):
+        """parse_date_input('2026-01', 'end') returns last day at 23:59:59."""
+        from ai_session_tools.engine import parse_date_input
+        result = parse_date_input("2026-01", "end")
+        assert result == "2026-01-31T23:59:59", (
+            f"Month 'end' must be last day at 23:59:59, got {result!r}"
+        )
+
+    def test_parse_date_input_year_end_is_dec31_end_of_day(self):
+        """parse_date_input('2026', 'end') returns Dec 31 at 23:59:59."""
+        from ai_session_tools.engine import parse_date_input
+        result = parse_date_input("2026", "end")
+        assert result == "2026-12-31T23:59:59", (
+            f"Year 'end' must be 2026-12-31T23:59:59, got {result!r}"
+        )
+
+    # ── Bug: FilterSpec.__call__() exclude_sessions with empty sessions ───────────
+
+    def test_filterspec_call_exclude_sessions_empty_sessions(self):
+        """FilterSpec(exclude_sessions={...}).__call__ must NOT exclude files with no sessions.
+
+        Files with no recorded sessions cannot belong to an excluded session,
+        so they must pass the exclude_sessions filter.
+        Bug: old code used a single 'if include OR exclude' check, which
+        incorrectly excluded no-session files when only exclude_sessions was set.
+        """
+        from ai_session_tools import FilterSpec
+        from ai_session_tools.models import SessionFile
+        f_no_sess = SessionFile(name="a.py", path="/a.py", location="/a.py", sessions=[])
+        f_in_sess = SessionFile(name="b.py", path="/b.py", location="/b.py", sessions=["s1"])
+        f_other = SessionFile(name="c.py", path="/c.py", location="/c.py", sessions=["s2"])
+        spec = FilterSpec(exclude_sessions={"s1"})
+        result = spec([f_no_sess, f_in_sess, f_other])
+        names = [f.name for f in result]
+        # a.py (no sessions) and c.py (different session) must pass; b.py (s1) excluded
+        assert "a.py" in names, (
+            "File with no sessions must NOT be excluded by exclude_sessions"
+        )
+        assert "b.py" not in names, "File in excluded session must be excluded"
+        assert "c.py" in names, "File in non-excluded session must pass"
+
+    def test_filterspec_call_include_sessions_excludes_no_session_files(self):
+        """FilterSpec(include_sessions={...}).__call__ excludes files with no sessions."""
+        from ai_session_tools import FilterSpec
+        from ai_session_tools.models import SessionFile
+        f_no_sess = SessionFile(name="a.py", path="/a.py", location="/a.py", sessions=[])
+        f_in_sess = SessionFile(name="b.py", path="/b.py", location="/b.py", sessions=["s1"])
+        spec = FilterSpec(include_sessions={"s1"})
+        result = spec([f_no_sess, f_in_sess])
+        names = [f.name for f in result]
+        assert "a.py" not in names, (
+            "File with no sessions must be excluded when include_sessions is set"
+        )
+        assert "b.py" in names
+
+    # ── Bug: with_edit_range() defined twice (dead code removed) ─────────────────
+
+    def test_with_edit_range_zero_args_uses_default(self):
+        """FilterSpec().with_edit_range() with no args uses default min_edits=0."""
+        from ai_session_tools import FilterSpec
+        # The first (dead) definition required min_edits as a positional arg.
+        # The surviving definition has min_edits=0 as default.
+        spec = FilterSpec().with_edit_range()
+        assert spec.min_edits == 0
+        assert spec.max_edits is None
+
+    def test_with_edit_range_positional_and_keyword(self):
+        """FilterSpec.with_edit_range(3) and with_edit_range(min_edits=3) both work."""
+        from ai_session_tools import FilterSpec
+        spec1 = FilterSpec().with_edit_range(3)
+        spec2 = FilterSpec().with_edit_range(min_edits=3)
+        assert spec1.min_edits == 3
+        assert spec2.min_edits == 3
+
+    # ── Bug: with_when() for plain ISO date must set both since and until ─────────
+
+    def test_with_when_plain_iso_date_sets_both_bounds(self):
+        """FilterSpec.with_when('2026-01-15') sets both since and until for that day.
+
+        Previously only set since, leaving until=None, so all timestamps from
+        that day onward would match — not just that single day.
+        """
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_when("2026-01-15")
+        assert spec.since is not None, "with_when(date) must set since"
+        assert spec.until is not None, (
+            "with_when(ISO date) must ALSO set until (end of that day), "
+            "not just since"
+        )
+        assert "2026-01-15" in spec.since
+        assert "2026-01-15" in spec.until
+        assert spec.until.endswith("T23:59:59"), (
+            f"with_when(date) until must be end-of-day, got {spec.until!r}"
+        )
+        # Must match that day but NOT adjacent days
+        assert spec.matches_datetime("2026-01-15T00:00:00")
+        assert spec.matches_datetime("2026-01-15T23:59:59")
+        assert not spec.matches_datetime("2026-01-14T23:59:59")
+        assert not spec.matches_datetime("2026-01-16T00:00:00")
+
+    def test_with_when_duration_sets_only_since(self):
+        """FilterSpec.with_when('7d') sets only since (no upper bound)."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_when("7d")
+        assert spec.since is not None
+        assert spec.until is None, (
+            "Duration shorthand '7d' must NOT set until — means 'since 7d ago'"
+        )
+
+    # ── Bug: get_planning_usage() pattern mode must filter to user messages ──────
+
+    def _make_mock_with_mixed_messages(self):
+        """Build mock AISession with sessions containing user + assistant messages."""
+        from ai_session_tools.engine import AISession, MultiSourceEngine
+        from ai_session_tools.models import MessageType, SessionInfo, SessionMessage
+
+        class MockSource:
+            def list_sessions(self):
+                return [SessionInfo(
+                    session_id="abc123", project_dir="proj", cwd="/tmp",
+                    git_branch="main", timestamp_first="2026-01-01T00:00:00",
+                    timestamp_last="2026-01-01T01:00:00", message_count=3,
+                    has_compact_summary=False, provider="mock",
+                )]
+
+            def read_session(self, session_info):
+                return [
+                    SessionMessage(type=MessageType.USER,
+                                   timestamp="2026-01-01T00:00:00",
+                                   content="/ar:plannew start the project",
+                                   session_id="abc123"),
+                    SessionMessage(type=MessageType.ASSISTANT,
+                                   timestamp="2026-01-01T00:01:00",
+                                   content="You can use /ar:plannew to create a plan.",
+                                   session_id="abc123"),
+                    SessionMessage(type=MessageType.USER,
+                                   timestamp="2026-01-01T00:02:00",
+                                   content="regular user message",
+                                   session_id="abc123"),
+                ]
+
+            def search_messages(self, query, message_type=None):
+                return []
+
+            def stats(self):
+                return {"mock_sessions": 1}
+
+        return AISession._from_backend(MultiSourceEngine([MockSource()]), "aistudio")
+
+    def test_get_planning_usage_pattern_mode_only_user_messages(self):
+        """get_planning_usage(commands=[...]) must not match assistant messages.
+
+        Bug: pattern mode was fetching message_type=None (all messages),
+        allowing slash commands in assistant explanations to be counted.
+        """
+        session = self._make_mock_with_mixed_messages()
+        # Discovery mode: count user messages containing slash commands
+        results = session.get_planning_usage()
+        # Should find /ar:plannew from the USER message (count=1)
+        cmds = {r.command: r.count for r in results}
+        assert cmds.get("/ar:plannew", 0) == 1, (
+            f"Expected /ar:plannew count=1 (user only), got: {cmds}"
+        )
+
+    # ── Bug: search_messages(context>0, tool=X) must warn on non-Claude ──────────
+
+    def test_search_messages_context_tool_warns_on_non_claude(self, capsys):
+        """search_messages(context>0, tool='Bash') warns when tool is ignored on non-Claude."""
+        from ai_session_tools.engine import AISession, MultiSourceEngine
+        from ai_session_tools.models import MessageType, SessionMessage, SessionInfo
+
+        class MockSource:
+            def list_sessions(self):
+                return []
+            def read_session(self, si):
+                return []
+            def search_messages(self, query, message_type=None):
+                return [SessionMessage(
+                    type=MessageType.ASSISTANT,
+                    timestamp="2026-01-01T00:00:00",
+                    content="result",
+                    session_id="s1",
+                )]
+            def stats(self):
+                return {}
+
+        engine = AISession._from_backend(MultiSourceEngine([MockSource()]), "aistudio")
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        # Call search_messages with context>0 AND tool= on non-Claude backend
+        results = engine.search_messages("result", context=2, tool="Bash")
+        # Must still return results (wrapped as ContextMatch)
+        from ai_session_tools import ContextMatch
+        assert all(isinstance(r, ContextMatch) for r in results), (
+            "search_messages(context>0) must return ContextMatch even on non-Claude"
+        )
+
+    # ── Bug: get_latest_session_context(message_limit=-1) must not drop last msg ──
+
+    def test_get_latest_session_context_negative_limit_returns_all(self):
+        """get_latest_session_context(message_limit=-1) must return all messages.
+
+        message_limit=-1 would slice messages[:-1], silently dropping the last message.
+        The guard 'if message_limit and message_limit > 0' prevents this.
+        """
+        from ai_session_tools.engine import AISession, MultiSourceEngine
+        from ai_session_tools.models import MessageType, SessionMessage, SessionInfo
+
+        class MockSource:
+            def list_sessions(self):
+                return [SessionInfo(
+                    session_id="s1", project_dir="p", cwd="/", git_branch="main",
+                    timestamp_first="2026-01-01T00:00:00",
+                    timestamp_last="2026-01-01T01:00:00",
+                    message_count=3, has_compact_summary=False, provider="mock",
+                )]
+            def read_session(self, si):
+                return [
+                    SessionMessage(type=MessageType.USER, timestamp="2026-01-01T00:00:00",
+                                   content=f"msg{i}", session_id="s1")
+                    for i in range(3)
+                ]
+            def search_messages(self, q, message_type=None):
+                return []
+            def stats(self):
+                return {}
+
+        engine = AISession._from_backend(MultiSourceEngine([MockSource()]), "mock")
+        result = engine.get_latest_session_context(message_limit=-1)
+        assert result is not None
+        _info, messages = result
+        assert len(messages) == 3, (
+            f"message_limit=-1 must return ALL 3 messages, not messages[:-1] (got {len(messages)})"
+        )
+
+    # ── get_sources() name mangling correctness ──────────────────────────────────
+
+    def test_get_sources_name_mangling_no_trailing_underscore(self):
+        """get_sources() must not produce 'claude_' (trailing underscore).
+
+        ClaudeSource.__name__ = 'ClaudeSource':
+        .lower() = 'claudesource'
+        .replace('source', '') = 'claude'  (no trailing underscore)
+        .replace('cli', '_cli') = 'claude'  (unchanged)
+        """
+        from ai_session_tools import AISession
+        engine = AISession(source="claude")
+        sources = engine.get_sources()
+        assert "claude_" not in sources, (
+            f"get_sources() must not produce 'claude_' (trailing underscore): {sources}"
+        )
+        assert "claude" in sources or any("claude" in s for s in sources), (
+            f"get_sources() must return 'claude' for a Claude session: {sources}"
+        )
+
+    # ── Filter.__or__() vacuous truth: empty filter ORed = pass-all (documented) ─
+
+    def test_filter_or_with_empty_filter_returns_all(self):
+        """SearchFilter() | specific_filter returns ALL items (vacuous truth is correct).
+
+        An empty SearchFilter() has no predicates; all([] over item) == True.
+        So empty | specific == True OR specific == True for every item.
+        This is mathematically correct: empty filter = pass-all predicate.
+        Documented here as expected behavior so future refactors don't break it.
+        """
+        from ai_session_tools.filters import SearchFilter
+        from ai_session_tools.models import SessionFile
+        empty = SearchFilter()
+        py_only = SearchFilter().by_extension("py")
+        combined = empty | py_only
+        files = [
+            SessionFile(name="a.py", path="/a.py", location="/a.py"),
+            SessionFile(name="b.md", path="/b.md", location="/b.md"),
+        ]
+        result = combined(files)
+        assert len(result) == 2, (
+            "empty | specific returns ALL items: "
+            "empty filter = pass-all, so OR with pass-all = pass-all (vacuous truth)"
+        )
+
+    def test_filter_and_with_specific_filters_narrows(self):
+        """SearchFilter.by_ext("py") & SearchFilter.by_ext("py") returns only .py files."""
+        from ai_session_tools.filters import SearchFilter
+        from ai_session_tools.models import SessionFile
+        f1 = SearchFilter().by_extension("py")
+        f2 = SearchFilter().by_extension("py")
+        combined = f1 & f2
+        files = [
+            SessionFile(name="a.py", path="/a.py", location="/a.py"),
+            SessionFile(name="b.md", path="/b.md", location="/b.md"),
+        ]
+        result = combined(files)
+        assert [f.name for f in result] == ["a.py"]

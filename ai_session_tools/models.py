@@ -44,6 +44,37 @@ def _decode_project_dir(encoded_dir: str) -> str:
     return stripped.rsplit('-', 1)[-1] or stripped
 
 
+def _resolve_date(date_str: str, mode: str = "start") -> str:
+    """Resolve a date string (ISO or duration shorthand) to a comparable ISO datetime.
+
+    Duration shorthands like "7d", "2w", "1m" must be resolved to ISO 8601
+    strings before lexicographic comparison in ``FilterSpec.matches_datetime()``.
+    Storing "7d" raw causes ``"2026-01-01" < "7d"`` to always be True (ASCII "2" < "7"),
+    silently excluding every timestamp.
+
+    Uses ``parse_date_input`` from engine.py via a lazy import to avoid the
+    circular dependency (engine imports models).  Falls back to storing the
+    string as-is when the import fails (import cycle or test environment).
+
+    Args:
+        date_str: ISO date/datetime, duration shorthand ("7d", "2w"), or EDTF expression.
+        mode:     "start" for lower bound (00:00:00), "end" for upper bound (23:59:59).
+
+    Returns:
+        Resolved ISO 8601 datetime string, or ``date_str`` unchanged if resolution fails.
+    """
+    try:
+        from .engine import parse_date_input as _parse  # lazy: engine imports models
+        resolved = _parse(date_str, mode)
+        # parse_date_input may return a tuple for EDTF ranges; take the appropriate bound
+        if isinstance(resolved, tuple):
+            return resolved[0] if mode == "start" else resolved[1]
+        return resolved
+    except (ImportError, Exception):
+        # Fallback: keep as-is (ISO dates already work; duration shorthands may not)
+        return date_str
+
+
 class MessageType(str, Enum):
     """Session message types."""
 
@@ -311,12 +342,6 @@ class FilterSpec:
         self.file_patterns = list(patterns)
         return self
 
-    def with_edit_range(self, min_edits: int, max_edits: Optional[int] = None) -> "FilterSpec":
-        """Builder: set edit count range."""
-        self.min_edits = min_edits
-        self.max_edits = max_edits
-        return self
-
     def with_sessions(self, include: Optional[Set[str]] = None, exclude: Optional[Set[str]] = None) -> "FilterSpec":
         """Builder: set session filtering.
 
@@ -355,6 +380,9 @@ class FilterSpec:
     def with_since(self, since: str) -> "FilterSpec":
         """Builder: filter to items modified ON OR AFTER this date.
 
+        Duration shorthands ("7d", "2w", "1m") are resolved to ISO datetimes
+        immediately so that ``matches_datetime()``'s lexicographic comparison works.
+
         Args:
             since: ISO date, duration shorthand, or EDTF expression.
                    Examples: "2026-01-01", "7d", "2w", "2026-01-01T14:30:00"
@@ -362,20 +390,23 @@ class FilterSpec:
         Returns:
             Self for chaining: FilterSpec().with_since("7d").with_extensions({"py"})
         """
-        self.since = since
+        self.since = _resolve_date(since, "start")
         return self
 
     def with_until(self, until: str) -> "FilterSpec":
         """Builder: filter to items modified ON OR BEFORE this date.
 
+        Duration shorthands are resolved to end-of-period ISO datetimes so that
+        ``matches_datetime()``'s lexicographic comparison works correctly.
+
         Args:
             until: ISO date or duration shorthand.
-                   Examples: "2026-12-31", "2026-06-01T00:00:00"
+                   Examples: "2026-12-31", "7d", "2026-06-01T00:00:00"
 
         Returns:
             Self for chaining.
         """
-        self.until = until
+        self.until = _resolve_date(until, "end")
         return self
 
     def with_date_range(
@@ -384,6 +415,8 @@ class FilterSpec:
         until: Optional[str] = None,
     ) -> "FilterSpec":
         """Builder: set both since and until bounds in one call.
+
+        Duration shorthands are resolved to ISO datetimes (see with_since / with_until).
 
         Args:
             since: Lower bound (inclusive). None = no lower bound.
@@ -398,9 +431,9 @@ class FilterSpec:
             FilterSpec().with_date_range(since="7d")    # last 7 days, no upper bound
         """
         if since is not None:
-            self.since = since
+            self.since = _resolve_date(since, "start")
         if until is not None:
-            self.until = until
+            self.until = _resolve_date(until, "end")
         return self
 
     def with_when(self, when: str) -> "FilterSpec":
@@ -438,16 +471,18 @@ class FilterSpec:
             self.since = f"{decade_start}-01-01T00:00:00"
             self.until = f"{decade_end}-12-31T23:59:59"
         else:
-            # Duration or ISO date — treat as since (no upper bound)
-            # Lazy import to avoid circular dependency (engine imports models)
-            try:
-                from .engine import parse_date_input as _parse
-                parsed = _parse(when)
-                if parsed:
-                    self.since = parsed
-            except ImportError:
-                # Fallback: store as-is (will be interpreted by engine when filtering)
-                self.since = when
+            # Duration shorthand ("7d", "2w") or plain ISO date ("2026-01-15").
+            # Durations set only the lower bound (since); plain ISO dates set
+            # both bounds (start and end of that day), consistent with CLI --when.
+            self.since = _resolve_date(when, "start")
+            # For plain ISO dates (no duration suffix), also set until=end-of-day
+            # so that with_when("2026-01-15") matches only that single day.
+            # Duration shorthands do NOT set an upper bound (they mean "since N ago").
+            _is_duration = (
+                len(when) <= 5 and when[:-1].isdigit() and when[-1:].lower() in "dwmhy"
+            )
+            if not _is_duration:
+                self.until = _resolve_date(when, "end")
         return self
 
     def with_edit_range(
@@ -500,9 +535,16 @@ class FilterSpec:
                 continue
             if not self.matches_datetime(f.last_modified or ""):
                 continue
-            # Session filter: include if ANY session passes include and NONE trigger exclude
-            if self.include_sessions or self.exclude_sessions:
+            # Session filter — mirrors _apply_all_filters() in engine.py:
+            # • include_sessions: file must belong to at least one included session
+            #   (files with no recorded sessions are excluded when include_sessions is set)
+            # • exclude_sessions: files with no sessions are NOT excluded
+            #   (they cannot belong to any excluded session, so they pass)
+            if self.include_sessions:
                 if not any(self.matches_session(s) for s in (f.sessions or [])):
+                    continue
+            if self.exclude_sessions:
+                if any(s in self.exclude_sessions for s in (f.sessions or [])):
                     continue
             result.append(f)
         return result
