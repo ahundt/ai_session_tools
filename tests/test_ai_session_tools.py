@@ -454,10 +454,14 @@ class TestFindCorrectionsOnlyUserMessages:
 
 
 class TestFindCorrectionsLimit:
-    def test_limit_zero_returns_empty(self, tmp_path):
+    def test_limit_zero_returns_all(self, tmp_path):
+        """limit=0 means 'no limit' — returns all results, consistent with get_planning_usage."""
         projects = _make_projects_with_sessions(tmp_path)
         engine = _make_engine(tmp_path, projects)
-        assert engine.find_corrections(limit=0) == []
+        all_results = engine.find_corrections(limit=0)
+        limited = engine.find_corrections(limit=1)
+        # limit=0 must return >= results from limit=1 (no upper bound applied)
+        assert len(all_results) >= len(limited)
 
     def test_limit_1_returns_max_1(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)

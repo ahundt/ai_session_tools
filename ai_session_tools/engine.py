@@ -988,7 +988,7 @@ class SessionRecoveryEngine:
             except OSError:
                 continue
         results.sort(key=lambda x: x.timestamp, reverse=True)
-        return results[:limit]
+        return results[:limit] if limit else results
 
     def analyze_planning_usage(
         self,
@@ -2223,8 +2223,10 @@ class AISession:
         """
         if self._is_claude:
             s = self._backend.get_statistics(since=since, until=until)
-            return {k: getattr(s, k, 0) for k in
-                    ("total_sessions", "total_files", "total_versions")}
+            d = {k: getattr(s, k, 0) for k in
+                 ("total_sessions", "total_files", "total_versions", "largest_file_edits")}
+            d["largest_file"] = getattr(s, "largest_file", None)
+            return d
         if since or until:
             # Non-Claude (aistudio, gemini_cli): recount from filtered sessions.
             # total_files and total_versions are always 0 for non-Claude backends.
@@ -2716,6 +2718,17 @@ class AISession:
         """Recovery directory (Claude-only). Used by _version_src_path in cli.py."""
         if self._is_claude:
             return self._backend.recovery_dir
+        from pathlib import Path
+        return Path()
+
+    @property
+    def projects_dir(self) -> "Path":
+        """Claude projects directory (Claude-only). Used by _sessions_for_project in cli.py.
+
+        Returns Path() (empty path) for non-Claude backends.
+        """
+        if self._is_claude:
+            return self._backend.projects_dir
         from pathlib import Path
         return Path()
 
