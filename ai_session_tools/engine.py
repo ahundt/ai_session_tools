@@ -86,6 +86,29 @@ def _parse_date_input(s: str, mode: str = "start") -> "str | tuple[str, str]":
     if _re.fullmatch(r"[\dXxTt:/\-]+", s):
         s = s.upper()
 
+    # ── Full ISO datetime (exact second) — return as-is, no expansion ────────
+    # The edtf library's lower_strict()/upper_strict() floor full datetimes to
+    # day boundaries (2026-01-15T14:30:25 → 2026-01-15T00:00:00). A fully-
+    # specified YYYY-MM-DDTHH:MM:SS is an exact point; both modes return it.
+    if _re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", s):
+        return s  # exact second — start and end are the same point
+
+    # ── Partial datetime: hour or minute precision ────────────────────────────
+    # EDTF Level 0 requires full YYYY-MM-DDTHH:MM:SS; partial times like
+    # YYYY-MM-DDTHH or YYYY-MM-DDTHH:MM are not valid EDTF and fall through
+    # to dateutil, which returns the same start-of-period for both modes.
+    # Expand to full-period bounds based on detected precision:
+    #   hour   (YYYY-MM-DDTHH)      → [THH:00:00, THH:59:59]
+    #   minute (YYYY-MM-DDTHH:MM)   → [THH:MM:00, THH:MM:59]
+    _partial_dt = _re.fullmatch(r"(\d{4}-\d{2}-\d{2}T\d{2})(?::(\d{2}))?", s)
+    if _partial_dt:
+        date_hh = _partial_dt.group(1)  # "2026-01-15T14"
+        mm = _partial_dt.group(2)       # "30" or None (hour-only)
+        if mm is None:
+            return f"{date_hh}:00:00" if mode == "start" else f"{date_hh}:59:59"
+        else:
+            return f"{date_hh}:{mm}:00" if mode == "start" else f"{date_hh}:{mm}:59"
+
     # ── Day-level unspecified digits: edtf library bug workaround ────────────
     # parse_edtf("2026-01-1X") succeeds, but lower_strict()/upper_strict() crash
     # with ValueError because they try int("1X"). We handle these manually.

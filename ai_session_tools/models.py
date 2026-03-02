@@ -262,6 +262,11 @@ class FilterSpec:
         """
         if not datetime_str:
             return not (self.after or self.before)
+        if self.after or self.before:
+            # Truncate to 19 chars to strip timezone designators (+00:00, Z) and
+            # sub-second precision so that all sources compare correctly against
+            # the naive ISO strings produced by _parse_date_input.
+            datetime_str = datetime_str[:19]
         if self.after and datetime_str < self.after:
             return False
         if self.before and datetime_str > self.before:

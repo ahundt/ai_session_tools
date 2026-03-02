@@ -8557,3 +8557,119 @@ class TestBugFixes:
         assert stats.total_files == 0, (
             f"Unexpected dir inflated total_files to {stats.total_files}"
         )
+
+
+class TestDateTimePrecisionBoundaries:
+    """_parse_date_input must expand partial time specs to full-period bounds.
+
+    Principle: input precision determines output range; no component that is
+    genuinely absent from the input should be hardcoded or defaulted when
+    expanding the END of a range.
+
+    Coverage: hour-precision, minute-precision, full-datetime (exact second),
+    and FilterSpec.matches_datetime timezone stripping.
+    """
+
+    # ── Hour precision: YYYY-MM-DDTHH ──
+
+    def test_hour_precision_start(self):
+        """Hour-precision start → T{HH}:00:00."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14", "start") == "2026-01-15T14:00:00"
+
+    def test_hour_precision_end(self):
+        """Hour-precision end → T{HH}:59:59 (full hour, NOT T{HH}:00:00)."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14", "end") == "2026-01-15T14:59:59"
+
+    def test_hour_precision_midnight(self):
+        """Midnight hour (T00) must expand correctly."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T00", "start") == "2026-01-15T00:00:00"
+        assert _parse_date_input("2026-01-15T00", "end")   == "2026-01-15T00:59:59"
+
+    def test_hour_precision_lowercase_t(self):
+        """Lowercase 't' separator must be normalised and handled."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15t02", "end") == "2026-01-15T02:59:59"
+
+    # ── Minute precision: YYYY-MM-DDTHH:MM ──
+
+    def test_minute_precision_start(self):
+        """Minute-precision start → T{HH}:{MM}:00."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:30", "start") == "2026-01-15T14:30:00"
+
+    def test_minute_precision_end(self):
+        """Minute-precision end → T{HH}:{MM}:59 (full minute, NOT :00)."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:30", "end") == "2026-01-15T14:30:59"
+
+    def test_minute_precision_top_of_hour(self):
+        """Minute=00 (top of hour) must expand to :59 for end."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:00", "start") == "2026-01-15T14:00:00"
+        assert _parse_date_input("2026-01-15T14:00", "end")   == "2026-01-15T14:00:59"
+
+    def test_minute_precision_last_minute_of_hour(self):
+        """Minute=59 (last minute) end must be :59 seconds."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:59", "end") == "2026-01-15T14:59:59"
+
+    # ── Full datetime: exact second (no expansion) ──
+
+    def test_full_datetime_start_is_exact(self):
+        """Full YYYY-MM-DDTHH:MM:SS must return the exact second for start."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:30:25", "start") == "2026-01-15T14:30:25"
+
+    def test_full_datetime_end_is_exact(self):
+        """Full YYYY-MM-DDTHH:MM:SS must return the exact second for end."""
+        from ai_session_tools.engine import _parse_date_input
+        assert _parse_date_input("2026-01-15T14:30:25", "end") == "2026-01-15T14:30:25"
+
+    # ── --when semantics with time precision ──
+
+    def test_when_hour_covers_full_hour(self):
+        """--when with hour precision: range must be [HH:00:00, HH:59:59]."""
+        from ai_session_tools.engine import _parse_date_input
+        lo = _parse_date_input("2026-01-15T02", "start")
+        hi = _parse_date_input("2026-01-15T02", "end")
+        assert lo == "2026-01-15T02:00:00", f"lower={lo!r}"
+        assert hi == "2026-01-15T02:59:59", f"upper={hi!r} (must be full hour, not T02:00:00)"
+
+    def test_when_minute_covers_full_minute(self):
+        """--when with minute precision: range must be [HH:MM:00, HH:MM:59]."""
+        from ai_session_tools.engine import _parse_date_input
+        lo = _parse_date_input("2026-01-15T14:30", "start")
+        hi = _parse_date_input("2026-01-15T14:30", "end")
+        assert lo == "2026-01-15T14:30:00", f"lower={lo!r}"
+        assert hi == "2026-01-15T14:30:59", f"upper={hi!r} (must be full minute)"
+
+    # ── FilterSpec.matches_datetime tz-stripping ──
+
+    def test_filterspec_tz_suffix_included_at_boundary(self):
+        """FilterSpec.matches_datetime must strip tz suffix; boundary timestamp must pass."""
+        from ai_session_tools.models import FilterSpec
+        f = FilterSpec(after="2026-01-01T00:00:00", before="2026-12-31T23:59:59")
+        # Timestamp exactly at upper boundary, but with Z suffix — must NOT be excluded
+        assert f.matches_datetime("2026-12-31T23:59:59Z") is True, (
+            "Timestamp at boundary with Z suffix must pass (tz stripped before compare)"
+        )
+        assert f.matches_datetime("2026-12-31T23:59:59+00:00") is True, (
+            "Timestamp at boundary with +00:00 must pass (tz stripped before compare)"
+        )
+
+    def test_filterspec_tz_suffix_excluded_past_boundary(self):
+        """FilterSpec.matches_datetime must correctly exclude timestamps beyond range."""
+        from ai_session_tools.models import FilterSpec
+        f = FilterSpec(after="2026-01-01T00:00:00", before="2026-12-31T23:59:59")
+        assert f.matches_datetime("2027-01-01T00:00:00Z") is False
+        assert f.matches_datetime("2025-12-31T23:59:59+00:00") is False
+
+    def test_filterspec_microseconds_at_boundary(self):
+        """FilterSpec.matches_datetime must strip microseconds; boundary must pass."""
+        from ai_session_tools.models import FilterSpec
+        f = FilterSpec(after="2026-01-01T00:00:00", before="2026-12-31T23:59:59")
+        # Microsecond suffix makes string longer — must truncate before compare
+        assert f.matches_datetime("2026-12-31T23:59:59.999999") is True
