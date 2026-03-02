@@ -45,12 +45,13 @@ Configuration:
 Note: Protocol types (Searchable, Extractable, Filterable, Storage, Predicate,
 Composable) are importable from ai_session_tools.types for custom implementors.
 
-Claude Code Plugin:
-    This library ships as the ``aise`` CLI command, which is also available as a
-    Claude Code slash command via the autorun plugin:
-        https://github.com/ahundt/autorun
-    Install autorun, then use ``/ar:claude-session-tools`` in Claude Code to search
-    and analyse your AI session history without leaving the editor.
+Claude Code integration (autorun plugin):
+    ``aise`` is available as a Claude Code slash command via the autorun plugin
+    (https://github.com/ahundt/autorun).  autorun adds slash commands, hooks, and
+    autonomous task workflows to Claude Code.  After installing autorun, use
+    ``/ar:claude-session-tools`` inside a Claude Code conversation to search and
+    recover session history without leaving the editor. Especially useful after
+    context compaction to restore previous context inline.
 """
 
 try:

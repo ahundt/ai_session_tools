@@ -36,12 +36,40 @@ JSON and dig through dozens of folders.
 
 Works as a CLI tool (`aise`) and as an importable Python library (`from ai_session_tools import ...`).
 
-### Claude Code slash command
+### Claude Code integration via autorun
 
-`aise` is also available as a Claude Code slash command via the
-[autorun](https://github.com/ahundt/autorun) plugin.  Install autorun, then
-use `/ar:claude-session-tools` inside Claude Code to search and analyse your
-AI session history without leaving the editor.
+[autorun](https://github.com/ahundt/autorun) is a Claude Code plugin that adds
+slash commands, hooks, and autonomous task workflows to your editor.  It ships
+with a built-in `/ar:claude-session-tools` skill that exposes `aise` as a
+first-class Claude Code command, so you can search and recover session history
+without leaving the editor or switching to a terminal.
+
+**What the integration adds:**
+
+- `/ar:claude-session-tools`: natural-language skill. Describe what you want
+  (`"find the auth bug I fixed last week"`, `"show recent Python files"`) and
+  Claude runs the appropriate `aise` commands and surfaces the results inline
+- Full access to all `aise` capabilities (search, file history, corrections,
+  stats, export) from within a Claude Code conversation
+- Useful after context compaction: ask Claude to recover the previous session
+  context directly inside the new conversation
+
+**Install:**
+
+```bash
+# 1. Install autorun (one-time)
+git clone https://github.com/ahundt/autorun ~/.claude/plugins/autorun
+# Follow autorun's README for Claude Code plugin activation
+
+# 2. Install ai-session-tools (already done if you followed Install above)
+uv tool install ai-session-tools
+
+# 3. Use inside Claude Code
+# /ar:claude-session-tools find files I edited yesterday
+```
+
+See [autorun's README](https://github.com/ahundt/autorun) for full setup and
+the complete list of available slash commands.
 
 ## Install
 
