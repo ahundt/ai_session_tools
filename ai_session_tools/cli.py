@@ -511,11 +511,13 @@ class TableSpec:
 
 def _render_output(
     items: list,
-    fmt: str,
+    fmt: Optional[str],
     spec: "TableSpec",
     empty_msg: str = "No results found",
 ) -> None:
     """Render items in the requested format — eliminates repeated json/csv/table branching."""
+    if fmt is None:
+        fmt = _cfg_default("format", "table")
     if not items:
         console.print(f"[yellow]{empty_msg}[/yellow]")
         return
@@ -615,6 +617,37 @@ _OPT_WHEN = typer.Option(
 # Hidden backward-compatible aliases (accepted but not shown in --help)
 _OPT_AFTER  = typer.Option(None, "--after",  hidden=True)
 _OPT_BEFORE = typer.Option(None, "--before", hidden=True)
+
+# ── DRY shared option constants ───────────────────────────────────────────────
+# Single source of truth for common options used across many commands.
+
+_OPT_PROVIDER = typer.Option(
+    None, "--provider",
+    help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider.",
+)
+
+#: Standard output format option for commands that support table/json/csv/plain.
+_OPT_FORMAT = typer.Option(
+    None, "--format", "-f",
+    help="Output format: table, json, csv, plain. Default: table (or config 'defaults.format')",
+)
+
+#: Max-chars truncation option for message/result content preview.
+_OPT_MAX_CHARS = typer.Option(
+    None, "--max-chars",
+    help="Truncate content to this many characters. 0 = full. Default: 0 (or config 'defaults.max_chars')",
+)
+
+
+def _cfg_default(key: str, fallback):
+    """Read user preference from config 'defaults' section, returning fallback if absent.
+
+    Lazy-imports config to avoid circular imports and import-time side effects.
+    Config key: 'defaults' → {key: value}
+    Example: {"defaults": {"format": "json", "max_chars": 500, "provider": "claude"}}
+    """
+    from ai_session_tools.config import get_config_section  # lazy: config imported later in file
+    return get_config_section("defaults", {}).get(key, fallback)
 
 
 def _normalize_date_range(
@@ -818,10 +851,11 @@ def app_callback(
         help="Path to config JSON. Default: OS app config dir (macOS: ~/Library/Application Support/ai_session_tools/config.json).",
         envvar="AI_SESSION_TOOLS_CONFIG",
     ),
-    provider: str = typer.Option(
-        "all", "--provider",
+    provider: Optional[str] = typer.Option(
+        None, "--provider",
         help=(
-            "Sessions from: claude | aistudio | gemini | all. Default: all. "
+            "Sessions from: claude | aistudio | gemini | all. Default: all "
+            "(or config 'defaults.provider'). "
             "Most commands also accept --provider directly: 'aise list --provider claude'."
         ),
     ),
@@ -844,6 +878,9 @@ def app_callback(
     # ctx.obj is inherited by all child contexts (sub-apps, sub-commands)
     ctx.ensure_object(dict)
     cfg = load_config()  # already handles _g_config_path / env var priority
+    # Resolve provider: CLI flag > config 'defaults.provider' > "all"
+    if provider is None:
+        provider = cfg.get("defaults", {}).get("provider", "all")
     ctx.obj["engine"] = get_session_backend(source=provider, claude_dir=claude_dir, config=cfg)
     ctx.obj["source"] = provider  # can be accessed by commands for source filtering
 
@@ -1260,8 +1297,8 @@ def _do_messages_search(
     query: str,
     message_type: Optional[str] = None,
     limit: int = 10,
-    max_chars: int = 0,
-    fmt: str = "table",
+    max_chars: Optional[int] = None,
+    fmt: Optional[str] = None,
     tool: Optional[str] = None,
     context: int = 0,
     after: Optional[str] = None,
@@ -1273,6 +1310,10 @@ def _do_messages_search(
     When after/before are given, only sessions whose timestamp_first falls in
     the specified range are searched (pre-filtering via engine.get_sessions).
     """
+    if max_chars is None:
+        max_chars = _cfg_default("max_chars", 0)
+    if fmt is None:
+        fmt = _cfg_default("format", "table")
     tag = f" [tool: {tool}]" if tool else ""
 
     # Pre-filter to sessions in the date range when requested
@@ -1795,10 +1836,12 @@ def _do_get(
     session_id: Optional[str],
     message_type: Optional[str] = None,
     limit: int = 10,
-    max_chars: int = 0,
-    fmt: str = "table",
+    max_chars: Optional[int] = None,
+    fmt: Optional[str] = None,
 ) -> None:
     """Get messages from a specific session."""
+    if max_chars is None:
+        max_chars = _cfg_default("max_chars", 0)
     if not session_id:
         err_console.print("[red]Session ID is required.[/red] Use 'aise list' to find session IDs.")
         raise typer.Exit(code=1)
@@ -1858,7 +1901,7 @@ def _do_stats(engine, after: Optional[str] = None, before: Optional[str] = None)
 @export_app.command("session")
 def export_session(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     session_id: str = typer.Argument(..., help="Session ID (prefix match, e.g. ab841016)."),
     output: Optional[str] = typer.Option(
         None, "--output", "-o",
@@ -1887,7 +1930,7 @@ def export_session(
 @export_app.command("recent")
 def export_recent(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     days: int = typer.Argument(7, help="Number of days back to include (default: 7)."),
     output: Optional[str] = typer.Option(
         None, "--output", "-o",
@@ -1915,7 +1958,7 @@ def export_recent(
 @files_app.command("search")
 def files_search(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     pattern: str = typer.Option("*", "--pattern", "-p", help="Filename glob/regex to match (e.g. '*.py', 'cli*'). Default: * (all files)"),
     min_edits: int = typer.Option(0, "--min-edits", help="Only show files edited at least this many times across all sessions. Default: 0"),
     max_edits: Optional[int] = typer.Option(None, "--max-edits", help="Only show files edited at most this many times. Default: unlimited"),
@@ -1929,7 +1972,7 @@ def files_search(
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
     limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited"),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
 ) -> None:
     """Search source files found in Claude Code session data.
 
@@ -1958,7 +2001,7 @@ files_app.command("find")(files_search)
 @files_app.command("extract")
 def files_extract(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
     version: Optional[int] = typer.Option(
         None, "--version", "-v",
@@ -2028,7 +2071,7 @@ def files_extract(
 @files_app.command("history")
 def files_history(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to versions from this session ID (prefix match)."),
     export: bool = typer.Option(False, "--export", help="Write all versions to disk as cli_v1.py, cli_v2.py, etc."),
@@ -2076,10 +2119,10 @@ def files_history(
 @files_app.command("cross-ref")
 def files_cross_ref(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     file: str = typer.Argument(..., help="Path to a file to compare against session edits (e.g. ./cli.py)."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to one session (prefix match)."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
 ) -> None:
     """Show which edits Claude made to a file are present in its current version.
 
@@ -2101,13 +2144,13 @@ def files_cross_ref(
 
 def _messages_search_cmd(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     query: Optional[str] = typer.Argument(None, help="Text to search for in messages. Use quotes for multi-word queries."),
     query_opt: Optional[str] = typer.Option(None, "--query", "-q", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
-    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = full."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
+    max_chars: int = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
     tool: Optional[str] = typer.Option(
         None, "--tool",
         help="Filter for tool call invocations (e.g. Bash, Edit, Write). Implies --type assistant.",
@@ -2153,13 +2196,13 @@ _register_alias(messages_app, _messages_search_cmd, "search", "find")
 @messages_app.command("get")
 def messages_get(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016). Find IDs via 'aise list'."),
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
-    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = full."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
+    max_chars: int = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
 ) -> None:
     """Read messages from one specific Claude Code session.
 
@@ -2180,7 +2223,7 @@ def messages_get(
 @messages_app.command("corrections")
 def messages_corrections(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
     since:  Optional[str] = _OPT_SINCE,
     until:  Optional[str] = _OPT_UNTIL,
@@ -2188,7 +2231,7 @@ def messages_corrections(
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
     limit: int = typer.Option(20, "--limit", help="Max corrections to return. Default: 20"),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
     pattern: Optional[List[str]] = typer.Option(
         None, "--pattern",
         help=(
@@ -2230,14 +2273,14 @@ def messages_corrections(
 @messages_app.command("planning")
 def messages_planning(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
     since:  Optional[str] = _OPT_SINCE,
     until:  Optional[str] = _OPT_UNTIL,
     when:   Optional[str] = _OPT_WHEN,
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
     commands: Optional[str] = typer.Option(
         None, "--commands",
         help=(
@@ -2279,9 +2322,9 @@ def messages_planning(
 @messages_app.command("inspect")
 def messages_inspect(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. ab841016). Find IDs via 'aise list'."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
 ) -> None:
     """Show per-session statistics: message counts, tool usage, and files touched.
 
@@ -2302,9 +2345,9 @@ def messages_inspect(
 @messages_app.command("timeline")
 def messages_timeline(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. ab841016). Find IDs via 'aise list'."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
     preview_chars: int = typer.Option(
         150, "--preview-chars",
         help="Max characters to show in content preview column. Default: 150",
@@ -2381,14 +2424,14 @@ def _do_messages_extract(
 @messages_app.command("extract")
 def messages_extract(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     session_id: str = typer.Argument(..., help="Session ID prefix (e.g. dddd0001). Find IDs via 'aise list'."),
     content_type: str = typer.Argument(
         ...,
         help=f"Content type to extract. Supported: {', '.join(_EXTRACT_TYPES)}.",
         metavar="TYPE",
     ),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
     limit: Optional[int] = typer.Option(None, "--limit", help="Max items to return. Default: unlimited."),
 ) -> None:
     """Extract specific content from a Claude Code session.
@@ -2426,12 +2469,12 @@ def messages_extract(
 
 def _tools_search_cmd(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     tool: str = typer.Argument(..., help="Tool name (e.g. Bash, Edit, Write, Read, Glob, Grep)."),
     query: Optional[str] = typer.Argument(None, help="Optional text to match in tool input. Omit to list all uses."),
     limit: int = typer.Option(10, "--limit", help="Max results. Default: 10"),
-    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each result to N chars. 0=full."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain."),
+    max_chars: int = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
     since: Optional[str] = _OPT_SINCE,
     until: Optional[str] = _OPT_UNTIL,
     when: Optional[str] = _OPT_WHEN,
@@ -2547,7 +2590,7 @@ Full specification: https://www.loc.gov/standards/datetime/
 @app.command("list")
 def list_sessions(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
     since:  Optional[str] = _OPT_SINCE,
     until:  Optional[str] = _OPT_UNTIL,
@@ -2555,7 +2598,7 @@ def list_sessions(
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
     limit: Optional[int] = typer.Option(None, "--limit", help="Max sessions to return. Default: unlimited."),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    fmt: Optional[str] = _OPT_FORMAT,
 ) -> None:
     """List sessions with metadata.
 
@@ -2595,11 +2638,11 @@ def _root_search_cmd(
     before: Optional[str] = _OPT_BEFORE,
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="[messages] Show only 'user' or 'assistant' messages. Default: both"),
     limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited for files, 10 for messages"),
-    max_chars: int = typer.Option(0, "--max-chars", help="[messages] Truncate each message to this many characters. 0 = full message. Default: 0"),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
+    max_chars: int = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
     tool: Optional[str] = typer.Option(None, "--tool",
         help="[messages/tools] Filter for tool call invocations (e.g. Bash, Edit, Write). Auto-routes to messages domain."),
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
 ) -> None:
     """Search messages, files, and tool calls across all sources.
 
@@ -2710,9 +2753,9 @@ def get(
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
-    max_chars: int = typer.Option(0, "--max-chars", help="Truncate each message to this many characters. 0 = show full message. Default: 0"),
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, csv, plain. Default: table"),
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    max_chars: Optional[int] = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
+    provider: Optional[str] = _OPT_PROVIDER,
 ) -> None:
     """Read messages from one specific session.
 
@@ -2733,7 +2776,7 @@ def get(
 @app.command()
 def stats(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="Sessions from: claude | aistudio | gemini | all. Overrides global --provider."),
+    provider: Optional[str] = _OPT_PROVIDER,
     since: Optional[str] = _OPT_SINCE,
     until: Optional[str] = _OPT_UNTIL,
     when: Optional[str] = _OPT_WHEN,
