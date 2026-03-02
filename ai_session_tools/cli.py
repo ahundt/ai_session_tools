@@ -1892,7 +1892,7 @@ def _do_get(
 
 
 def _do_stats(
-    engine,
+    engine: "SessionBackend",
     after: Optional[str] = None,
     before: Optional[str] = None,
     fmt: Optional[str] = None,
