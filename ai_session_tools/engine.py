@@ -199,6 +199,23 @@ _EXPORT_FILTER_PATTERNS = (
 )
 
 
+def _passes_date_filter(ts: str, after: Optional[str], before: Optional[str]) -> bool:
+    """Return True iff ISO timestamp ts falls within [after, before] (inclusive).
+
+    - Both after and before default to None (no restriction); any combination works.
+    - Empty ts with any active filter → False (consistent with FilterSpec semantics).
+    - ISO 8601 lexicographic order == chronological for fixed-width prefixes.
+    - Pure function: no I/O, no side effects. O(1).
+    """
+    if (after or before) and not ts:
+        return False   # unknown timestamp excluded when filtering is active
+    if after and ts < after:
+        return False
+    if before and ts > before:
+        return False
+    return True
+
+
 class SessionRecoveryEngine:
     """Core recovery engine with clean separation of concerns."""
 
@@ -830,14 +847,7 @@ class SessionRecoveryEngine:
                     has_compact = True
                 if data.get("type") in ("user", "assistant"):
                     message_count += 1
-            # Exclude sessions with no timestamp when a date filter is active,
-            # consistent with FilterSpec.matches_datetime() which returns False for
-            # None/empty values when after or before is set.
-            if (after or before) and not ts_first:
-                continue
-            if after and ts_first and ts_first < after:
-                continue
-            if before and ts_first and ts_first > before:
+            if not _passes_date_filter(ts_first, after, before):
                 continue
             sessions.append(SessionInfo(
                 session_id=session_id,
@@ -1406,37 +1416,52 @@ class SessionRecoveryEngine:
 
         return results
 
-    def get_statistics(self) -> RecoveryStatistics:
-        """Get recovery statistics across all sessions.
+    def get_statistics(
+        self,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+    ) -> RecoveryStatistics:
+        """Get recovery statistics. Defaults to all sessions (no date restriction).
 
-        total_sessions is counted from projects_dir via _iter_all_jsonl() — the same
-        data source as get_sessions(). The recovery_dir scan (for total_files and
-        total_versions) is kept for backward compatibility but does not gate the
-        session count.
+        When after/before given, counts only sessions whose timestamp_first is in range.
+        Delegates to get_sessions() for date-aware counting — no filter logic duplicated.
         """
-        # Count sessions from projects_dir — same as get_sessions()
-        total_sessions = sum(1 for _ in self._iter_all_jsonl())
+        if after or before:
+            # Date filter active: scan JSONL for timestamps via get_sessions()
+            filtered = self.get_sessions(after=after, before=before)
+            total_sessions = len(filtered)
+            filtered_ids: Optional[frozenset] = frozenset(s.session_id for s in filtered)
+        else:
+            # No filter: fast path (file enumeration only, no JSONL content read)
+            total_sessions = sum(1 for _ in self._iter_all_jsonl())
+            filtered_ids = None   # None → include all session dirs below
 
         total_files = 0
         total_versions = 0
         largest_file = None
         largest_edits = 0
 
-        # Files and versions remain recovery-dir-specific (unchanged logic)
         if self.recovery_dir.exists():
+            # File count: recovery_dir/session_<session_id>/ (excludes all_versions dirs)
             for session_dir in self.recovery_dir.glob("session_*"):
                 if not session_dir.is_dir() or "all_versions" in session_dir.name:
                     continue
+                sid = session_dir.name.removeprefix("session_")
+                if filtered_ids is not None and sid not in filtered_ids:
+                    continue   # O(1) frozenset lookup
                 for file_path in session_dir.glob("*"):
                     if file_path.is_file():
                         total_files += 1
 
-            # Count versions globally (accumulate across all sessions before comparing)
+            # Version count: recovery_dir/session_all_versions_<session_id>/
             file_version_totals: Dict[str, int] = defaultdict(int)
             for session_dir in self._version_dirs:
+                # _version_dirs: dirs named "session_all_versions_<session_id>"
+                sid = session_dir.name.removeprefix("session_all_versions_")
+                if filtered_ids is not None and sid not in filtered_ids:
+                    continue   # O(1) frozenset lookup
                 version_files = list(session_dir.glob("*_v*_line_*.txt"))
                 total_versions += len(version_files)
-
                 for v_file in version_files:
                     filename = self._extract_filename(v_file.name)
                     file_version_totals[filename] += 1
@@ -1922,10 +1947,16 @@ class SessionBackend:
 
     def get_sessions(self, project_filter: str | None = None,
                      after: str | None = None, before: str | None = None) -> list:
-        """List sessions. Maps SRE.get_sessions() / MSE.list_sessions()."""
+        """List sessions. Applies date filter for all backends via _passes_date_filter."""
         if self._is_claude:
             return self._backend.get_sessions(project_filter, after, before)
-        return self._backend.list_sessions()
+        sessions = self._backend.list_sessions()
+        if after or before:   # only filter when needed (default: no restriction)
+            sessions = [
+                s for s in sessions
+                if _passes_date_filter(s.timestamp_first, after, before)
+            ]
+        return sessions
 
     def get_messages(self, session_id: str,
                      message_type: str | None = None) -> list:
@@ -1948,16 +1979,25 @@ class SessionBackend:
                     break
         return found
 
-    def get_statistics(self) -> dict:
-        """Get stats as a normalized dict (consistent return type for all backends).
+    def get_statistics(self, after: str | None = None, before: str | None = None) -> dict:
+        """Get stats as a normalized dict. Default after=None, before=None: no date restriction.
 
         Returns keys: total_sessions, total_files, total_versions.
         Avoids RecoveryStatistics | dict union type — callers never need isinstance checks.
         """
         if self._is_claude:
-            s = self._backend.get_statistics()
+            s = self._backend.get_statistics(after=after, before=before)
             return {k: getattr(s, k, 0) for k in
                     ("total_sessions", "total_files", "total_versions")}
+        if after or before:
+            # Non-Claude (aistudio, gemini_cli): recount from filtered sessions.
+            # total_files and total_versions are always 0 for non-Claude backends.
+            sessions = self.get_sessions(after=after, before=before)
+            per_source: dict[str, int] = {}
+            for s in sessions:
+                key = f"{s.provider}_sessions"
+                per_source[key] = per_source.get(key, 0) + 1
+            return {"total_sessions": len(sessions), "total_files": 0, "total_versions": 0, **per_source}
         raw = self._backend.stats()
         # MultiSourceEngine.stats() returns source-specific keys (e.g. aistudio_sessions=1167).
         # Normalize to total_sessions for display helpers that expect that key.

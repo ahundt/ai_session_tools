@@ -8212,3 +8212,140 @@ class TestParseDateInput:
     def test_since_flag_in_stats_help(self):
         result = runner.invoke(app, ["stats", "--help"])
         assert "--since" in result.output
+
+
+import re as _re_ver
+
+
+class TestVersionFlag:
+    """--version / -V must print 'aise X.Y.Z' and exit 0."""
+
+    def test_version_long_flag(self):
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert _re_ver.search(r"aise \d+\.\d+\.\d+", result.output), (
+            f"Expected 'aise X.Y.Z', got: {result.output!r}"
+        )
+
+    def test_version_short_flag(self):
+        result = runner.invoke(app, ["-V"])
+        assert result.exit_code == 0
+        assert _re_ver.search(r"aise \d+\.\d+\.\d+", result.output), (
+            f"Expected 'aise X.Y.Z', got: {result.output!r}"
+        )
+
+    def test_version_output_starts_with_aise(self):
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert result.output.strip().startswith("aise "), (
+            f"Output must start with 'aise ', got: {result.output!r}"
+        )
+
+    def test_version_works_without_subcommand(self):
+        """is_eager ensures --version fires before engine build; no 'No such option'."""
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert "No such option" not in result.output
+        assert "Error" not in result.output
+
+    def test_version_appears_in_help(self):
+        result = runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+        assert "--version" in result.output
+        assert "-V" in result.output
+
+    def test_version_and_short_produce_same_output(self):
+        r1 = runner.invoke(app, ["--version"])
+        r2 = runner.invoke(app, ["-V"])
+        assert r1.output == r2.output
+        assert r1.exit_code == r2.exit_code == 0
+
+
+import re as _re_stats
+
+
+class TestStatsDateFiltering:
+    """aise stats --since/--until/--when must filter session counts."""
+
+    # --- Unit test: the single source of truth ---
+
+    def test_passes_date_filter_no_filter(self):
+        """Default (no filter): always True regardless of timestamp."""
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("2026-03-01", None, None) is True
+        assert _passes_date_filter("", None, None) is True      # empty ts: no filter = pass
+
+    def test_passes_date_filter_after_only(self):
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("2026-03-01", "2026-01-01", None) is True
+        assert _passes_date_filter("2025-12-31", "2026-01-01", None) is False
+        assert _passes_date_filter("2026-01-01", "2026-01-01", None) is True   # inclusive
+
+    def test_passes_date_filter_before_only(self):
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("2026-03-01", None, "2026-12-31") is True
+        assert _passes_date_filter("2027-01-01", None, "2026-12-31") is False
+        assert _passes_date_filter("2026-12-31", None, "2026-12-31") is True   # inclusive
+
+    def test_passes_date_filter_both_bounds(self):
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("2026-06-01", "2026-01-01", "2026-12-31") is True
+        assert _passes_date_filter("2025-12-31", "2026-01-01", "2026-12-31") is False
+        assert _passes_date_filter("2027-01-01", "2026-01-01", "2026-12-31") is False
+
+    def test_passes_date_filter_empty_ts_with_active_filter(self):
+        """Empty timestamp is excluded when any filter is active."""
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("", "2026-01-01", None) is False
+        assert _passes_date_filter("", None, "2026-12-31") is False
+        assert _passes_date_filter("", "2026-01-01", "2026-12-31") is False
+
+    # --- CLI integration: flag acceptance ---
+
+    def test_stats_since_accepts_iso_date(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats", "--since", "2020-01-01"])
+        assert result.exit_code == 0
+
+    def test_stats_until_accepts_iso_date(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats", "--until", "2099-12-31"])
+        assert result.exit_code == 0
+
+    def test_stats_when_accepts_edtf_decade(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats", "--when", "202X"])
+        assert result.exit_code == 0
+
+    def test_stats_invalid_date_exits_nonzero(self):
+        result = runner.invoke(app, ["stats", "--since", "not-a-date"])
+        assert result.exit_code != 0
+        assert "not-a-date" in result.output or "Unrecognised" in result.output
+
+    def test_stats_no_flags_unchanged_behavior(self, tmp_path, monkeypatch):
+        """Default (no date flags): stats shows Sessions line, backward compatible."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0
+        assert "Sessions:" in result.output
+
+    # --- Filtering correctness ---
+
+    def test_stats_far_future_yields_zero_sessions(self, tmp_path, monkeypatch):
+        """--since year 2099 must report 0 sessions (filter is actually applied)."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats", "--since", "2099-01-01"])
+        assert result.exit_code == 0
+        assert "Sessions:" in result.output
+        match = _re_stats.search(r"Sessions:\s+(\d+)", result.output)
+        assert match, f"No 'Sessions: N' in output:\n{result.output}"
+        assert int(match.group(1)) == 0, (
+            f"Expected 0 sessions with --since 2099-01-01, got {match.group(1)}"
+        )
+
+    def test_stats_docstring_has_no_unimplemented_note(self):
+        """Help text must not say filtering is 'not yet applied'."""
+        result = runner.invoke(app, ["stats", "--help"])
+        assert result.exit_code == 0
+        assert "not yet applied" not in result.output
+        assert "planned for a future release" not in result.output

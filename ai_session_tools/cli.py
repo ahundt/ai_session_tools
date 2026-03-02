@@ -783,9 +783,23 @@ from ai_session_tools.engine import get_session_backend  # noqa: E402
 
 # ── Root app callback (global options + composition root) ────────────────────────
 
+def _version_callback(value: bool) -> None:
+    """Eager --version callback: prints 'aise X.Y.Z' and exits before engine builds."""
+    if value:
+        from ai_session_tools import __version__
+        typer.echo(f"aise {__version__}")
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
 def app_callback(
     ctx: typer.Context,
+    version: Optional[bool] = typer.Option(
+        None, "--version", "-V",
+        is_eager=True,
+        callback=_version_callback,
+        help="Show version and exit.",
+    ),
     claude_dir: Optional[str] = typer.Option(
         None, "--claude-dir",
         help="Path to Claude config dir. Default: ~/.claude.",
@@ -1791,9 +1805,9 @@ def _do_get(
     console.print(f"\n[bold]Found {len(messages_list)} messages[/bold]")
 
 
-def _do_stats(engine) -> None:
-    """Show recovery statistics. Accepts SessionBackend (dict) or SessionRecoveryEngine (dataclass)."""
-    stats_data = engine.get_statistics()
+def _do_stats(engine, after: Optional[str] = None, before: Optional[str] = None) -> None:
+    """Show recovery statistics. Default after=None, before=None: all sessions shown."""
+    stats_data = engine.get_statistics(after=after, before=before)
     if isinstance(stats_data, dict):
         sessions = stats_data.get("total_sessions", 0)
         files = stats_data.get("total_files", 0)
@@ -2720,21 +2734,20 @@ def stats(
 ) -> None:
     """Show session, file, and version counts per source.
 
-    Note: date filtering (--since/--until/--when) is parsed and validated but
-    not yet applied to aggregate statistics. Full counts are shown regardless.
-    Date-filtered statistics are planned for a future release.
-
     Examples:
-        aise stats                        # all configured sources
-        aise stats --provider aistudio    # AI Studio only
-        aise stats --provider claude      # Claude Code only
+        aise stats                              # all configured sources (no date restriction)
+        aise stats --provider aistudio         # AI Studio only
+        aise stats --provider claude           # Claude Code only
+        aise stats --since 7d                  # sessions from the last 7 days
+        aise stats --when 202X                 # sessions in the 2020s decade
+        aise stats --since 2026-01 --until 2026-03  # January through March 2026
     """
-    _normalize_date_range(since, until, when, after, before)   # validate flags; not yet applied
+    after, before = _normalize_date_range(since, until, when, after, before)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    _do_stats(engine)
+    _do_stats(engine, after=after, before=before)
 
 
 # ── Config app ───────────────────────────────────────────────────────────────
