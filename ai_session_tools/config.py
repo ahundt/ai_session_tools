@@ -88,7 +88,12 @@ def load_config() -> dict:
 
     with contextlib.suppress(OSError, json.JSONDecodeError):
         content = config_path.read_text(encoding="utf-8")
-        _config_cache = json.loads(content)
+        raw = json.loads(content)
+        migrated, changed = _migrate_config(raw)
+        if changed:
+            # Silently rewrite the config file with canonical key names.
+            config_path.write_text(json.dumps(migrated, indent=2), encoding="utf-8")
+        _config_cache = migrated
         _config_cache_key = current_key
         return _config_cache
 
@@ -128,6 +133,39 @@ def write_config(cfg: dict) -> None:
     path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     _config_cache = cfg                      # keep in-process cache current
     _config_cache_key = _resolved_config_key()  # update key so cache stays valid
+
+
+def _migrate_config(cfg: dict) -> tuple[dict, bool]:
+    """Rename deprecated config keys to canonical names. Idempotent and non-destructive.
+
+    Current migrations:
+      defaults.after  → defaults.since   (``--after`` was the old name for ``--since``)
+      defaults.before → defaults.until   (``--before`` was the old name for ``--until``)
+
+    Returns:
+        (migrated_cfg, was_changed) — a new dict (or the same dict if no changes)
+        and a boolean indicating whether any key was renamed.
+    """
+    _RENAMES: dict[str, dict[str, str]] = {
+        "defaults": {"after": "since", "before": "until"},
+    }
+    changed = False
+    result = cfg
+    for section, key_map in _RENAMES.items():
+        if section not in result:
+            continue
+        section_dict = result[section]
+        if not isinstance(section_dict, dict):
+            continue
+        for old_key, new_key in key_map.items():
+            if old_key in section_dict and new_key not in section_dict:
+                if not changed:
+                    # Copy-on-write: avoid mutating caller's dict
+                    result = {**result, section: dict(section_dict)}
+                    section_dict = result[section]
+                section_dict[new_key] = section_dict.pop(old_key)
+                changed = True
+    return result, changed
 
 
 def get_config_section(key: str, default=None):

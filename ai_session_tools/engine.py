@@ -222,10 +222,13 @@ _EXPORT_FILTER_PATTERNS = (
 )
 
 
-def _passes_date_filter(ts: str, after: Optional[str], before: Optional[str]) -> bool:
-    """Return True iff ISO timestamp ts falls within [after, before] (inclusive).
+def _passes_date_filter(ts: str, since: Optional[str], until: Optional[str]) -> bool:
+    """Return True iff ISO timestamp ts falls within [since, until] (inclusive).
 
-    - Both after and before default to None (no restriction); any combination works.
+    # ``since`` and ``until`` are the canonical param names; ``after``/``before``
+    # are deprecated hidden aliases kept for backward compatibility.
+
+    - Both since and until default to None (no restriction); any combination works.
     - None/empty ts with any active filter → False (consistent with FilterSpec semantics).
     - Normalizes ts to 19 chars (YYYY-MM-DDTHH:MM:SS) before comparison, stripping
       timezone designators (+00:00, Z) and sub-second precision so that timestamps
@@ -234,15 +237,15 @@ def _passes_date_filter(ts: str, after: Optional[str], before: Optional[str]) ->
     - ISO 8601 lexicographic order == chronological for fixed-width prefixes.
     - Pure function: no I/O, no side effects. O(1).
     """
-    if (after or before) and not ts:
+    if (since or until) and not ts:
         return False   # unknown/None timestamp excluded when filtering is active
-    if ts and (after or before):
+    if ts and (since or until):
         # Strip timezone suffix and sub-second precision for uniform comparison.
-        # after/before from _parse_date_input are always 19-char naive ISO strings.
+        # since/until from _parse_date_input are always 19-char naive ISO strings.
         ts = ts[:19]
-    if after and ts < after:
+    if since and ts < since:
         return False
-    if before and ts > before:
+    if until and ts > until:
         return False
     return True
 
@@ -844,15 +847,15 @@ class SessionRecoveryEngine:
     def get_sessions(
         self,
         project_filter: Optional[str] = None,
-        after: Optional[str] = None,
-        before: Optional[str] = None,
+        since: Optional[str] = None,   # canonical; --after is a hidden alias
+        until: Optional[str] = None,   # canonical; --before is a hidden alias
     ) -> List[SessionInfo]:
         """List all sessions with metadata, sorted newest-first.
 
         Args:
             project_filter: Substring to match against project_dir name. None = all projects.
-            after:  Only sessions with timestamp_first >= this (ISO prefix, e.g. "2026-01-15").
-            before: Only sessions with timestamp_first <= this (ISO prefix, e.g. "2026-12-31").
+            since:  Only sessions with timestamp_first >= this (ISO prefix, e.g. "2026-01-15").
+            until:  Only sessions with timestamp_first <= this (ISO prefix, e.g. "2026-12-31").
 
         Returns:
             List of SessionInfo, sorted by timestamp_first descending (newest first).
@@ -878,7 +881,7 @@ class SessionRecoveryEngine:
                     has_compact = True
                 if data.get("type") in ("user", "assistant"):
                     message_count += 1
-            if not _passes_date_filter(ts_first, after, before):
+            if not _passes_date_filter(ts_first, since, until):
                 continue
             sessions.append(SessionInfo(
                 session_id=session_id,
@@ -897,8 +900,8 @@ class SessionRecoveryEngine:
     def find_corrections(
         self,
         project_filter: Optional[str] = None,
-        after: Optional[str] = None,
-        before: Optional[str] = None,
+        since: Optional[str] = None,   # canonical; --after is a hidden alias
+        until: Optional[str] = None,   # canonical; --before is a hidden alias
         patterns: Optional[List[tuple]] = None,
         limit: int = 50,
     ) -> List[CorrectionMatch]:
@@ -906,8 +909,8 @@ class SessionRecoveryEngine:
 
         Args:
             project_filter: Substring to match project_dir. None = all projects.
-            after:    Only messages >= this timestamp (ISO prefix).
-            before:   Only messages <= this timestamp (ISO prefix).
+            since:    Only messages >= this timestamp (ISO prefix).
+            until:    Only messages <= this timestamp (ISO prefix).
             patterns: Override DEFAULT_CORRECTION_PATTERNS. Each tuple is
                       (category, [regex_keyword_strings]).
             limit:    Max results. Default: 50.
@@ -934,9 +937,9 @@ class SessionRecoveryEngine:
                             if data.get("type") != "user":
                                 continue
                             ts = data.get("timestamp", "")
-                            if after and ts and ts < after:
+                            if since and ts and ts < since:
                                 continue
-                            if before and ts and ts > before:
+                            if until and ts and ts > until:
                                 continue
                             content = self._extract_content(data)
                             if not content:
@@ -964,8 +967,8 @@ class SessionRecoveryEngine:
         self,
         commands: Optional[List[str]] = None,
         project_filter: Optional[str] = None,
-        after: Optional[str] = None,
-        before: Optional[str] = None,
+        since: Optional[str] = None,   # canonical; --after is a hidden alias
+        until: Optional[str] = None,   # canonical; --before is a hidden alias
     ) -> List[PlanningCommandCount]:
         """Count slash command usage across all sessions, sorted by frequency.
 
@@ -984,8 +987,8 @@ class SessionRecoveryEngine:
         Args:
             commands:       Regex patterns to match (pattern mode). ``None`` = auto-discover.
             project_filter: Substring to match project_dir. None = all projects.
-            after:          Only messages >= this timestamp (ISO prefix).
-            before:         Only messages <= this timestamp (ISO prefix).
+            since:          Only messages >= this timestamp (ISO prefix).
+            until:          Only messages <= this timestamp (ISO prefix).
 
         Returns:
             List of PlanningCommandCount, sorted by count descending.
@@ -1013,9 +1016,9 @@ class SessionRecoveryEngine:
                             if discovery_mode and data.get("type") != "user":
                                 continue
                             ts = data.get("timestamp", "")
-                            if after and ts and ts < after:
+                            if since and ts and ts < since:
                                 continue
-                            if before and ts and ts > before:
+                            if until and ts and ts > until:
                                 continue
                             content = self._extract_content(data)
                             if not content:
@@ -1437,29 +1440,29 @@ class SessionRecoveryEngine:
                 if message_type and msg_type_str != message_type.lower():
                     continue
                 if not pattern or pattern.search(msg.content):
-                    before = all_msgs[max(0, i - context): i]
-                    after = all_msgs[i + 1: i + 1 + context]
+                    ctx_before = all_msgs[max(0, i - context): i]
+                    ctx_after = all_msgs[i + 1: i + 1 + context]
                     results.append(ContextMatch(
                         match=msg,
-                        context_before=before,
-                        context_after=after,
+                        context_before=ctx_before,
+                        context_after=ctx_after,
                     ))
 
         return results
 
     def get_statistics(
         self,
-        after: Optional[str] = None,
-        before: Optional[str] = None,
+        since: Optional[str] = None,   # canonical; --after is a hidden alias
+        until: Optional[str] = None,   # canonical; --before is a hidden alias
     ) -> RecoveryStatistics:
         """Get recovery statistics. Defaults to all sessions (no date restriction).
 
-        When after/before given, counts only sessions whose timestamp_first is in range.
+        When since/until given, counts only sessions whose timestamp_first is in range.
         Delegates to get_sessions() for date-aware counting — no filter logic duplicated.
         """
-        if after or before:
+        if since or until:
             # Date filter active: scan JSONL for timestamps via get_sessions()
-            filtered = self.get_sessions(after=after, before=before)
+            filtered = self.get_sessions(since=since, until=until)
             total_sessions = len(filtered)
             filtered_ids: Optional[frozenset] = frozenset(s.session_id for s in filtered)
         else:
@@ -1977,15 +1980,17 @@ class SessionBackend:
         return self.search_messages(query, message_type)  # no context for non-Claude
 
     def get_sessions(self, project_filter: str | None = None,
-                     after: str | None = None, before: str | None = None) -> list:
+                     since: str | None = None,   # canonical; after= is a hidden alias
+                     until: str | None = None,   # canonical; before= is a hidden alias
+                     ) -> list:
         """List sessions. Applies date filter for all backends via _passes_date_filter."""
         if self._is_claude:
-            return self._backend.get_sessions(project_filter, after, before)
+            return self._backend.get_sessions(project_filter, since, until)
         sessions = self._backend.list_sessions()
-        if after or before:   # only filter when needed (default: no restriction)
+        if since or until:   # only filter when needed (default: no restriction)
             sessions = [
                 s for s in sessions
-                if _passes_date_filter(s.timestamp_first, after, before)
+                if _passes_date_filter(s.timestamp_first, since, until)
             ]
         return sessions
 
@@ -2010,20 +2015,22 @@ class SessionBackend:
                     break
         return found
 
-    def get_statistics(self, after: str | None = None, before: str | None = None) -> dict:
-        """Get stats as a normalized dict. Default after=None, before=None: no date restriction.
+    def get_statistics(self, since: str | None = None,   # canonical; after= is a hidden alias
+                       until: str | None = None,         # canonical; before= is a hidden alias
+                       ) -> dict:
+        """Get stats as a normalized dict. Default since=None, until=None: no date restriction.
 
         Returns keys: total_sessions, total_files, total_versions.
         Avoids RecoveryStatistics | dict union type — callers never need isinstance checks.
         """
         if self._is_claude:
-            s = self._backend.get_statistics(after=after, before=before)
+            s = self._backend.get_statistics(since=since, until=until)
             return {k: getattr(s, k, 0) for k in
                     ("total_sessions", "total_files", "total_versions")}
-        if after or before:
+        if since or until:
             # Non-Claude (aistudio, gemini_cli): recount from filtered sessions.
             # total_files and total_versions are always 0 for non-Claude backends.
-            sessions = self.get_sessions(after=after, before=before)
+            sessions = self.get_sessions(since=since, until=until)
             per_source: dict[str, int] = {}
             for s in sessions:
                 key = f"{s.provider}_sessions"

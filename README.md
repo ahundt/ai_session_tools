@@ -143,7 +143,7 @@ aise list --provider all       # explicit all (default)
 aise list --project myproject
 
 # Sessions since a date
-aise list --after 2026-01-15
+aise list --since 2026-01-15
 
 # JSON output
 aise list --format json
@@ -181,7 +181,7 @@ aise files search --pattern "*.py"
 aise files search --min-edits 5
 
 # Python and Markdown, after a date
-aise files search -i py,md --after 2026-01-15
+aise files search -i py,md --since 2026-01-15
 
 # Exclude compiled files
 aise files search -x pyc,tmp,o
@@ -343,7 +343,7 @@ Count slash commands you've invoked across all sessions:
 aise messages planning
 
 # Filter by project or date range
-aise messages planning --project myproject --after 2026-01-01
+aise messages planning --project myproject --since 2026-01-01
 
 # JSON output
 aise messages planning --format json

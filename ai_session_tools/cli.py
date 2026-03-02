@@ -614,7 +614,10 @@ _OPT_WHEN = typer.Option(
         "Run 'aise dates' for full format reference."
     ),
 )
-# Hidden backward-compatible aliases (accepted but not shown in --help)
+# Hidden backward-compatible aliases for --since/--until (not shown in --help).
+# ``--since`` and ``--until`` are the CANONICAL date options; ``--after``/``--before``
+# are kept only for scripts/users who adopted the old names and will be retired in a
+# future major release. New code must use --since/--until exclusively.
 _OPT_AFTER  = typer.Option(None, "--after",  hidden=True)
 _OPT_BEFORE = typer.Option(None, "--before", hidden=True)
 
@@ -1033,8 +1036,8 @@ def _filter_versions(
     session: Optional[str] = None,
     include_sessions: Set[str] = frozenset(),
     exclude_sessions: Set[str] = frozenset(),
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> List[FileVersion]:
     """Filter FileVersion list by composable criteria. All filters are ANDed."""
     result = versions
@@ -1050,11 +1053,11 @@ def _filter_versions(
     # --exclude-sessions: remove matching sessions
     if exclude_sessions:
         result = [v for v in result if not any(v.session_id.startswith(i) for i in exclude_sessions)]
-    # --after / --before: filter by version timestamp
-    if after:
-        result = [v for v in result if v.timestamp and v.timestamp >= after[:len(v.timestamp)]]
-    if before:
-        result = [v for v in result if v.timestamp and v.timestamp <= before[:len(v.timestamp)]]
+    # --since / --until: filter by version timestamp
+    if since:
+        result = [v for v in result if v.timestamp and v.timestamp >= since[:len(v.timestamp)]]
+    if until:
+        result = [v for v in result if v.timestamp and v.timestamp <= until[:len(v.timestamp)]]
     return result
 
 
@@ -1291,8 +1294,8 @@ def _do_files_search(
     exclude_extensions: Optional[str] = None,
     include_sessions: Optional[str] = None,
     exclude_sessions: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
     limit: Optional[int] = None,
     fmt: str = "table",
 ) -> None:
@@ -1302,7 +1305,7 @@ def _do_files_search(
     inc_sessions = {s.strip() for s in include_sessions.split(",") if s.strip()} if include_sessions else set()
     exc_sessions = {s.strip() for s in exclude_sessions.split(",") if s.strip()} if exclude_sessions else set()
 
-    filters = FilterSpec(min_edits=min_edits, max_edits=max_edits, after=after, before=before)
+    filters = FilterSpec(min_edits=min_edits, max_edits=max_edits, after=since, before=until)
     if inc_ext or exc_ext:
         filters.with_extensions(include=inc_ext or None, exclude=exc_ext or None)
     if inc_sessions or exc_sessions:
@@ -1330,13 +1333,13 @@ def _do_messages_search(
     fmt: Optional[str] = None,
     tool: Optional[str] = None,
     context: int = 0,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> None:
     """Search messages across all sessions. When context > 0, each result includes
     up to ``context`` surrounding messages from the same session file.
 
-    When after/before are given, only sessions whose timestamp_first falls in
+    When since/until are given, only sessions whose timestamp_first falls in
     the specified range are searched (pre-filtering via engine.get_sessions).
     """
     if max_chars is None:
@@ -1347,8 +1350,8 @@ def _do_messages_search(
 
     # Pre-filter to sessions in the date range when requested
     valid_session_ids: Optional[set] = None
-    if after or before:
-        sessions = engine.get_sessions(after=after, before=before)
+    if since or until:
+        sessions = engine.get_sessions(since=since, until=until)
         valid_session_ids = {s.session_id for s in sessions}
 
     if context > 0:
@@ -1421,13 +1424,13 @@ def _do_messages_search(
 def _do_list_sessions(
     engine: SessionRecoveryEngine,
     project: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
     limit: Optional[int] = None,
     fmt: str = "table",
 ) -> None:
     """List sessions with metadata."""
-    sessions = engine.get_sessions(project_filter=project, after=after, before=before)
+    sessions = engine.get_sessions(project_filter=project, since=since, until=until)
     if limit:
         sessions = sessions[:limit]
     _render_output(sessions, fmt, _LIST_SPEC, "No sessions found")
@@ -1509,8 +1512,8 @@ def _parse_commands_option(raw: Optional[str]) -> Optional[List[str]]:
 def _do_messages_corrections(
     engine: SessionRecoveryEngine,
     project: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
     limit: int = 20,
     fmt: str = "table",
     pattern_overrides: Optional[List[str]] = None,
@@ -1536,7 +1539,7 @@ def _do_messages_corrections(
             # Built-in defaults — lowest priority (engine uses DEFAULT_CORRECTION_PATTERNS)
             patterns = None
     corrections = engine.find_corrections(
-        project_filter=project, after=after, before=before,
+        project_filter=project, since=since, until=until,
         limit=limit, patterns=patterns,
     )
     _render_output(corrections, fmt, _CORRECTIONS_SPEC, "No corrections found")
@@ -1545,8 +1548,8 @@ def _do_messages_corrections(
 def _do_messages_planning(
     engine: SessionRecoveryEngine,
     project: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
     fmt: str = "table",
     commands_raw: Optional[str] = None,
 ) -> None:
@@ -1571,7 +1574,7 @@ def _do_messages_planning(
             # Built-in defaults — lowest priority (engine uses DEFAULT_PLANNING_COMMANDS)
             commands = None
     results = engine.analyze_planning_usage(
-        project_filter=project, after=after, before=before,
+        project_filter=project, since=since, until=until,
         commands=commands,
     )
     _render_output(results, fmt, _PLANNING_SPEC, "No planning commands found")
@@ -1650,17 +1653,17 @@ def _do_messages_timeline(
     fmt: str = "table",
     preview_chars: int = 150,
     message_type: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> None:
     """Show chronological event timeline for a session."""
     events = engine.timeline_session(session_id, preview_chars=preview_chars)
     if message_type:
         events = [e for e in events if e.get("type") == message_type]
-    if after:
-        events = [e for e in events if (e.get("timestamp") or "") >= after]
-    if before:
-        events = [e for e in events if (e.get("timestamp") or "") <= before]
+    if since:
+        events = [e for e in events if (e.get("timestamp") or "") >= since]
+    if until:
+        events = [e for e in events if (e.get("timestamp") or "") <= until]
     if not events:
         # Distinguish "session file not found" from "session has no user/assistant events"
         session_files = engine._find_session_files(session_id)
@@ -1756,8 +1759,8 @@ def _do_export_recent(
 ) -> None:
     """Export all sessions from last N days to markdown."""
     import datetime as _dt
-    after = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
-    sessions = engine.get_sessions(project_filter=project, after=after)
+    since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
+    sessions = engine.get_sessions(project_filter=project, since=since)
     if not sessions:
         console.print("[yellow]No sessions found[/yellow]")
         return
@@ -1791,8 +1794,8 @@ def _do_search(  # noqa: C901
     exclude_extensions: Optional[str],
     include_sessions: Optional[str],
     exclude_sessions: Optional[str],
-    after: Optional[str],
-    before: Optional[str],
+    since: Optional[str],          # canonical; after= is a hidden alias
+    until: Optional[str],          # canonical; before= is a hidden alias
     message_type: Optional[str],
     limit: Optional[int],
     max_chars: int,
@@ -1851,13 +1854,13 @@ def _do_search(  # noqa: C901
             engine, pattern or "*", min_edits, max_edits,
             include_extensions, exclude_extensions,
             include_sessions, exclude_sessions,
-            after, before, limit, fmt,
+            since, until, limit, fmt,
         )
 
     if domain in ("messages", "both"):
         msg_limit = limit if limit is not None else 10
         _do_messages_search(engine, query or "", message_type, msg_limit, max_chars, fmt,
-                            tool=tool, after=after, before=before)
+                            tool=tool, since=since, until=until)
 
 
 def _do_get(
@@ -1867,8 +1870,8 @@ def _do_get(
     limit: int = 10,
     max_chars: Optional[int] = None,
     fmt: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> None:
     """Get messages from a specific session."""
     if max_chars is None:
@@ -1877,9 +1880,9 @@ def _do_get(
         err_console.print("[red]Session ID is required.[/red] Use 'aise list' to find session IDs.")
         raise typer.Exit(code=1)
     messages_list = engine.get_messages(session_id, message_type)
-    if after or before:
+    if since or until:
         from ai_session_tools.engine import _passes_date_filter
-        messages_list = [m for m in messages_list if _passes_date_filter(m.timestamp, after, before)]
+        messages_list = [m for m in messages_list if _passes_date_filter(m.timestamp, since, until)]
     messages_list = messages_list[:limit]
 
     if not messages_list:
@@ -1893,14 +1896,14 @@ def _do_get(
 
 def _do_stats(
     engine: "SessionBackend",
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
     fmt: Optional[str] = None,
 ) -> None:
-    """Show recovery statistics. Default after=None, before=None: all sessions shown."""
+    """Show recovery statistics. Default since=None, until=None: all sessions shown."""
     if fmt is None:
         fmt = _cfg_default("format", "table")
-    stats_data = engine.get_statistics(after=after, before=before)
+    stats_data = engine.get_statistics(since=since, until=until)
     if isinstance(stats_data, dict):
         sessions = stats_data.get("total_sessions", 0)
         files = stats_data.get("total_files", 0)
@@ -2052,8 +2055,8 @@ def files_search(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    after, before = _normalize_date_range(since, until, when, after, before)
-    _do_files_search(engine, pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, after, before, limit, fmt)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    _do_files_search(engine, pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, since, until, limit, fmt)
 
 
 # Register 'find' as alias for 'files search'
@@ -2164,7 +2167,7 @@ def files_history(
         aise files history cli.py --export --export-dir ./versions
         aise files history cli.py --stdout                  # all versions to stdout
     """
-    after, before = _normalize_date_range(since, until, when, after, before)
+    since, until = _normalize_date_range(since, until, when, after, before)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
@@ -2174,10 +2177,10 @@ def files_history(
     if session:
         versions = [v for v in versions if v.session_id.startswith(session)]
 
-    # Date filter: keep only versions whose timestamp falls in [after, before]
-    if after or before:
+    # Date filter: keep only versions whose timestamp falls in [since, until]
+    if since or until:
         from ai_session_tools.engine import _passes_date_filter
-        versions = [v for v in versions if _passes_date_filter(v.timestamp or "", after, before)]
+        versions = [v for v in versions if _passes_date_filter(v.timestamp or "", since, until)]
 
     if not versions:
         err_console.print(f"[red]No versions found for:[/red] {name}  (check filters)")
@@ -2262,9 +2265,9 @@ def _messages_search_cmd(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    after, before = _normalize_date_range(since, until, when, after, before)
+    since, until = _normalize_date_range(since, until, when, after, before)
     _do_messages_search(engine, q or "", message_type, limit, max_chars, fmt,
-                        tool=tool, context=context, after=after, before=before)
+                        tool=tool, context=context, since=since, until=until)
 
 
 _register_alias(messages_app, _messages_search_cmd, "search", "find")
@@ -2294,14 +2297,14 @@ def messages_get(
         aise messages get ab841016 --type user
         aise messages get ab841016 --since 14:00  # messages after 2pm
     """
-    after, before = _normalize_date_range(since, until, when, after, before)
+    since, until = _normalize_date_range(since, until, when, after, before)
     sid = session_id or session_opt
     # Get backend from composition root (ctx.obj injected by app_callback)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    _do_get(engine, sid, message_type, limit, max_chars, fmt, after=after, before=before)
+    _do_get(engine, sid, message_type, limit, max_chars, fmt, since=since, until=until)
 
 
 @messages_app.command("corrections")
@@ -2349,8 +2352,8 @@ def messages_corrections(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    after, before = _normalize_date_range(since, until, when, after, before)
-    _do_messages_corrections(engine, project, after, before, limit, fmt,
+    since, until = _normalize_date_range(since, until, when, after, before)
+    _do_messages_corrections(engine, project, since, until, limit, fmt,
                               pattern_overrides=pattern)
 
 
@@ -2399,8 +2402,8 @@ def messages_planning(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    after, before = _normalize_date_range(since, until, when, after, before)
-    _do_messages_planning(engine, project, after, before, fmt, commands_raw=commands)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    _do_messages_planning(engine, project, since, until, fmt, commands_raw=commands)
 
 
 @messages_app.command("inspect")
@@ -2461,7 +2464,7 @@ def messages_timeline(
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     _do_messages_timeline(engine, session_id, fmt, preview_chars=preview_chars,
-                          message_type=message_type, after=since, before=until)
+                          message_type=message_type, since=since, until=until)
 
 
 #: Supported content extraction types for ``messages extract``.
@@ -2485,8 +2488,8 @@ def _do_messages_extract(
     content_type: str,
     fmt: str = "table",
     limit: Optional[int] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
+    since: Optional[str] = None,   # canonical; after= is a hidden alias
+    until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> None:
     """Extract specific content type from a session."""
     if content_type not in _EXTRACT_TYPES:
@@ -2502,9 +2505,9 @@ def _do_messages_extract(
                 f"[red]No session found or no clipboard content for: {session_id!r}[/red]"
             )
             raise typer.Exit(code=1)
-        if after or before:
+        if since or until:
             from ai_session_tools.engine import _passes_date_filter
-            results = [r for r in results if _passes_date_filter(r.get("timestamp", ""), after, before)]
+            results = [r for r in results if _passes_date_filter(r.get("timestamp", ""), since, until)]
         if limit is not None:
             results = results[:limit]
         _render_output(results, fmt, _EXTRACT_PBCOPY_SPEC, "No clipboard content found")
@@ -2552,12 +2555,12 @@ def messages_extract(
 
         aise messages extract dddd0001 pbcopy --limit 3
     """
-    after, before = _normalize_date_range(since, until, when, after, before)
+    since, until = _normalize_date_range(since, until, when, after, before)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    _do_messages_extract(engine, session_id, content_type, fmt, limit=limit, after=after, before=before)
+    _do_messages_extract(engine, session_id, content_type, fmt, limit=limit, since=since, until=until)
 
 
 # ── tools_app commands ────────────────────────────────────────────────────────
@@ -2596,7 +2599,7 @@ def _tools_search_cmd(
     _do_messages_search(
         engine, query or "", message_type="assistant",
         limit=limit, max_chars=max_chars, fmt=fmt, tool=tool,
-        after=since, before=until,
+        since=since, until=until,
     )
 
 
@@ -2710,8 +2713,8 @@ def list_sessions(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    after, before = _normalize_date_range(since, until, when, after, before)
-    _do_list_sessions(engine, project, after, before, limit, fmt)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    _do_list_sessions(engine, project, since, until, limit, fmt)
 
 
 def _root_search_cmd(
@@ -2755,11 +2758,11 @@ def _root_search_cmd(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    after, before = _normalize_date_range(since, until, when, after, before)
+    since, until = _normalize_date_range(since, until, when, after, before)
     _do_search(
         engine, domain, pattern, query, min_edits, max_edits,
         include_extensions, exclude_extensions, include_sessions, exclude_sessions,
-        after, before, message_type, limit, max_chars, fmt, tool=tool,
+        since, until, message_type, limit, max_chars, fmt, tool=tool,
     )
 
 
@@ -2892,12 +2895,12 @@ def stats(
         aise stats --when 202X                 # sessions in the 2020s decade
         aise stats --since 2026-01 --until 2026-03  # January through March 2026
     """
-    after, before = _normalize_date_range(since, until, when, after, before)
+    since, until = _normalize_date_range(since, until, when, after, before)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    _do_stats(engine, after=after, before=before, fmt=fmt)
+    _do_stats(engine, since=since, until=until, fmt=fmt)
 
 
 # ── Config app ───────────────────────────────────────────────────────────────

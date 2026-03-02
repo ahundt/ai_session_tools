@@ -393,7 +393,7 @@ class TestGetSessionsAfterFilter:
     def test_after_2026_01_25(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         engine = _make_engine(tmp_path, projects)
-        sessions = engine.get_sessions(after="2026-01-25")
+        sessions = engine.get_sessions(since="2026-01-25")
         assert len(sessions) == 1
         assert "proj2" in sessions[0].project_dir
 
@@ -4638,21 +4638,21 @@ class TestGetSessionsNoTimestampFilter:
         """Sessions with no timestamp should be excluded when after= filter is set."""
         projects = _make_projects_for_edge_cases(tmp_path)
         engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
-        # after="2026-01-01" — s2 has no timestamp so should be excluded
-        sessions = engine.get_sessions(after="2026-01-01")
+        # since="2026-01-01" — s2 has no timestamp so should be excluded
+        sessions = engine.get_sessions(since="2026-01-01")
         session_ids = [s.session_id for s in sessions]
         assert "bbbb0002-0000-0000-0000-000000000000" not in session_ids, (
-            "Session with no timestamp should be excluded when after= filter is active"
+            "Session with no timestamp should be excluded when since= filter is active"
         )
 
     def test_no_timestamp_session_excluded_when_before_filter_active(self, tmp_path):
-        """Sessions with no timestamp should be excluded when before= filter is set."""
+        """Sessions with no timestamp should be excluded when until= filter is set."""
         projects = _make_projects_for_edge_cases(tmp_path)
         engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
-        sessions = engine.get_sessions(before="2026-12-31")
+        sessions = engine.get_sessions(until="2026-12-31")
         session_ids = [s.session_id for s in sessions]
         assert "bbbb0002-0000-0000-0000-000000000000" not in session_ids, (
-            "Session with no timestamp should be excluded when before= filter is active"
+            "Session with no timestamp should be excluded when until= filter is active"
         )
 
     def test_no_timestamp_session_included_when_no_filter(self, tmp_path):
@@ -7932,8 +7932,8 @@ class TestCLIComposability:
         all_results = engine.search_messages("find_me")
         assert len(all_results) >= 2
 
-        # With --after 2025-01-01: only the 2026 session
-        sessions_after = engine.get_sessions(after="2025-01-01")
+        # With --since 2025-01-01: only the 2026 session
+        sessions_after = engine.get_sessions(since="2025-01-01")
         valid_ids = {s.session_id for s in sessions_after}
         filtered = [m for m in all_results if m.session_id in valid_ids]
         assert len(filtered) == 1, f"Only the 2026 session should match, got {len(filtered)}"
@@ -8793,3 +8793,95 @@ class TestConfigDefaults:
         assert defaults.get("format", "table") == "table"
         assert defaults.get("max_chars", 0) == 0
         assert defaults.get("provider", "all") == "all"
+
+
+class TestConfigMigration:
+    """_migrate_config() must rename deprecated keys to canonical names."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_config_cache(self, monkeypatch):
+        from ai_session_tools import config as _cfg_mod
+        _cfg_mod.set_config_path(None)
+        _cfg_mod.invalidate_config_cache()
+        yield
+        _cfg_mod.set_config_path(None)
+        _cfg_mod.invalidate_config_cache()
+
+    def test_migrate_no_op_on_clean_config(self):
+        """Already-canonical config: _migrate_config returns unchanged dict and False."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"defaults": {"format": "json", "since": "2026-01-01"}}
+        result, changed = _migrate_config(cfg)
+        assert changed is False
+        assert result == cfg
+
+    def test_migrate_defaults_after_to_since(self):
+        """Old 'after' key in defaults → renamed to 'since'."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"defaults": {"after": "2026-01-01", "format": "table"}}
+        result, changed = _migrate_config(cfg)
+        assert changed is True
+        assert "since" in result["defaults"]
+        assert result["defaults"]["since"] == "2026-01-01"
+        assert "after" not in result["defaults"]
+
+    def test_migrate_defaults_before_to_until(self):
+        """Old 'before' key in defaults → renamed to 'until'."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"defaults": {"before": "2026-12-31"}}
+        result, changed = _migrate_config(cfg)
+        assert changed is True
+        assert "until" in result["defaults"]
+        assert result["defaults"]["until"] == "2026-12-31"
+        assert "before" not in result["defaults"]
+
+    def test_migrate_both_keys(self):
+        """Both 'after' and 'before' in defaults → both renamed."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"defaults": {"after": "2026-01-01", "before": "2026-12-31"}}
+        result, changed = _migrate_config(cfg)
+        assert changed is True
+        assert result["defaults"] == {"since": "2026-01-01", "until": "2026-12-31"}
+
+    def test_migrate_idempotent(self):
+        """Running migration twice produces same result and second call is no-op."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"defaults": {"after": "2026-01-01"}}
+        result1, changed1 = _migrate_config(cfg)
+        result2, changed2 = _migrate_config(result1)
+        assert changed1 is True
+        assert changed2 is False
+        assert result1 == result2
+
+    def test_migrate_empty_config(self):
+        """Empty config: migration is a no-op."""
+        from ai_session_tools.config import _migrate_config
+        result, changed = _migrate_config({})
+        assert changed is False
+        assert result == {}
+
+    def test_migrate_no_defaults_section(self):
+        """Config without defaults section: migration is a no-op."""
+        from ai_session_tools.config import _migrate_config
+        cfg = {"source_dirs": {"claude": "/home/user/.claude"}}
+        result, changed = _migrate_config(cfg)
+        assert changed is False
+        assert result == cfg
+
+    def test_load_config_auto_migrates_and_writes(self, tmp_path, monkeypatch):
+        """load_config() auto-migrates old keys and rewrites the config file."""
+        from ai_session_tools import config as _cfg_mod
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text('{"defaults": {"after": "2026-01-01"}}')
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(cfg_file))
+        _cfg_mod.invalidate_config_cache()
+
+        cfg = _cfg_mod.load_config()
+        # In-memory result is migrated
+        assert cfg.get("defaults", {}).get("since") == "2026-01-01"
+        assert "after" not in cfg.get("defaults", {})
+        # File on disk is also updated
+        import json
+        on_disk = json.loads(cfg_file.read_text())
+        assert on_disk.get("defaults", {}).get("since") == "2026-01-01"
+        assert "after" not in on_disk.get("defaults", {})
