@@ -73,7 +73,7 @@ from .engine import (
 from .sources import AiStudioSource, GeminiCliSource
 
 # Filters
-from .filters import MessageFilter, SearchFilter
+from .filters import Filter, MessageFilter, SearchFilter
 
 # FilterSpec in models
 from .models import FilterSpec
@@ -124,6 +124,7 @@ __all__ = [
     "GeminiCliSource",
     # --- Filters ---
     "FilterSpec",             # Declarative filter (.with_since, .with_until, .with_extensions, ...)
+    "Filter",                 # Generic base class for SearchFilter and MessageFilter; subclass for custom filters
     "SearchFilter",           # Imperative file filter with by_location_pattern(), by_date(), &/| operators
     "MessageFilter",          # Message filter with &/| composability
     # --- Formatters ---

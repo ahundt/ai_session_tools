@@ -218,19 +218,33 @@ class PlainFormatter(ResultFormatter):
 
 
 def get_formatter(format_type: str, title: str = "Results") -> ResultFormatter:
-    """Factory function to get formatter by type."""
-    formatters = {
+    """Factory function to get formatter by type.
+
+    Args:
+        format_type: One of "table", "json", "csv", "plain", "message".
+        title:       Display title for formatters that support it (TableFormatter).
+
+    Returns:
+        A ResultFormatter instance for the requested format type.
+
+    Raises:
+        ValueError: If format_type is unknown.
+    """
+    # Explicit title-flag avoids the old try/except TypeError pattern which would
+    # silently mask real bugs in formatter __init__ methods.
+    _formatters_with_title = {
         "table": TableFormatter,
+    }
+    _formatters_no_title = {
         "json": JsonFormatter,
         "csv": CsvFormatter,
         "plain": PlainFormatter,
+        "message": MessageFormatter,
     }
 
-    formatter_class = formatters.get(format_type.lower())
-    if not formatter_class:
-        raise ValueError(f"Unknown format: {format_type}")
-
-    try:
-        return formatter_class(title)
-    except TypeError:
-        return formatter_class()
+    fmt = format_type.lower()
+    if fmt in _formatters_with_title:
+        return _formatters_with_title[fmt](title)
+    if fmt in _formatters_no_title:
+        return _formatters_no_title[fmt]()
+    raise ValueError(f"Unknown format: {format_type!r}. Valid options: table, json, csv, plain, message")

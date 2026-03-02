@@ -894,7 +894,7 @@ def app_callback(
 
 # ── Engine factory ────────────────────────────────────────────────────────────
 
-def _resolve_engine(ctx: typer.Context, source: Optional[str] = None) -> "AISession":
+def _resolve_engine(ctx: typer.Context, source: Optional[str] = None) -> "Optional[AISession]":
     """Return engine from ctx.obj, rebuilding with a different source if --source given per-command."""
     if source:
         cfg = load_config()
@@ -1021,7 +1021,7 @@ def _project_dir_name(path: str) -> str:
     return _re.sub(r'[^a-zA-Z0-9-]', '-', abs_path)
 
 
-def _sessions_for_project(engine: SessionRecoveryEngine, project_path: str) -> Set[str]:
+def _sessions_for_project(engine: "AISession", project_path: str) -> Set[str]:
     """Return all session IDs whose JSONL files live under the given project directory."""
     dir_name = _project_dir_name(project_path)
     project_dir = engine.projects_dir / dir_name
@@ -1066,7 +1066,7 @@ def _filter_versions(
     return result
 
 
-def _version_src_path(engine: SessionRecoveryEngine, v: FileVersion) -> Path:
+def _version_src_path(engine: "AISession", v: FileVersion) -> Path:
     """Return the on-disk path of a specific version file."""
     return (
         engine.recovery_dir
@@ -1092,7 +1092,7 @@ def _resolve_output_path(target: Path) -> Path:
 
 
 def _do_extract(  # noqa: C901
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     name: str,
     version: Optional[int] = None,
     session: Optional[str] = None,
@@ -1168,7 +1168,7 @@ def _do_extract(  # noqa: C901
 
 
 def _do_history_display(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     name: str,
     versions: Optional[List[FileVersion]] = None,
     fmt: Optional[str] = None,
@@ -1225,7 +1225,7 @@ def _do_history_display(
 
 
 def _do_history_export(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     name: str,
     export_dir: Optional[str] = None,
     dry_run: bool = False,
@@ -1275,7 +1275,7 @@ def _do_history_export(
         raise typer.Exit(code=1)
 
 
-def _do_history_stdout(engine: SessionRecoveryEngine, name: str, versions: Optional[List[FileVersion]] = None) -> None:
+def _do_history_stdout(engine: "AISession", name: str, versions: Optional[List[FileVersion]] = None) -> None:
     """Print all versions to stdout with === vN === headers."""
     if versions is None:
         versions = engine.get_versions(name)
@@ -1291,7 +1291,7 @@ def _do_history_stdout(engine: SessionRecoveryEngine, name: str, versions: Optio
 
 
 def _do_files_search(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     pattern: str = "*",
     min_edits: int = 0,
     max_edits: Optional[int] = None,
@@ -1330,7 +1330,7 @@ def _do_files_search(
 
 
 def _do_messages_search(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     query: str,
     message_type: Optional[str] = None,
     limit: int = 10,
@@ -1427,7 +1427,7 @@ def _do_messages_search(
 
 
 def _do_list_sessions(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     project: Optional[str] = None,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
@@ -1515,7 +1515,7 @@ def _parse_commands_option(raw: Optional[str]) -> Optional[List[str]]:
 
 
 def _do_messages_corrections(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     project: Optional[str] = None,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
@@ -1551,7 +1551,7 @@ def _do_messages_corrections(
 
 
 def _do_messages_planning(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     project: Optional[str] = None,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
@@ -1613,7 +1613,7 @@ _TIMELINE_SPEC = TableSpec(
 
 
 def _do_messages_analyze(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     session_id: str,
     fmt: str = "table",
 ) -> None:
@@ -1653,7 +1653,7 @@ def _do_messages_analyze(
 
 
 def _do_messages_timeline(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     session_id: str,
     fmt: str = "table",
     preview_chars: int = 150,
@@ -1689,7 +1689,7 @@ def _do_messages_timeline(
 
 
 def _do_files_cross_ref(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     file: str,
     session: Optional[str] = None,
     fmt: str = "table",
@@ -1736,7 +1736,7 @@ def _do_files_cross_ref(
 
 
 def _do_export_session(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     session_id: str,
     output: Optional[str] = None,
     dry_run: bool = False,
@@ -1762,7 +1762,7 @@ def _do_export_session(
 
 
 def _do_export_recent(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     days: int = 7,
     output: Optional[str] = None,
     project: Optional[str] = None,
@@ -1795,7 +1795,7 @@ def _do_export_recent(
 
 
 def _do_search(  # noqa: C901
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     domain: Optional[str],
     pattern: Optional[str],
     query: Optional[str],
@@ -1875,7 +1875,7 @@ def _do_search(  # noqa: C901
 
 
 def _do_get(
-    engine: SessionRecoveryEngine,
+    engine: "AISession",
     session_id: Optional[str],
     message_type: Optional[str] = None,
     limit: int = 10,
@@ -1915,25 +1915,19 @@ def _do_stats(
     if fmt is None:
         fmt = _cfg_default("format", "table")
     stats_data = engine.get_statistics(since=since, until=until)
-    if isinstance(stats_data, dict):
-        sessions = stats_data.get("total_sessions", 0)
-        files = stats_data.get("total_files", 0)
-        versions = stats_data.get("total_versions", 0)
-        largest = stats_data.get("largest_file", "—")
-        largest_edits = stats_data.get("largest_file_edits", 0)
-        # Collect per-source counts: keys like "aistudio_sessions", "gemini_cli_sessions"
-        per_source = {
-            k.replace("_sessions", ""): v
-            for k, v in stats_data.items()
-            if k.endswith("_sessions") and k != "total_sessions" and isinstance(v, int)
-        }
-    else:
-        sessions = stats_data.total_sessions
-        files = stats_data.total_files
-        versions = stats_data.total_versions
-        largest = stats_data.largest_file
-        largest_edits = stats_data.largest_file_edits
-        per_source = {}
+    # get_statistics() always returns dict; the else-branch was dead code.
+    stats_data = stats_data if isinstance(stats_data, dict) else {}
+    sessions = stats_data.get("total_sessions", 0)
+    files = stats_data.get("total_files", 0)
+    versions = stats_data.get("total_versions", 0)
+    largest = stats_data.get("largest_file", "—")
+    largest_edits = stats_data.get("largest_file_edits", 0)
+    # Collect per-source counts: keys like "aistudio_sessions", "gemini_cli_sessions"
+    per_source = {
+        k.replace("_sessions", ""): v
+        for k, v in stats_data.items()
+        if k.endswith("_sessions") and k != "total_sessions" and isinstance(v, int)
+    }
 
     if fmt == "json":
         out = {

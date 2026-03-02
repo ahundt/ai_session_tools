@@ -182,9 +182,18 @@ class AiStudioSource:
             provider="aistudio",
         )
 
+    _MIN_CONTENT_BYTES: int = 20
+
     def _parse_messages(self, path: Path, raw: str, session_id: str) -> list[SessionMessage]:
         """Parse session file into SessionMessage list. Handles JSON + .md formats."""
-        if len(raw) < 20:
+        if len(raw) < self._MIN_CONTENT_BYTES:
+            import warnings
+            warnings.warn(
+                f"AiStudioSource: skipping {path.name!r} — content is only "
+                f"{len(raw)} bytes (< {self._MIN_CONTENT_BYTES} byte minimum). "
+                "The file may be empty, corrupted, or still being written.",
+                stacklevel=3,
+            )
             return []
 
         # Try JSON format (AI Studio chunkedPrompt)

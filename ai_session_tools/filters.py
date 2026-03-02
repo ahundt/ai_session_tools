@@ -68,16 +68,36 @@ class Filter(Generic[T]):
         """Support callable interface — same as apply()."""
         return self.apply(items)
 
+    def _new_empty(self) -> "Filter[T]":
+        """Create an empty filter of the same concrete type, safe for subclasses.
+
+        Uses ``copy.copy`` (shallow copy) rather than ``type(self)()`` so that
+        subclasses with required ``__init__`` arguments (e.g., a custom filter
+        that takes a mandatory ``config`` param) are not accidentally broken by
+        composition operators.  The copy has the same class and any instance
+        attributes the subclass set in ``__init__``, but its ``_predicates``
+        list is replaced immediately by the caller.
+
+        Override this in subclasses if they require different copying semantics
+        (e.g., deep-copy of mutable init args).
+        """
+        import copy
+        result = copy.copy(self)
+        result._predicates = []
+        return result
+
     def __and__(self, other: "Filter[T]") -> "Filter[T]":
         """AND composition: item must pass ALL predicates from BOTH filters.
 
-        Implemented by merging predicate lists — preserves subclass type.
-        SearchFilter & SearchFilter → SearchFilter (not bare Filter).
+        Merges predicate lists from both sides.  The result has the same concrete
+        type as ``self`` (e.g., SearchFilter & SearchFilter → SearchFilter).
+        Uses ``_new_empty()`` instead of ``type(self)()`` so subclasses with
+        required ``__init__`` args are not broken.
 
         Example::
             py_big = SearchFilter().by_extension("py") & SearchFilter().by_size(min_size=100)
         """
-        result = type(self)()
+        result = self._new_empty()
         result._predicates = list(self._predicates) + list(other._predicates)
         return result
 
@@ -88,6 +108,8 @@ class Filter(Generic[T]):
         An empty filter (no predicates) contributes nothing to OR — it is treated as
         "no match" rather than "match all" to avoid vacuous truth surprising behaviour.
         Use a plain ``Filter()`` / ``SearchFilter()`` with no predicates to pass all items.
+
+        Uses ``_new_empty()`` for subclass safety (see ``__and__`` / ``_new_empty``).
 
         Example::
             py_or_ts = SearchFilter().by_extension("py") | SearchFilter().by_extension("ts")
@@ -104,7 +126,7 @@ class Filter(Generic[T]):
             right_pass = bool(right_preds) and all(p(item) for p in right_preds)
             return left_pass or right_pass
 
-        result = type(self)()
+        result = self._new_empty()
         result._predicates.append(_or_predicate)
         return result
 

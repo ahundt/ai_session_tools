@@ -960,6 +960,10 @@ class SessionRecoveryEngine:
                             if data.get("type") != "user":
                                 continue
                             ts = data.get("timestamp", "")
+                            # Exclude undated messages when a date filter is active —
+                            # consistent with FilterSpec.matches_datetime() semantics.
+                            if (since or until) and not ts:
+                                continue
                             if since and ts and ts < since:
                                 continue
                             if until and ts and ts > until:
@@ -1039,6 +1043,10 @@ class SessionRecoveryEngine:
                             if discovery_mode and data.get("type") != "user":
                                 continue
                             ts = data.get("timestamp", "")
+                            # Exclude undated messages when a date filter is active —
+                            # consistent with FilterSpec.matches_datetime() semantics.
+                            if (since or until) and not ts:
+                                continue
                             if since and ts and ts < since:
                                 continue
                             if until and ts and ts > until:
@@ -1642,11 +1650,17 @@ class MultiSourceEngine:
 
     def search_messages(self, query: str, message_type: str | None = None) -> list:
         """Aggregate search across ALL sources. Unified signature with SessionRecoveryEngine."""
-        import contextlib
+        import warnings
         results = []
         for source in self._sources:
-            with contextlib.suppress(Exception):
+            try:
                 results.extend(source.search_messages(query, message_type))
+            except Exception as exc:  # noqa: BLE001
+                warnings.warn(
+                    f"MultiSourceEngine.search_messages: source {type(source).__name__} "
+                    f"raised {type(exc).__name__}: {exc}",
+                    stacklevel=2,
+                )
         return sorted(results, key=lambda m: m.timestamp or "", reverse=True)
 
     def list_sessions(self) -> list:
@@ -1656,32 +1670,50 @@ class MultiSourceEngine:
         is correct for all known timestamp formats. Sessions with no timestamp
         (empty string) sort to the end (oldest).
         """
-        import contextlib
+        import warnings
         all_sessions = []
         for source in self._sources:
-            with contextlib.suppress(Exception):
+            try:
                 all_sessions.extend(source.list_sessions())
+            except Exception as exc:  # noqa: BLE001
+                warnings.warn(
+                    f"MultiSourceEngine.list_sessions: source {type(source).__name__} "
+                    f"raised {type(exc).__name__}: {exc}",
+                    stacklevel=2,
+                )
         all_sessions.sort(key=lambda s: s.timestamp_first or "", reverse=True)
         return all_sessions
 
     def read_session(self, session_info) -> list:
         """Read messages for a session (delegates to first source that has it)."""
-        import contextlib
+        import warnings
         for source in self._sources:
-            with contextlib.suppress(Exception):
+            try:
                 msgs = source.read_session(session_info)
                 if msgs:
                     return msgs
+            except Exception as exc:  # noqa: BLE001
+                warnings.warn(
+                    f"MultiSourceEngine.read_session: source {type(source).__name__} "
+                    f"raised {type(exc).__name__}: {exc}",
+                    stacklevel=2,
+                )
         return []
 
     def stats(self) -> dict:
         """Aggregate stats across all sources."""
-        import contextlib
+        import warnings
         total: dict = {}
         for source in self._sources:
-            with contextlib.suppress(Exception):
+            try:
                 for k, v in source.stats().items():
                     total[k] = total.get(k, 0) + v
+            except Exception as exc:  # noqa: BLE001
+                warnings.warn(
+                    f"MultiSourceEngine.stats: source {type(source).__name__} "
+                    f"raised {type(exc).__name__}: {exc}",
+                    stacklevel=2,
+                )
         return total
 
 
@@ -1941,6 +1973,55 @@ def _detect_default_source(cfg: dict) -> str:
     return "claude"
 
 
+def _get_correction_patterns() -> "list[tuple]":
+    """Return DEFAULT_CORRECTION_PATTERNS merged with any user patterns from config.
+
+    Reads ``config["correction_patterns"]`` as a list of [category, [keyword, ...]]
+    entries and appends them to DEFAULT_CORRECTION_PATTERNS.  User patterns are
+    appended after the defaults so the built-in categories always apply first.
+
+    Returns:
+        List of (category, [regex_keyword_strings]) tuples.
+    """
+    from .config import get_config_section
+    user_patterns = get_config_section("correction_patterns", [])
+    if not user_patterns or not isinstance(user_patterns, list):
+        return list(DEFAULT_CORRECTION_PATTERNS)
+    # Accept both list-of-tuples and list-of-lists from JSON config
+    extra = []
+    for item in user_patterns:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            extra.append((str(item[0]), list(item[1])))
+    return list(DEFAULT_CORRECTION_PATTERNS) + extra
+
+
+def _engine_cfg_default(key: str, fallback: int) -> int:
+    """Return config.defaults.<key> as int, or fallback if not set.
+
+    Called by AISession methods to resolve configurable numeric defaults
+    (e.g. limit=50, preview_chars=150). Reads from config ``defaults`` section:
+
+        {
+            "defaults": {
+                "limit":          50,
+                "preview_chars":  150,
+                "snippet_chars":  200,
+                "message_limit":  20
+            }
+        }
+
+    Users can override any value in their config.json without changing code.
+    """
+    from .config import get_config_section
+    defaults = get_config_section("defaults", {})
+    if isinstance(defaults, dict) and key in defaults:
+        try:
+            return int(defaults[key])
+        except (TypeError, ValueError):
+            pass
+    return fallback
+
+
 class AISession:
     """Main entry point for ai_session_tools.
 
@@ -2167,7 +2248,7 @@ class AISession:
     def get_latest_session_context(
         self,
         *,
-        message_limit: int = 20,
+        message_limit: "int | None" = None,
         project_filter: "str | None" = None,
     ) -> "tuple[SessionInfo, list[SessionMessage]] | None":
         """Get the most recent session and its messages in a single call.
@@ -2175,7 +2256,8 @@ class AISession:
         THE most common use case: "What was I just working on?"
 
         Args:
-            message_limit: Max messages to return (default 20, 0 = all).
+            message_limit: Max messages to return. Default: config.defaults.message_limit
+                           or 20 if not configured. 0 = all messages (no limit).
             project_filter: Optional project name substring to filter sessions.
 
         Returns:
@@ -2191,6 +2273,8 @@ class AISession:
         sessions = self.get_sessions(project_filter=project_filter)
         if not sessions:
             return None
+        if message_limit is None:
+            message_limit = _engine_cfg_default("message_limit", 20)
         latest = sessions[0]  # newest first
         messages = self.get_messages(latest.session_id)
         if message_limit and message_limit > 0:
@@ -2284,7 +2368,7 @@ class AISession:
         until: "str | None" = None,
         project_filter: "str | None" = None,
         patterns: "list | None" = None,
-        limit: int = 50,
+        limit: "int | None" = None,
     ) -> "list[CorrectionMatch]":
         """Find user messages where corrections were given to the AI.
 
@@ -2296,22 +2380,27 @@ class AISession:
             since:          Only search sessions after this date.
             until:          Only search sessions before this date.
             project_filter: Filter to sessions in projects matching this substring.
-            patterns:       Custom correction pattern list (overrides defaults).
-            limit:          Max results to return. Default 50, 0 = all.
+            patterns:       Custom correction pattern list. None = use defaults + any
+                            config ``correction_patterns`` additions.
+            limit:          Max results to return. Default: config.defaults.limit or 50.
+                            0 = all results.
 
         Returns:
             list[CorrectionMatch] sorted by timestamp descending.
         """
+        if limit is None:
+            limit = _engine_cfg_default("limit", 50)
+        # Merge user-supplied patterns from config with defaults (T58)
+        _patterns = patterns or _get_correction_patterns()
         if self._is_claude:
             return self._backend.find_corrections(
                 project_filter=project_filter,
                 since=since,
                 until=until,
-                patterns=patterns,
+                patterns=_patterns,
                 limit=limit,
             )
         # Generic fallback: iterate sessions + messages
-        _patterns = patterns or DEFAULT_CORRECTION_PATTERNS
         compiled = [
             (cat, re.compile("|".join(kws), re.IGNORECASE), kws)
             for cat, kws in _patterns
@@ -2352,7 +2441,7 @@ class AISession:
         project_filter: "str | None" = None,
         since: "str | None" = None,
         until: "str | None" = None,
-        limit: int = 50,
+        limit: "int | None" = None,
     ) -> "list[PlanningCommandCount]":
         """Count slash command usage across sessions.
 
@@ -2365,11 +2454,14 @@ class AISession:
             project_filter: Filter to sessions in projects matching this substring.
             since:          Only count commands from sessions after this date.
             until:          Only count commands from sessions before this date.
-            limit:          Max number of results. Default 50, 0 = all.
+            limit:          Max number of results. Default: config.defaults.limit or 50.
+                            0 = all results.
 
         Returns:
             list[PlanningCommandCount] sorted by count descending.
         """
+        if limit is None:
+            limit = _engine_cfg_default("limit", 50)
         if self._is_claude:
             results = self._backend.analyze_planning_usage(
                 commands=commands,
@@ -2446,7 +2538,7 @@ class AISession:
         filename: str,
         current_content: "str | None" = None,
         session_id: "str | None" = None,
-        snippet_chars: int = 200,
+        snippet_chars: "int | None" = None,
     ) -> "list[dict]":
         """Find Edit/Write tool calls for a file across sessions. Claude-only.
 
@@ -2457,11 +2549,13 @@ class AISession:
             filename:        Filename to search for.
             current_content: Optional current file contents for diff matching.
             session_id:      Optional session ID to restrict search to.
-            snippet_chars:   Max chars per snippet. Default 200.
+            snippet_chars:   Max chars per snippet. Default: config.defaults.snippet_chars or 200.
 
         Returns:
             list[dict] with session_id, timestamp, snippet, found_in_current fields.
         """
+        if snippet_chars is None:
+            snippet_chars = _engine_cfg_default("snippet_chars", 200)
         return self._claude_only(
             "cross_reference_session", [],
             filename,
@@ -2586,7 +2680,7 @@ class AISession:
     def get_session_timeline(
         self,
         session_id: str,
-        preview_chars: int = 150,
+        preview_chars: "int | None" = None,
     ) -> "list[dict]":
         """Chronological event timeline for one session.
 
@@ -2594,6 +2688,8 @@ class AISession:
         For AI Studio / Gemini CLI sessions: message type, timestamp, and content preview
         (tool_count=0 — tool invocations are not tracked by non-Claude backends).
         """
+        if preview_chars is None:
+            preview_chars = _engine_cfg_default("preview_chars", 150)
         if self._is_claude:
             return self._backend.timeline_session(session_id, preview_chars)
         # Generic fallback: build from messages API

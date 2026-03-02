@@ -36,10 +36,16 @@ def _decode_project_dir(encoded_dir: str) -> str:
     stripped = _re.sub(r'^-(Users|home)-[^-]+-', '', encoded_dir)
     if not stripped:
         return encoded_dir
-    # A leading '-' represents an encoded dot in the original path (e.g. .hidden → -hidden).
-    # Return as-is to preserve the leading dash.
     if stripped.startswith('-'):
-        return stripped
+        # A leading '-' after the home-prefix strip can mean two things:
+        # (a) Encoded dot-file as a single path component: "-hidden" (represents ".hidden")
+        #     → preserve the leading dash; return as-is.
+        # (b) Path that did NOT match the home-prefix regex (e.g. "-work-project"):
+        #     → extract the rightmost dash-separated segment.
+        # Distinguish: if stripped[1:] contains no further '-', it is case (a).
+        if '-' not in stripped[1:]:
+            return stripped
+        return stripped.rsplit('-', 1)[-1] or stripped
     # Return the last '-'-separated component (rightmost path segment).
     return stripped.rsplit('-', 1)[-1] or stripped
 
@@ -136,6 +142,20 @@ class SessionFile:
     def session_count(self) -> int:
         """Get number of sessions this file appears in."""
         return len(self.sessions)
+
+    def to_dict(self) -> dict:
+        """Serialize to dict for JSON/CSV output and duck-typed formatter access."""
+        return {
+            "name": self.name,
+            "path": self.path,
+            "location": self.location,
+            "file_type": self.file_type,
+            "sessions": self.sessions,
+            "edits": self.edits,
+            "created_date": self.created_date,
+            "last_modified": self.last_modified,
+            "size_bytes": self.size_bytes,
+        }
 
 
 @dataclass
