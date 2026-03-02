@@ -7,9 +7,41 @@ Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 """
 
+import re as _re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, Iterable, List, Optional, Set
+
+
+def _decode_project_dir(encoded_dir: str) -> str:
+    """Decode a Claude-encoded project directory name to a human-readable project name.
+
+    Claude encodes project paths by replacing every path separator with '-'.
+    Examples:
+        "-Users-alice-myproject"     → "myproject"
+        "-home-bob-work-client"      → "client"
+        "-Users-alice--hidden-proj"  → "-hidden-proj"
+
+    This is the canonical implementation shared by ``SessionInfo.project_display``
+    and ``SessionRecoveryEngine.extract_project_name()``.  Both delegate here to
+    avoid duplicating the regex logic and to prevent divergence between the two
+    call sites.
+
+    Args:
+        encoded_dir: Encoded project directory name (e.g. "-Users-alice-project").
+
+    Returns:
+        Human-readable project name (e.g. "project").
+    """
+    stripped = _re.sub(r'^-(Users|home)-[^-]+-', '', encoded_dir)
+    if not stripped:
+        return encoded_dir
+    # A leading '-' represents an encoded dot in the original path (e.g. .hidden → -hidden).
+    # Return as-is to preserve the leading dash.
+    if stripped.startswith('-'):
+        return stripped
+    # Return the last '-'-separated component (rightmost path segment).
+    return stripped.rsplit('-', 1)[-1] or stripped
 
 
 class MessageType(str, Enum):
@@ -563,20 +595,13 @@ class SessionInfo:
 
     @property
     def project_display(self) -> str:
-        """Human-readable project name (strips leading path components like -Users-alice-).
+        """Human-readable project name — delegates to shared ``_decode_project_dir()``.
 
-        Uses the same algorithm as SessionRecoveryEngine.extract_project_name() but
-        implemented inline to avoid circular imports between models.py and engine.py.
-        Strips the home directory prefix (-Users-<name>- or -home-<name>-) and returns
-        the last path component. Encoded dots (represented as leading '-') are preserved.
+        Strips the home directory prefix (-Users-<name>- or -home-<name>-) and
+        returns the last path component. Encoded dots (represented as leading '-')
+        are preserved.
         """
-        import re as _re
-        stripped = _re.sub(r'^-(Users|home)-[^-]+-', '', self.project_dir)
-        if not stripped:
-            return self.project_dir
-        if stripped.startswith('-'):
-            return stripped
-        return stripped.rsplit('-', 1)[-1] or stripped
+        return _decode_project_dir(self.project_dir)
 
     def to_dict(self) -> dict:
         return {

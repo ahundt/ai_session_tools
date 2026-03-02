@@ -125,6 +125,55 @@ aise source remove ~/Documents/old_sessions
 
 Source directories are saved to `config.json` and persist across runs.
 
+## Use as a Python Library
+
+```python
+import ai_session_tools as aise
+from ai_session_tools import AISession, FilterSpec
+
+# RECOMMENDED: zero-config RAII, auto-detects Claude, AI Studio, and Gemini CLI
+with AISession() as session:
+
+    # Context recovery — most common use case, one call
+    ctx = session.get_latest_session_context(message_limit=10)
+    if ctx:
+        info, messages = ctx
+        print(info.project_display, info.timestamp_last)
+
+    # List recent sessions
+    sessions = session.get_sessions(since="7d")
+    for s in sessions:
+        print(s.project_display, s.timestamp_first, s.message_count)
+
+    # Search messages across all sources (with surrounding context)
+    matches = session.search_messages("authentication", context=3)
+
+    # Search files with composable filters (Claude Code sessions)
+    files = session.search_files(
+        "*.py",
+        FilterSpec()
+            .with_since("30d")
+            .with_extensions(include={"py", "ts"})
+            .with_edit_range(min_edits=3),
+    )
+
+    # Session statistics
+    stats = session.get_statistics(since="7d")
+
+    # EDTF date range: matches CLI --when
+    q1_files = session.search_files("*.py", FilterSpec().with_when("2026-01/2026-03"))
+
+    # Composable file filters with OR logic
+    from ai_session_tools.filters import SearchFilter
+    py_or_ts = SearchFilter().by_extension("py") | SearchFilter().by_extension("ts")
+    files = session.search_files("*", py_or_ts)
+
+    # Bulk export recent sessions to markdown
+    markdowns = session.export_sessions_markdown(since="1d")
+
+# Full API reference: help(aise.AISession)
+```
+
 ## CLI reference
 
 ### List sessions

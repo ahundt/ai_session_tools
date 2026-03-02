@@ -282,16 +282,14 @@ class SessionRecoveryEngine:
     def extract_project_name(encoded_dir: str) -> str:
         """Return a human-readable project name from Claude's encoded directory name.
 
+        Delegates to ``_decode_project_dir()`` in models.py — the canonical
+        implementation shared with ``SessionInfo.project_display``.
+
         Claude encodes project paths by replacing every non-alphanumeric, non-hyphen
         character with '-'.  Examples:
             /Users/alice/project   →  -Users-alice-project
             /Users/alice/source/p  →  -Users-alice-source-p
             /home/bob/project      →  -home-bob-project
-
-        This method strips the common leading path prefix (home directory components)
-        to return just the meaningful project part.  It works for macOS, Linux, and
-        any username by stripping all leading ``-<word>`` segments until only one
-        remains (or until no more ``-<word>-`` prefixes are present).
 
         Args:
             encoded_dir: Encoded project directory name (e.g. "-Users-alice-project").
@@ -299,19 +297,8 @@ class SessionRecoveryEngine:
         Returns:
             Human-readable project name (e.g. "project").
         """
-        import re as _re
-        # Strip the home directory prefix: -Users-<username>- (macOS) or -home-<username>- (Linux).
-        # The pattern matches exactly: leading dash + root word ('Users'/'home') + dash + username + dash.
-        stripped = _re.sub(r'^-(Users|home)-[^-]+-', '', encoded_dir)
-        if not stripped:
-            return encoded_dir
-        # If the remainder starts with '-', it represents an encoded dot (.) from the original path.
-        # Return as-is to preserve the leading dash (e.g. for .claude → --claude → -claude display).
-        if stripped.startswith('-'):
-            return stripped
-        # Return the last '-'-separated component (rightmost path segment).
-        # This handles intermediate directories like 'source-myproject' → 'myproject'.
-        return stripped.rsplit('-', 1)[-1] or stripped
+        from .models import _decode_project_dir
+        return _decode_project_dir(encoded_dir)
 
     # ── Private JSONL iteration helpers ──────────────────────────────────────
 
