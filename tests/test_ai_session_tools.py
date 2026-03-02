@@ -8478,7 +8478,11 @@ class TestBugFixes:
     # ── Bug: config cache not invalidated on env var change (CRITICAL) ──
 
     def test_config_cache_invalidated_on_env_var_change(self, tmp_path, monkeypatch):
-        """load_config() must re-read when AI_SESSION_TOOLS_CONFIG env var changes."""
+        """load_config() must auto-invalidate when AI_SESSION_TOOLS_CONFIG env var changes.
+
+        No explicit invalidate_config_cache() call should be needed — load_config()
+        detects the env var change itself via _resolved_config_key() comparison.
+        """
         import ai_session_tools.config as _cfg_mod
         from ai_session_tools.config import load_config, invalidate_config_cache
 
@@ -8487,7 +8491,7 @@ class TestBugFixes:
         config1.write_text(_json_bugs.dumps({"_marker": "config1"}))
         config2.write_text(_json_bugs.dumps({"_marker": "config2"}))
 
-        # Clear any cached state
+        # Clear any cached state from prior tests
         invalidate_config_cache()
         _cfg_mod._g_config_path = None
 
@@ -8495,12 +8499,11 @@ class TestBugFixes:
         c1 = load_config()
         assert c1.get("_marker") == "config1", f"Expected config1, got {c1}"
 
-        # Change env var — cache must be invalidated
+        # Change env var — NO explicit invalidate_config_cache() call; must auto-detect
         monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config2))
-        invalidate_config_cache()  # explicit invalidation
         c2 = load_config()
         assert c2.get("_marker") == "config2", (
-            f"load_config() returned stale cache after env var change: {c2}"
+            f"load_config() returned stale cache after env var change (no explicit invalidation): {c2}"
         )
 
     # ── Bug: inverted date range silently returns 0 results (HIGH) ──

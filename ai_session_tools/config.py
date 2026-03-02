@@ -16,6 +16,21 @@ from pathlib import Path
 # Module-level state set by CLI app_callback
 _g_config_path: str | None = None
 _config_cache: dict | None = None
+_config_cache_key: str | None = None  # resolved path that produced the cache
+
+
+def _resolved_config_key() -> str:
+    """Return a string key identifying the current config source (for cache validation).
+
+    Changes when --config flag, AI_SESSION_TOOLS_CONFIG env var, or OS default changes.
+    load_config() compares this to _config_cache_key and auto-invalidates on mismatch.
+    """
+    if _g_config_path:
+        return f"cli:{_g_config_path}"
+    env_p = os.getenv("AI_SESSION_TOOLS_CONFIG")
+    if env_p:
+        return f"env:{env_p}"
+    return "default"
 
 
 def set_config_path(path: str | None) -> None:
@@ -23,10 +38,11 @@ def set_config_path(path: str | None) -> None:
 
     When path changes, cache is invalidated so load_config() re-reads.
     """
-    global _g_config_path, _config_cache
+    global _g_config_path, _config_cache, _config_cache_key
     if path != _g_config_path:
         _g_config_path = path
-        _config_cache = None  # invalidate cache on path change
+        _config_cache = None       # invalidate cache on path change
+        _config_cache_key = None
 
 
 def invalidate_config_cache() -> None:
@@ -35,8 +51,9 @@ def invalidate_config_cache() -> None:
     Call this after writing a new config file (e.g. after config init or source add)
     so the next load_config() picks up the updated file contents.
     """
-    global _config_cache
+    global _config_cache, _config_cache_key
     _config_cache = None
+    _config_cache_key = None
 
 
 def load_config() -> dict:
@@ -53,8 +70,9 @@ def load_config() -> dict:
     Returns empty dict {} if config file does not exist or is unreadable.
     Uses in-memory cache to avoid repeated file reads within a process.
     """
-    global _config_cache
-    if _config_cache is not None:
+    global _config_cache, _config_cache_key
+    current_key = _resolved_config_key()
+    if _config_cache is not None and _config_cache_key == current_key:
         return _config_cache
 
     if _g_config_path:
@@ -71,8 +89,12 @@ def load_config() -> dict:
     with contextlib.suppress(OSError, json.JSONDecodeError):
         content = config_path.read_text(encoding="utf-8")
         _config_cache = json.loads(content)
+        _config_cache_key = current_key
         return _config_cache
 
+    # File missing/unreadable: cache empty dict keyed to this path so we don't re-hit disk
+    _config_cache = {}
+    _config_cache_key = current_key
     return {}
 
 
@@ -100,11 +122,12 @@ def write_config(cfg: dict) -> None:
     Callers that need to persist auto-discovered source paths or clear stale
     cache entries should use this function rather than writing directly.
     """
-    global _config_cache
+    global _config_cache, _config_cache_key
     path = get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    _config_cache = cfg  # keep in-process cache current without forcing a re-read
+    _config_cache = cfg                      # keep in-process cache current
+    _config_cache_key = _resolved_config_key()  # update key so cache stays valid
 
 
 def get_config_section(key: str, default=None):
