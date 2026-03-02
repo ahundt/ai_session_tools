@@ -9,9 +9,10 @@ import csv
 import io
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from typing import Any, List
 
-from .models import RecoveredFile, SessionMessage
+from .models import SessionFile, SessionMessage
 
 try:
     from rich.console import Console
@@ -31,8 +32,8 @@ class ResultFormatter(ABC):
         pass
 
     @abstractmethod
-    def format_many(self, items: List[Any]) -> str:
-        """Format multiple items."""
+    def format_many(self, items: Iterable[Any]) -> str:
+        """Format multiple items. Accepts any iterable (list, generator, iterator)."""
         pass
 
 
@@ -45,7 +46,7 @@ class TableFormatter(ResultFormatter):
         if not HAS_RICH:
             raise ImportError("Rich library required for table formatting")
 
-    def format(self, data: RecoveredFile) -> str:
+    def format(self, data: SessionFile) -> str:
         """Format single file."""
         lines = [
             f"Name:          {data.name}",
@@ -58,8 +59,8 @@ class TableFormatter(ResultFormatter):
         ]
         return "\n".join(lines)
 
-    def format_many(self, items: List[RecoveredFile]) -> str:
-        """Format multiple files as table."""
+    def format_many(self, items: Iterable[Any]) -> str:
+        """Format multiple items as table. Accepts any iterable."""
         table = Table(title=self.title)
         table.add_column("File", style="cyan")
         table.add_column("Edits", justify="right", style="magenta")
@@ -81,58 +82,82 @@ class TableFormatter(ResultFormatter):
 
 
 class JsonFormatter(ResultFormatter):
-    """Format results as JSON."""
+    """Format results as JSON. Accepts any model with to_dict() or dataclass fields."""
 
-    def _file_dict(self, data: RecoveredFile) -> dict:
-        return {
-            "name": data.name,
-            "location": data.location,
-            "type": data.file_type,
-            "edits": data.edits,
-            "sessions": data.sessions,
-            "size_bytes": data.size_bytes,
-            "last_modified": data.last_modified,
-            "created_date": data.created_date,
-        }
+    def _to_dict(self, data: Any) -> dict:
+        """Duck-typed conversion: works with any model that has to_dict() or dataclass fields."""
+        if hasattr(data, "to_dict"):
+            return data.to_dict()
+        try:
+            from dataclasses import asdict
+            return asdict(data)
+        except TypeError:
+            return {"value": str(data)}
 
-    def format(self, data: RecoveredFile) -> str:
-        """Format single file."""
-        return json.dumps(self._file_dict(data), indent=2)
+    def format(self, data: Any) -> str:
+        """Format single item as JSON."""
+        return json.dumps(self._to_dict(data), indent=2)
 
-    def format_many(self, items: List[RecoveredFile]) -> str:
-        """Format multiple files as JSON array."""
-        return json.dumps([self._file_dict(item) for item in items], indent=2)
+    def format_many(self, items: Iterable[Any]) -> str:
+        """Format multiple items as JSON array. Accepts any iterable."""
+        return json.dumps([self._to_dict(item) for item in items], indent=2)
 
 
 _CSV_HEADER = ["name", "location", "type", "edits", "sessions", "size_bytes", "last_modified", "created_date"]
 
 
-def _file_to_csv_row(data: RecoveredFile) -> list:
+def _file_to_csv_row(data: "SessionFile") -> "list[str | int]":
+    """Convert a SessionFile to a CSV row aligned with _CSV_HEADER.
+
+    Args:
+        data: A SessionFile instance. Falls back to duck-typing via to_dict()
+              for forward compatibility with SessionFile subclasses.
+
+    Returns:
+        A list of [name, location, type, edits, sessions, size_bytes,
+        last_modified, created_date] matching _CSV_HEADER column order.
+    """
+    if hasattr(data, "to_dict"):
+        d = data.to_dict()
+        return [
+            d.get("name", ""),
+            d.get("location", ""),
+            d.get("file_type", d.get("type", "")),
+            d.get("edits", 0),
+            len(d.get("sessions", [])),
+            d.get("size_bytes", 0),
+            d.get("last_modified", "") or "",
+            d.get("created_date", "") or "",
+        ]
+    # Fallback: direct attribute access for SessionFile without to_dict()
     return [
-        data.name,
-        data.location,
-        data.file_type,
-        data.edits,
-        len(data.sessions),
-        data.size_bytes,
-        data.last_modified or "",
-        data.created_date or "",
+        getattr(data, "name", ""),
+        getattr(data, "location", ""),
+        getattr(data, "file_type", ""),
+        getattr(data, "edits", 0),
+        len(getattr(data, "sessions", [])),
+        getattr(data, "size_bytes", 0),
+        getattr(data, "last_modified", "") or "",
+        getattr(data, "created_date", "") or "",
     ]
 
 
 class CsvFormatter(ResultFormatter):
-    """Format results as RFC 4180-compliant CSV (fields properly quoted)."""
+    """Format results as RFC 4180-compliant CSV (fields properly quoted).
 
-    def format(self, data: RecoveredFile) -> str:
-        """Format single file as CSV with header."""
+    Accepts any model with to_dict() via duck-typing.
+    """
+
+    def format(self, data: Any) -> str:
+        """Format single item as CSV with header."""
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(_CSV_HEADER)
         writer.writerow(_file_to_csv_row(data))
         return buf.getvalue()
 
-    def format_many(self, items: List[RecoveredFile]) -> str:
-        """Format multiple files as CSV with header."""
+    def format_many(self, items: Iterable[Any]) -> str:
+        """Format multiple items as CSV with header. Accepts any iterable."""
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(_CSV_HEADER)
@@ -157,8 +182,8 @@ Timestamp:  {data.timestamp}
 Content:    {text}
 Length:     {len(data.content)} chars"""
 
-    def format_many(self, items: List[SessionMessage]) -> str:
-        """Format multiple messages."""
+    def format_many(self, items: Iterable[Any]) -> str:
+        """Format multiple messages. Accepts any iterable."""
         lines = []
         for msg in items:
             text = msg.preview(self.max_chars) if self.max_chars else msg.content.replace("\n", " ")
@@ -171,14 +196,14 @@ class PlainFormatter(ResultFormatter):
 
     def format(self, data: Any) -> str:
         """Format single item."""
-        if isinstance(data, RecoveredFile):
+        if isinstance(data, SessionFile):
             return f"{data.name} ({data.edits} edits) - {data.location}"
         elif isinstance(data, SessionMessage):
             return f"[{data.type.value}] {data.preview()}"
         return str(data)
 
-    def format_many(self, items: List[Any]) -> str:
-        """Format multiple items."""
+    def format_many(self, items: Iterable[Any]) -> str:
+        """Format multiple items. Accepts any iterable."""
         return "\n".join(self.format(item) for item in items)
 
 

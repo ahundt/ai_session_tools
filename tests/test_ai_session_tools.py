@@ -20,16 +20,14 @@ import pytest
 from typer.testing import CliRunner
 
 from ai_session_tools import (
-    ChainedFilter,
-    ComposableFilter,
-    ComposableSearch,
     ContextMatch,
     CorrectionMatch,
     FileVersion,
     FilterSpec,
     MessageType,
     PlanningCommandCount,
-    RecoveryStatistics,
+    SessionFile,
+    SessionStatistics,
     SearchFilter,
     SessionAnalysis,
     SessionInfo,
@@ -190,24 +188,24 @@ class TestFilters:
 
 
 class TestFileLocation:
-    """Test file location field on RecoveredFile."""
+    """Test file location field on SessionFile."""
 
     def test_location_is_string(self):
-        """RecoveredFile.location is a plain string, not an enum."""
-        from ai_session_tools import RecoveredFile
-        r = RecoveredFile(name="a.py", path="/a.py", file_type="py")
+        """SessionFile.location is a plain string, not an enum."""
+        from ai_session_tools import SessionFile
+        r = SessionFile(name="a.py", path="/a.py", file_type="py")
         assert isinstance(r.location, str)
 
     def test_location_default_is_recovery(self):
-        """RecoveredFile.location defaults to 'recovery'."""
-        from ai_session_tools import RecoveredFile
-        r = RecoveredFile(name="a.py", path="/a.py", file_type="py")
+        """SessionFile.location defaults to 'recovery'."""
+        from ai_session_tools import SessionFile
+        r = SessionFile(name="a.py", path="/a.py", file_type="py")
         assert r.location == "recovery"
 
     def test_location_can_be_custom_string(self):
-        """RecoveredFile.location accepts any string."""
-        from ai_session_tools import RecoveredFile
-        r = RecoveredFile(name="a.py", path="/a.py", file_type="py", location="custom/path")
+        """SessionFile.location accepts any string."""
+        from ai_session_tools import SessionFile
+        r = SessionFile(name="a.py", path="/a.py", file_type="py", location="custom/path")
         assert r.location == "custom/path"
 
 
@@ -1331,19 +1329,27 @@ class TestCompletedStepTypes:
         # search_filtered was removed because engine has no such method
         assert not hasattr(Searchable, "search_filtered") or "search_filtered" not in dir(Searchable)
 
-    def test_composable_search_no_with_options(self):
-        """ComposableSearch should NOT have with_options() (SearchOptions removed)."""
-        assert not hasattr(ComposableSearch, "with_options")
+    def test_composable_search_removed_from_types(self):
+        """ComposableSearch Protocol removed — superseded by FilterSpec/SearchFilter."""
+        try:
+            from ai_session_tools.types import ComposableSearch
+            assert False, "ComposableSearch should be removed from types.py"
+        except ImportError:
+            pass
 
-    def test_composable_search_has_with_filters(self):
-        """ComposableSearch should have with_filters() method."""
-        assert hasattr(ComposableSearch, "with_filters")
+    def test_composable_filter_removed_from_types(self):
+        """ComposableFilter Protocol removed — superseded by Filter[T] operators."""
+        try:
+            from ai_session_tools.types import ComposableFilter
+            assert False, "ComposableFilter should be removed from types.py"
+        except ImportError:
+            pass
 
-    def test_composable_filter_callable(self):
-        """ComposableFilter should be callable."""
-        cf = ComposableFilter()
-        result = cf([1, 2, 3])
-        assert result == [1, 2, 3]
+    def test_search_filter_is_callable(self):
+        """SearchFilter (replacement for ComposableFilter) should be callable."""
+        sf = SearchFilter()
+        result = sf([])
+        assert result == []
 
 
 class TestCompletedStepInitExports:
@@ -1364,21 +1370,27 @@ class TestCompletedStepInitExports:
         import ai_session_tools
         assert not hasattr(ai_session_tools, "MessageExtractor")
 
-    def test_exports_recovery_statistics(self):
-        """RecoveryStatistics should be exported."""
-        assert RecoveryStatistics is not None
+    def test_exports_session_statistics(self):
+        """SessionStatistics should be exported."""
+        assert SessionStatistics is not None
+
+    def test_exports_session_file(self):
+        """SessionFile should be exported."""
+        assert SessionFile is not None
 
     def test_exports_message_type(self):
         """MessageType should be exported."""
         assert MessageType.USER.value == "user"
 
-    def test_exports_composable_filter(self):
-        """ComposableFilter should be exported."""
-        assert ComposableFilter is not None
+    def test_composable_filter_not_in_public_api(self):
+        """ComposableFilter Protocol is removed from public API."""
+        import ai_session_tools
+        assert "ComposableFilter" not in getattr(ai_session_tools, "__all__", [])
 
-    def test_exports_composable_search(self):
-        """ComposableSearch should be exported."""
-        assert ComposableSearch is not None
+    def test_composable_search_not_in_public_api(self):
+        """ComposableSearch Protocol is removed from public API."""
+        import ai_session_tools
+        assert "ComposableSearch" not in getattr(ai_session_tools, "__all__", [])
 
     def test_version_not_hardcoded_2(self):
         """__version__ should not be '2.0.0' (was wrong, fixed to use importlib.metadata)."""
@@ -1559,23 +1571,23 @@ class TestFilterSpecMatchesDatetime:
         spec = FilterSpec()
         assert spec.matches_datetime(None) is True
 
-    def test_after_excludes_earlier(self):
-        """after excludes datetimes before the threshold."""
-        spec = FilterSpec(after="2026-02-01")
+    def test_since_excludes_earlier(self):
+        """since excludes datetimes before the threshold."""
+        spec = FilterSpec(since="2026-02-01")
         assert spec.matches_datetime("2026-01-15") is False
         assert spec.matches_datetime("2026-02-01") is True
         assert spec.matches_datetime("2026-02-22T14:30:00") is True
 
-    def test_before_excludes_later(self):
-        """before excludes datetimes after the threshold."""
-        spec = FilterSpec(before="2026-02-15")
+    def test_until_excludes_later(self):
+        """until excludes datetimes after the threshold."""
+        spec = FilterSpec(until="2026-02-15")
         assert spec.matches_datetime("2026-02-22") is False
         assert spec.matches_datetime("2026-02-15") is True
         assert spec.matches_datetime("2026-01-01T08:00:00") is True
 
     def test_datetime_range(self):
-        """Combined after + before creates a range."""
-        spec = FilterSpec(after="2026-02-01", before="2026-02-28")
+        """Combined since + until creates a range."""
+        spec = FilterSpec(since="2026-02-01", until="2026-02-28")
         assert spec.matches_datetime("2026-02-15") is True
         assert spec.matches_datetime("2026-02-15T12:00:00") is True
         assert spec.matches_datetime("2026-01-15") is False
@@ -1583,30 +1595,30 @@ class TestFilterSpecMatchesDatetime:
 
     def test_none_excluded_when_filter_active(self):
         """None is excluded when any datetime filter is active (conservative)."""
-        spec = FilterSpec(after="2026-01-01")
+        spec = FilterSpec(since="2026-01-01")
         assert spec.matches_datetime(None) is False
 
-    def test_none_excluded_with_before(self):
-        """None is excluded when before is set."""
-        spec = FilterSpec(before="2026-12-31")
+    def test_none_excluded_with_until(self):
+        """None is excluded when until is set."""
+        spec = FilterSpec(until="2026-12-31")
         assert spec.matches_datetime(None) is False
 
     def test_full_datetime_filter_with_full_datetime_value(self):
         """Full datetime filter against full datetime value."""
-        spec = FilterSpec(after="2026-02-15T10:00:00", before="2026-02-15T18:00:00")
+        spec = FilterSpec(since="2026-02-15T10:00:00", until="2026-02-15T18:00:00")
         assert spec.matches_datetime("2026-02-15T12:00:00") is True
         assert spec.matches_datetime("2026-02-15T08:00:00") is False
         assert spec.matches_datetime("2026-02-15T20:00:00") is False
 
     def test_date_filter_with_datetime_value(self):
         """Date-only filter works with full datetime values (mixed precision)."""
-        spec = FilterSpec(after="2026-02-15")
+        spec = FilterSpec(since="2026-02-15")
         assert spec.matches_datetime("2026-02-15T14:30:00") is True
         assert spec.matches_datetime("2026-02-14T23:59:59") is False
 
     def test_datetime_filter_with_date_value(self):
         """Full datetime filter works with date-only values (mixed precision)."""
-        spec = FilterSpec(after="2026-02-15T14:30:00")
+        spec = FilterSpec(since="2026-02-15T14:30:00")
         # "2026-02-15" < "2026-02-15T14:30:00" lexicographically, so excluded
         assert spec.matches_datetime("2026-02-15") is False
         assert spec.matches_datetime("2026-02-16") is True
@@ -2041,12 +2053,12 @@ class TestFilterSpecZeroMax:
 
     def test_search_filter_by_edits_zero_max(self):
         """SearchFilter.by_edits(max_edits=0) excludes files with edits."""
-        from ai_session_tools import RecoveredFile
-        f_with_edits = RecoveredFile(
+        from ai_session_tools import SessionFile
+        f_with_edits = SessionFile(
             name="a.py", path="/a.py",
             file_type="py", edits=5, size_bytes=100,
         )
-        f_no_edits = RecoveredFile(
+        f_no_edits = SessionFile(
             name="b.py", path="/b.py",
             file_type="py", edits=0, size_bytes=100,
         )
@@ -2063,7 +2075,7 @@ class TestPathExpansion:
 
     def test_get_engine_expands_tilde_in_env_vars(self, tmp_path, monkeypatch):
         """AI_SESSION_TOOLS_* with leading ~ must be expanded."""
-        from ai_session_tools.cli import get_engine
+        from ai_session_tools.cli import _get_engine as get_engine
         monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", "~/.claude/projects")
         monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", "~/.claude/recovery")
         engine = get_engine()
@@ -2075,7 +2087,7 @@ class TestPathExpansion:
 
     def test_get_engine_env_var_overrides_default(self, tmp_path, monkeypatch):
         """AI_SESSION_TOOLS_PROJECTS overrides the default ~/.claude/projects."""
-        from ai_session_tools.cli import get_engine
+        from ai_session_tools.cli import _get_engine as get_engine
         custom = str(tmp_path / "custom_projects")
         monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", custom)
         monkeypatch.delenv("AI_SESSION_TOOLS_RECOVERY", raising=False)
@@ -2211,8 +2223,8 @@ class TestCsvFormatterQuoting:
     """CsvFormatter produces RFC 4180-compliant output for special characters."""
 
     def _make_file(self, name: str):
-        from ai_session_tools import RecoveredFile
-        return RecoveredFile(
+        from ai_session_tools import SessionFile
+        return SessionFile(
             name=name,
             path=f"/{name}",
             file_type="py",
@@ -2260,33 +2272,38 @@ class TestCsvFormatterQuoting:
         assert len(rows) >= 2  # header + data
 
 
-# ── New tests: ChainedFilter export ──────────────────────────────────────────
+# ── New tests: SearchFilter composition (replaces ChainedFilter) ──────────────
 
-class TestChainedFilterExport:
-    """ChainedFilter is exported and works."""
+class TestSearchFilterComposition:
+    """SearchFilter supports & operator for composition (replaces ChainedFilter)."""
 
-    def test_chained_filter_exported(self):
-        """ChainedFilter is importable from the top-level package."""
-        assert ChainedFilter is not None
+    def test_search_filter_supports_and_operator(self):
+        """SearchFilter supports the & operator for composition."""
+        f1 = SearchFilter()
+        f2 = SearchFilter()
+        combined = f1 & f2
+        assert callable(combined)
 
-    def test_chained_filter_combines_search_filters(self):
-        """ChainedFilter applies multiple filters in sequence."""
-        from ai_session_tools import RecoveredFile
+    def test_search_filter_and_applies_multiple_filters(self):
+        """(f1 & f2)(files) applies both filters in sequence."""
+        from ai_session_tools import SessionFile
         files = [
-            RecoveredFile("a.py", "/a.py", file_type="py", edits=5, size_bytes=100),
-            RecoveredFile("b.py", "/b.py", file_type="py", edits=1, size_bytes=100),
-            RecoveredFile("c.md", "/c.md", file_type="md", edits=10, size_bytes=200),
+            SessionFile("a.py", "/a.py", file_type="py", edits=5, size_bytes=100),
+            SessionFile("b.py", "/b.py", file_type="py", edits=1, size_bytes=100),
+            SessionFile("c.md", "/c.md", file_type="md", edits=10, size_bytes=200),
         ]
         sf1 = SearchFilter().by_edits(min_edits=2)   # keeps a.py (5), c.md (10)
         sf2 = SearchFilter().by_extension("py")       # keeps only .py
-        chained = ChainedFilter(sf1, sf2)
-        result = chained(files)
+        combined = sf1 & sf2
+        result = combined(files)
         assert len(result) == 1
         assert result[0].name == "a.py"
 
-    def test_chained_filter_with_empty_input(self):
-        sf = SearchFilter().by_edits(min_edits=1)
-        assert ChainedFilter(sf)([]) == []
+    def test_search_filter_and_with_empty_input(self):
+        """(f1 & f2)([]) returns empty list."""
+        f1 = SearchFilter().by_edits(min_edits=1)
+        f2 = SearchFilter()
+        assert (f1 & f2)([]) == []
 
 
 # ── New tests: FilterSpec with_sessions / with_extensions empty set ───────────
@@ -2330,22 +2347,22 @@ class TestEngineSearchDeduplication:
         assert names.count("shared.py") == 1
 
 
-# ── New tests: RecoveryStatistics avg_edits_per_file removed ──────────────────
+# ── New tests: SessionStatistics properties ───────────────────────────────────
 
-class TestRecoveryStatisticsProperties:
-    """RecoveryStatistics has correct properties (no duplicate avg_edits_per_file)."""
+class TestSessionStatisticsProperties:
+    """SessionStatistics has correct properties (no duplicate avg_edits_per_file)."""
 
     def test_avg_versions_per_file_correct(self):
-        stats = RecoveryStatistics(total_files=4, total_versions=8)
+        stats = SessionStatistics(total_files=4, total_versions=8)
         assert stats.avg_versions_per_file == 2.0
 
     def test_avg_versions_per_file_zero_files(self):
-        stats = RecoveryStatistics(total_files=0, total_versions=0)
+        stats = SessionStatistics(total_files=0, total_versions=0)
         assert stats.avg_versions_per_file == 0.0
 
     def test_no_avg_edits_per_file_duplicate(self):
         """avg_edits_per_file was removed as a duplicate of avg_versions_per_file."""
-        assert not hasattr(RecoveryStatistics, "avg_edits_per_file")
+        assert not hasattr(SessionStatistics, "avg_edits_per_file")
 
 
 # ── Part B tests: performance-path ────────────────────────────────────────────
@@ -2436,11 +2453,11 @@ class TestSearchMessagesLiteralPreFilter:
 
 
 class TestLocationIsString:
-    """RecoveredFile.location is a plain str; engine search results have location == 'recovery'."""
+    """SessionFile.location is a plain str; engine search results have location == 'recovery'."""
 
     def test_location_default_is_recovery(self):
-        from ai_session_tools import RecoveredFile
-        r = RecoveredFile(name="x.py", path="/x.py", file_type="py")
+        from ai_session_tools import SessionFile
+        r = SessionFile(name="x.py", path="/x.py", file_type="py")
         assert isinstance(r.location, str)
         assert r.location == "recovery"
 
@@ -2711,7 +2728,7 @@ class TestClaudeConfigDirEnvVar:
 
     def test_claude_config_dir_sets_projects(self, tmp_path, monkeypatch):
         import ai_session_tools.cli as cli_module
-        from ai_session_tools.cli import get_engine
+        from ai_session_tools.cli import _get_engine as get_engine
         # Reset global to ensure env var path is tested
         original = cli_module._g_claude_dir
         cli_module._g_claude_dir = None
@@ -3043,10 +3060,10 @@ class TestSearchTableShowsSessions:
     """TableFormatter.format_many() shows sessions column."""
 
     def test_sessions_column_in_table(self):
-        from ai_session_tools import RecoveredFile
+        from ai_session_tools import SessionFile
         from ai_session_tools.formatters import TableFormatter
         files = [
-            RecoveredFile(
+            SessionFile(
                 name="cli.py", path="/cli.py", file_type="py", edits=3,
                 sessions=["abc123de-f456-7890-abcd-ef1234567890", "xyz789ab-0000-0000-0000-000000000001"],
                 last_modified="2026-02-22T10:00:00",
@@ -3058,10 +3075,10 @@ class TestSearchTableShowsSessions:
         assert "abc123de" in output
 
     def test_sessions_column_multiple_sessions(self):
-        from ai_session_tools import RecoveredFile
+        from ai_session_tools import SessionFile
         from ai_session_tools.formatters import TableFormatter
         files = [
-            RecoveredFile(
+            SessionFile(
                 name="test.py", path="/test.py", file_type="py", edits=5,
                 sessions=["aaa", "bbb", "ccc", "ddd"],
             )
@@ -4724,11 +4741,11 @@ class TestFormatterSessionIdEllipsis:
     def test_short_session_id_no_ellipsis(self):
         """A session ID shorter than 8 chars should not get an ellipsis appended."""
         from ai_session_tools.formatters import TableFormatter
-        from ai_session_tools.models import RecoveredFile
+        from ai_session_tools import SessionFile
 
         # Create a mock file with a short session ID (< 8 chars)
         short_id = "abc"
-        file = RecoveredFile(
+        file = SessionFile(
             name="test.py", path="/proj/test.py", edits=1, file_type=".py",
             last_modified="2026-01-01T10:00:00", location="/proj",
             size_bytes=100, sessions=[short_id]
@@ -4744,10 +4761,10 @@ class TestFormatterSessionIdEllipsis:
     def test_long_session_id_gets_ellipsis(self):
         """A session ID longer than 8 chars should get ellipsis at position 8."""
         from ai_session_tools.formatters import TableFormatter
-        from ai_session_tools.models import RecoveredFile
+        from ai_session_tools import SessionFile
 
         long_id = "abcdef0123456789"  # 16 chars
-        file = RecoveredFile(
+        file = SessionFile(
             name="test.py", path="/proj/test.py", edits=1, file_type=".py",
             last_modified="2026-01-01T10:00:00", location="/proj",
             size_bytes=100, sessions=[long_id]
@@ -5264,25 +5281,22 @@ class TestMultiSourceEngine:
 
 
 class TestSessionBackendSearchMessages:
-    """Test SessionBackend.search_messages() signature unification (Phase C C4/C8)."""
+    """Test AISession.search_messages() signature unification (Phase C C4/C8)."""
 
     def test_search_messages_accepts_query_and_message_type(self):
-        """SessionBackend.search_messages(query, message_type) works for all backends."""
-        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
-        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
-        # Should not crash even with empty sources
-        result = engine.search_messages("query", "user")
+        """AISession.search_messages(query, message_type=...) works for all backends."""
+        from ai_session_tools.engine import AISession, MultiSourceEngine
+        engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
+        # message_type is now keyword-only
+        result = engine.search_messages("query", message_type="user")
         assert isinstance(result, list)
 
     def test_search_messages_with_tool_parameter_warns_on_non_claude(self):
-        """SessionBackend.search_messages with --tool warns on non-Claude backend."""
-        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
-        from io import StringIO
-        import sys
-        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
-        # tool parameter is only supported on Claude backend; should return empty
-        # (we can't easily test stderr capture in this context, but verify no crash)
-        result = engine.search_messages("query", None, tool="some_tool")
+        """AISession.search_messages with tool= warns on non-Claude backend."""
+        from ai_session_tools.engine import AISession, MultiSourceEngine
+        engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
+        # tool parameter is keyword-only; should return empty on non-Claude
+        result = engine.search_messages("query", tool="some_tool")
         assert isinstance(result, list)
 
 
@@ -5291,36 +5305,36 @@ class TestSessionBackendDegradation:
 
     def test_find_corrections_returns_empty_on_aistudio(self):
         """find_corrections (Claude-only) returns [] on non-Claude with no crash."""
-        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
-        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
+        from ai_session_tools.engine import AISession, MultiSourceEngine
+        engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
         result = engine.find_corrections()
         assert result == []
 
     def test_export_session_returns_empty_string_on_aistudio(self):
-        """export_session_markdown (Claude-only) returns "" on non-Claude."""
-        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
-        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
-        result = engine.export_session_markdown("session-id")
+        """get_session_markdown (Claude-only) returns "" on non-Claude."""
+        from ai_session_tools.engine import AISession, MultiSourceEngine
+        engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
+        result = engine.get_session_markdown("session-id")
         assert result == ""
 
     def test_analyze_planning_usage_returns_empty_on_aistudio(self):
-        """analyze_planning_usage (Claude-only) returns [] on non-Claude."""
-        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
-        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
-        result = engine.analyze_planning_usage()
+        """get_planning_usage (Claude-only) returns [] on non-Claude."""
+        from ai_session_tools.engine import AISession, MultiSourceEngine
+        engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
+        result = engine.get_planning_usage()
         assert result == []
 
     def test_timeline_session_returns_empty_on_aistudio(self):
-        """timeline_session (Claude-only) returns [] on non-Claude."""
-        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
-        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
-        result = engine.timeline_session("session-id")
+        """get_session_timeline (Claude-only) returns [] on non-Claude."""
+        from ai_session_tools.engine import AISession, MultiSourceEngine
+        engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
+        result = engine.get_session_timeline("session-id")
         assert result == []
 
     def test_get_statistics_always_returns_dict(self):
-        """get_statistics() always returns dict (no RecoveryStatistics union type)."""
-        from ai_session_tools.engine import SessionBackend, MultiSourceEngine
-        engine = SessionBackend(MultiSourceEngine([]), "aistudio")
+        """get_statistics() always returns dict (no SessionStatistics union type)."""
+        from ai_session_tools.engine import AISession, MultiSourceEngine
+        engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
         stats = engine.get_statistics()
         assert isinstance(stats, dict)
 
@@ -5355,28 +5369,28 @@ class TestSourceAutoDiscovery:
 
 
 class TestGetSessionBackend:
-    """Test get_session_backend factory (Phase C C1)."""
+    """Test AISession factory (Phase C C1)."""
 
     def test_get_session_backend_returns_claude_backend_by_default(self, tmp_path):
-        """get_session_backend with source='claude' returns Claude-backed SessionBackend."""
-        from ai_session_tools.engine import get_session_backend, SessionBackend
-        engine = get_session_backend(
+        """AISession with source='claude' returns Claude-backed AISession."""
+        from ai_session_tools.engine import AISession
+        engine = AISession(
             source="claude",
             config={"source_dirs": {}},
             claude_dir=str(tmp_path)
         )
-        assert isinstance(engine, SessionBackend)
+        assert isinstance(engine, AISession)
         assert engine._is_claude
 
     def test_get_session_backend_fallback_to_claude_when_no_sources_found(self, tmp_path):
-        """get_session_backend falls back to Claude when aistudio configured but not found."""
-        from ai_session_tools.engine import get_session_backend, SessionBackend
-        engine = get_session_backend(
+        """AISession falls back to Claude when aistudio configured but not found."""
+        from ai_session_tools.engine import AISession
+        engine = AISession(
             source="aistudio",
             config={"source_dirs": {"aistudio": ["/nonexistent"]}},
             claude_dir=str(tmp_path)
         )
-        assert isinstance(engine, SessionBackend)
+        assert isinstance(engine, AISession)
         # Falls back to Claude; this is acceptable behavior
         assert engine._is_claude or engine.source == "aistudio"
 
@@ -7195,11 +7209,11 @@ class TestBug1ClaudeInAllSource:
 
     def test_get_session_backend_all_includes_claude(self, tmp_path, monkeypatch):
         """Backend with source='all' must return Claude sessions in list_sessions()."""
-        from ai_session_tools.engine import get_session_backend
+        from ai_session_tools.engine import AISession
         _make_session_jsonl(tmp_path, "test-uuid-1234", "post_ext feature request")
         monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
         monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
-        backend = get_session_backend(source="all", claude_dir=str(tmp_path))
+        backend = AISession(source="all", claude_dir=str(tmp_path))
         sessions = backend.get_sessions()
         # Claude sessions must be present (session_id or provider check)
         providers = {getattr(s, "provider", "") for s in sessions}
@@ -8651,7 +8665,7 @@ class TestDateTimePrecisionBoundaries:
     def test_filterspec_tz_suffix_included_at_boundary(self):
         """FilterSpec.matches_datetime must strip tz suffix; boundary timestamp must pass."""
         from ai_session_tools.models import FilterSpec
-        f = FilterSpec(after="2026-01-01T00:00:00", before="2026-12-31T23:59:59")
+        f = FilterSpec(since="2026-01-01T00:00:00", until="2026-12-31T23:59:59")
         # Timestamp exactly at upper boundary, but with Z suffix — must NOT be excluded
         assert f.matches_datetime("2026-12-31T23:59:59Z") is True, (
             "Timestamp at boundary with Z suffix must pass (tz stripped before compare)"
@@ -8663,14 +8677,14 @@ class TestDateTimePrecisionBoundaries:
     def test_filterspec_tz_suffix_excluded_past_boundary(self):
         """FilterSpec.matches_datetime must correctly exclude timestamps beyond range."""
         from ai_session_tools.models import FilterSpec
-        f = FilterSpec(after="2026-01-01T00:00:00", before="2026-12-31T23:59:59")
+        f = FilterSpec(since="2026-01-01T00:00:00", until="2026-12-31T23:59:59")
         assert f.matches_datetime("2027-01-01T00:00:00Z") is False
         assert f.matches_datetime("2025-12-31T23:59:59+00:00") is False
 
     def test_filterspec_microseconds_at_boundary(self):
         """FilterSpec.matches_datetime must strip microseconds; boundary must pass."""
         from ai_session_tools.models import FilterSpec
-        f = FilterSpec(after="2026-01-01T00:00:00", before="2026-12-31T23:59:59")
+        f = FilterSpec(since="2026-01-01T00:00:00", until="2026-12-31T23:59:59")
         # Microsecond suffix makes string longer — must truncate before compare
         assert f.matches_datetime("2026-12-31T23:59:59.999999") is True
 
@@ -8890,20 +8904,12 @@ class TestConfigMigration:
 class TestLibraryAPI:
     """All key classes/functions must be importable from top-level package."""
 
-    def test_session_backend_importable(self):
-        from ai_session_tools import SessionBackend
-        assert SessionBackend is not None
-
-    def test_get_session_backend_importable(self):
-        from ai_session_tools import get_session_backend
-        assert callable(get_session_backend)
-
-    def test_get_multi_engine_importable(self):
-        from ai_session_tools import get_multi_engine
-        assert callable(get_multi_engine)
+    def test_aisession_importable(self):
+        from ai_session_tools import AISession
+        assert AISession is not None
 
     def test_multi_source_engine_importable(self):
-        from ai_session_tools import MultiSourceEngine
+        from ai_session_tools.engine import MultiSourceEngine
         assert MultiSourceEngine is not None
 
     def test_message_formatter_importable(self):
@@ -8946,6 +8952,16 @@ class TestLibraryAPI:
         assert AiStudioSource is not None
         assert GeminiCliSource is not None
 
+    def test_session_file_importable(self):
+        """SessionFile (canonical name for RecoveredFile) is in __all__."""
+        from ai_session_tools import SessionFile
+        assert SessionFile is not None
+
+    def test_session_statistics_importable(self):
+        """SessionStatistics (canonical name for RecoveryStatistics) is in __all__."""
+        from ai_session_tools import SessionStatistics
+        assert SessionStatistics is not None
+
     def test_all_exports_importable(self):
         """Every symbol in __all__ must be importable."""
         import ai_session_tools as aise
@@ -8953,12 +8969,777 @@ class TestLibraryAPI:
             assert hasattr(aise, name), f"{name!r} in __all__ but not importable"
 
     def test_star_import_completeness(self):
-        """__all__ must cover the complete public API (>=43 symbols).
+        """__all__ must cover the complete public API (>=31 symbols after cleanup).
 
-        Count breakdown: 6 core engine + 2 sources + 4 filters + 7 formatters
-        + 12 models + 8 type protocols + 4 config = 43 total.
+        Count breakdown: 1 AISession + 2 aliases (connect, SessionRecoveryEngine) +
+        4 filters + 7 formatters + 12 models + 4 config + 1 parse_date_input = ~31 total.
         """
         import ai_session_tools as aise
-        assert len(aise.__all__) >= 43, (
-            f"Expected >=43 exports in __all__, got {len(aise.__all__)}"
+        assert len(aise.__all__) >= 31, (
+            f"Expected >=31 exports in __all__, got {len(aise.__all__)}"
         )
+
+
+class TestAPIClarity:
+    """API naming and discoverability — easy to use correctly, hard to use incorrectly."""
+
+    # ── Issue 1: FilterSpec canonical field names ──────────────────────────────
+
+    def test_filterspec_since_field_exists(self):
+        """FilterSpec.since is the canonical field (not .after)."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec(since="2026-01-01")
+        assert spec.since == "2026-01-01"
+
+    def test_filterspec_until_field_exists(self):
+        """FilterSpec.until is the canonical field (not .before)."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec(until="2026-12-31")
+        assert spec.until == "2026-12-31"
+
+    def test_filterspec_since_until_in_matches_datetime(self):
+        """FilterSpec.matches_datetime() respects since/until."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec(since="2026-01-01", until="2026-12-31")
+        assert spec.matches_datetime("2026-06-15T00:00:00") is True
+        assert spec.matches_datetime("2025-12-31T23:59:59") is False
+        assert spec.matches_datetime("2027-01-01T00:00:00") is False
+
+    def test_filterspec_no_filter_passes_all(self):
+        """FilterSpec with no dates passes all timestamps."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec()
+        assert spec.matches_datetime("2026-01-01T00:00:00") is True
+        assert spec.matches_datetime("") is True
+
+    # ── Issue 2+3: Internal symbols not in public API ─────────────────────────
+
+    def test_get_multi_engine_not_in_public_api(self):
+        """get_multi_engine is internal (silently returns empty engine for Claude-only users)."""
+        import ai_session_tools
+        assert not hasattr(ai_session_tools, "get_multi_engine"), (
+            "get_multi_engine must not be in public API — use AISession() or connect() instead"
+        )
+
+    def test_multi_source_engine_not_in_all(self):
+        """MultiSourceEngine is an implementation detail; not a public entry point."""
+        import ai_session_tools as aise
+        assert "MultiSourceEngine" not in aise.__all__, (
+            "MultiSourceEngine is internal; use AISession() to obtain a session object"
+        )
+
+    def test_protocol_types_not_in_all(self):
+        """Protocol types are for custom backend implementors — not in default namespace."""
+        import ai_session_tools as aise
+        for proto in ("Searchable", "Extractable", "Filterable", "Storage",
+                      "Reporter", "Formatter", "ComposableFilter", "ComposableSearch"):
+            assert proto not in aise.__all__, (
+                f"{proto} is a Protocol for advanced/custom use; should not be in __all__. "
+                f"Import from ai_session_tools.types instead."
+            )
+
+    # ── Issue 4: Remove duplicate alias ──────────────────────────────────────
+
+    def test_inspect_session_removed(self):
+        """inspect_session() was a confusing alias for get_session_analysis(); removed."""
+        from ai_session_tools import AISession
+        assert not hasattr(AISession, "inspect_session"), (
+            "Use get_session_analysis() — inspect_session() was a redundant alias"
+        )
+
+    # ── Issue 6: Typed return annotations ────────────────────────────────────
+
+    def test_aisession_get_messages_typed(self):
+        """AISession.get_messages return type is not bare object/list."""
+        from ai_session_tools import AISession
+        ret = AISession.get_messages.__annotations__.get("return")
+        assert ret is not None and ret is not object, (
+            f"get_messages() should have a typed return annotation, got: {ret!r}"
+        )
+
+    # ── Issue 7: Docstring order ──────────────────────────────────────────────
+
+    def test_recommended_entry_point_first_in_docstring(self):
+        """Module docstring shows AISession (RECOMMENDED) before SessionRecoveryEngine."""
+        import ai_session_tools
+        doc = ai_session_tools.__doc__
+        assert "AISession" in doc
+        assert "SessionRecoveryEngine" in doc
+        assert doc.index("AISession") < doc.index("SessionRecoveryEngine"), (
+            "AISession must appear before SessionRecoveryEngine in module docstring"
+        )
+
+    # ── Issue 8: AISession class + connect() alias ────────────────────────────
+
+    def test_aisession_class_importable(self):
+        """AISession is the main class — importable from ai_session_tools."""
+        from ai_session_tools import AISession
+        assert callable(AISession), "AISession must be callable"
+
+    def test_aisession_is_first_in_all(self):
+        """AISession is first in __all__ — signals it as THE primary entry point."""
+        import ai_session_tools as aise
+        assert "AISession" in aise.__all__, "AISession must be in __all__"
+        assert aise.__all__[0] == "AISession", (
+            "AISession must be FIRST in __all__ — it is the main class users should use"
+        )
+
+    def test_connect_alias_exists(self):
+        """connect is AISession — not a separate factory function."""
+        from ai_session_tools import connect, AISession
+        assert connect is AISession, (
+            "connect must be AISession itself (connect = AISession) "
+            "so type(connect()) is AISession"
+        )
+
+    # ── Issue 9: search_files() accepts FilterSpec OR SearchFilter ──────────────
+
+    def test_search_files_method_exists(self):
+        """AISession.search_files() exists — distinguishable from search_messages()."""
+        from ai_session_tools import AISession
+        assert hasattr(AISession, "search_files"), (
+            "search_files() must exist — 'search()' is too generic alongside 'search_messages()'"
+        )
+
+    def test_search_files_accepts_search_filter(self):
+        """search_files() accepts SearchFilter as well as FilterSpec."""
+        import inspect
+        from ai_session_tools import AISession
+        from ai_session_tools.filters import SearchFilter
+        sig = inspect.signature(AISession.search_files)
+        filters_param = sig.parameters.get("filters")
+        assert filters_param is not None, "search_files() must have a filters parameter"
+        annotation = str(filters_param.annotation)
+        assert "SearchFilter" in annotation, (
+            f"search_files(filters) annotation must include SearchFilter, got: {annotation!r}."
+        )
+
+    # ── Issue 10: search_messages with context ────────────────────────────────
+
+    def test_search_messages_has_context_param(self):
+        """search_messages() accepts optional context= param."""
+        import inspect
+        from ai_session_tools import AISession
+        sig = inspect.signature(AISession.search_messages)
+        assert "context" in sig.parameters, (
+            "search_messages() must accept context: int = 0"
+        )
+
+    # ── Issue 11: FilterSpec date builders ────────────────────────────────────
+
+    def test_filterspec_with_since_builder(self):
+        """FilterSpec.with_since() builder sets since field and chains."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_since("2026-01-01")
+        assert spec.since == "2026-01-01"
+
+    def test_filterspec_with_until_builder(self):
+        """FilterSpec.with_until() builder sets until field and chains."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_until("2026-12-31")
+        assert spec.until == "2026-12-31"
+
+    def test_filterspec_with_date_range_builder(self):
+        """FilterSpec.with_date_range() builder sets both since and until."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_date_range(since="2026-01-01", until="2026-12-31")
+        assert spec.since == "2026-01-01"
+        assert spec.until == "2026-12-31"
+
+    # ── Issue 12: Context manager protocol ───────────────────────────────────
+
+    def test_aisession_context_manager_enter(self):
+        """AISession.__enter__ returns self."""
+        from ai_session_tools import AISession
+        session = AISession()
+        assert session.__enter__() is session
+
+    def test_aisession_context_manager_exit(self):
+        """AISession.__exit__ accepts standard exception args."""
+        from ai_session_tools import AISession
+        session = AISession()
+        result = session.__exit__(None, None, None)
+        # May return None or False; must not raise
+
+    def test_with_aisession_usage(self):
+        """`with AISession() as s:` and `with connect() as s:` both work."""
+        from ai_session_tools import AISession, connect
+        with AISession() as s:
+            assert s is not None
+            assert hasattr(s, "get_sessions")
+            assert hasattr(s, "search_messages")
+        with connect() as s:
+            assert s is not None
+
+    # ── Issue 14: LocationMatcher absorbed into SearchFilter ──────────────────
+
+    def test_search_filter_by_location_pattern_exists(self):
+        """SearchFilter.by_location_pattern() exists — replaces LocationMatcher."""
+        from ai_session_tools.filters import SearchFilter
+        sf = SearchFilter()
+        assert hasattr(sf, "by_location_pattern"), (
+            "by_location_pattern() must exist on SearchFilter"
+        )
+
+    def test_search_filter_by_location_pattern_fnmatch(self):
+        """SearchFilter.by_location_pattern() uses fnmatch, not substring."""
+        from ai_session_tools.filters import SearchFilter
+        from ai_session_tools import SessionFile
+        f1 = SessionFile(name="foo.py", path="/proj/src/foo.py", location="/proj/src/foo.py")
+        f2 = SessionFile(name="bar.py", path="/proj/test/bar.py", location="/proj/test/bar.py")
+        sf = SearchFilter().by_location_pattern(include=["*/src/*"])
+        result = sf([f1, f2])
+        assert f1 in result and f2 not in result
+
+    def test_location_matcher_not_in_all(self):
+        """LocationMatcher is deprecated and NOT in __all__."""
+        import ai_session_tools as aise
+        assert "LocationMatcher" not in aise.__all__
+        assert "LocationFilter" not in aise.__all__
+
+    def test_location_matcher_replaced_by_by_location_pattern(self):
+        """LocationMatcher was removed; SearchFilter.by_location_pattern() is the replacement."""
+        # LocationMatcher is gone — no backward compat needed (no external users)
+        try:
+            from ai_session_tools.filters import LocationMatcher
+            assert False, "LocationMatcher must not exist — use SearchFilter.by_location_pattern()"
+        except ImportError:
+            pass  # Expected: LocationMatcher removed, use SearchFilter.by_location_pattern()
+        # Verify the replacement works correctly
+        from ai_session_tools.filters import SearchFilter
+        from ai_session_tools import SessionFile
+        f1 = SessionFile(name="src.py", path="/proj/src/src.py", location="/proj/src/src.py")
+        f2 = SessionFile(name="test.py", path="/proj/test/test.py", location="/proj/test/test.py")
+        sf = SearchFilter().by_location_pattern(include=["*/src/*"])
+        result = sf([f1, f2])
+        assert f1 in result and f2 not in result, (
+            "SearchFilter.by_location_pattern() must filter correctly"
+        )
+
+    # ── Issue 15: get_latest_session_context ─────────────────────────────────
+
+    def test_get_latest_session_context_exists(self):
+        """AISession.get_latest_session_context() exists — #1 use case, one call."""
+        from ai_session_tools import AISession
+        assert hasattr(AISession, "get_latest_session_context"), (
+            "get_latest_session_context() is the #1 use case"
+        )
+
+    # ── Issue 18: ChainedFilter superseded by SearchFilter.__and__ ──────────────
+
+    def test_chained_filter_not_in_all(self):
+        """ChainedFilter is NOT in __all__ — use SearchFilter.__and__ (f1 & f2) instead."""
+        import ai_session_tools as aise
+        assert "ChainedFilter" not in aise.__all__
+
+    def test_search_filter_and_produces_and_semantics(self):
+        """SearchFilter & operator correctly implements AND — both conditions must pass."""
+        from ai_session_tools.filters import SearchFilter
+        from ai_session_tools import SessionFile
+        f_py = SearchFilter().by_extension("py")
+        f_big = SearchFilter().by_size(min_size=100)
+        files = [
+            SessionFile(name="a.py", path="/a.py", size_bytes=200),
+            SessionFile(name="b.py", path="/b.py", size_bytes=50),   # too small
+            SessionFile(name="c.md", path="/c.md", size_bytes=300),  # wrong extension
+        ]
+        result = (f_py & f_big)(files)
+        assert [f.name for f in result] == ["a.py"], (
+            "f1 & f2 should only include files passing BOTH predicates"
+        )
+
+    def test_search_filter_and_edge_cases(self):
+        """SearchFilter & operator handles empty results, single file, and all files."""
+        from ai_session_tools.filters import SearchFilter
+        from ai_session_tools import SessionFile
+        f_py = SearchFilter().by_extension("py")
+        f_big = SearchFilter().by_size(min_size=100)
+        files = [
+            SessionFile(name="a.py", path="/a.py", size_bytes=200),
+            SessionFile(name="b.py", path="/b.py", size_bytes=50),
+            SessionFile(name="c.md", path="/c.md", size_bytes=300),
+        ]
+        # AND: only a.py passes both (py AND size>=100)
+        result = (f_py & f_big)(files)
+        assert [f.name for f in result] == ["a.py"]
+        # Empty result when nothing matches both
+        nothing = SearchFilter().by_size(min_size=99999) & SearchFilter().by_extension("py")
+        assert nothing(files) == []
+        # Single predicate still works
+        py_only = SearchFilter().by_extension("py") & SearchFilter()
+        assert {f.name for f in py_only(files)} == {"a.py", "b.py"}
+
+    # ── Issue 19/20: Reporter removed ────────────────────────────────────────
+
+    def test_reporter_not_in_all(self):
+        """Reporter Protocol is removed — no implementors or callers exist."""
+        import ai_session_tools as aise
+        assert "Reporter" not in aise.__all__
+
+    def test_reporter_not_in_types(self):
+        """Reporter Protocol is removed from types.py."""
+        try:
+            from ai_session_tools.types import Reporter
+            assert False, "Reporter should be removed from types.py"
+        except ImportError:
+            pass
+
+    # ── SessionFile / SessionStatistics aliases ───────────────────────────────
+
+    def test_session_file_is_the_canonical_class(self):
+        """SessionFile is the canonical class — RecoveredFile no longer exists."""
+        from ai_session_tools import SessionFile
+        # Verify SessionFile has all expected fields
+        f = SessionFile(name="test.py", path="/test.py")
+        assert f.name == "test.py"
+        assert f.path == "/test.py"
+        assert f.file_type == "unknown"
+        assert f.edits == 0
+        assert f.sessions == []
+        # RecoveredFile should NOT exist
+        try:
+            from ai_session_tools import RecoveredFile
+            assert False, "RecoveredFile must not exist — SessionFile is the only class name"
+        except ImportError:
+            pass  # expected
+
+    def test_session_statistics_is_the_canonical_class(self):
+        """SessionStatistics is the canonical class — RecoveryStatistics no longer exists."""
+        from ai_session_tools import SessionStatistics
+        # Verify SessionStatistics has all expected fields
+        stats = SessionStatistics(total_sessions=5, total_files=10)
+        assert stats.total_sessions == 5
+        assert stats.total_files == 10
+        assert stats.avg_versions_per_file == 0.0  # total_versions=0
+        # RecoveryStatistics should NOT exist
+        try:
+            from ai_session_tools import RecoveryStatistics
+            assert False, "RecoveryStatistics must not exist — SessionStatistics is the only class name"
+        except ImportError:
+            pass  # expected
+
+    # ── Final __all__ count ───────────────────────────────────────────────────
+
+    def test_public_api_count_after_cleanup(self):
+        """__all__ has the right count: ~35 items after cleanup and consolidation."""
+        import ai_session_tools as aise
+        assert len(aise.__all__) >= 31, (
+            f"Expected >=31 exports after cleanup, got {len(aise.__all__)}: {aise.__all__}"
+        )
+        assert aise.__all__[0] == "AISession"
+        for proto in ("Searchable", "Extractable", "Filterable", "Storage",
+                      "Formatter", "ComposableFilter", "ComposableSearch"):
+            assert proto not in aise.__all__
+        assert "Reporter" not in aise.__all__
+        assert "SessionBackend" not in aise.__all__
+        assert "get_session_backend" not in aise.__all__
+        assert "MultiSourceEngine" not in aise.__all__
+        assert "get_multi_engine" not in aise.__all__
+        assert "LocationMatcher" not in aise.__all__
+        assert "LocationFilter" not in aise.__all__
+        assert "ChainedFilter" not in aise.__all__
+
+    # ── Step 17: Method renames ───────────────────────────────────────────────
+
+    def test_get_session_analysis_exists(self):
+        """get_session_analysis() replaces analyze_session() as canonical name."""
+        from ai_session_tools import AISession
+        assert hasattr(AISession, "get_session_analysis")
+
+    def test_get_session_analysis_is_canonical(self):
+        """get_session_analysis() is the only method — no analyze_session alias."""
+        from ai_session_tools import AISession
+        assert hasattr(AISession, "get_session_analysis")
+        # No analyze_session alias (no backward compat)
+        assert not hasattr(AISession, "analyze_session"), (
+            "analyze_session must not exist — use get_session_analysis()"
+        )
+
+    def test_get_session_timeline_exists(self):
+        """get_session_timeline() is the canonical name — no timeline_session alias."""
+        from ai_session_tools import AISession
+        assert hasattr(AISession, "get_session_timeline")
+        # No timeline_session alias (no backward compat)
+        assert not hasattr(AISession, "timeline_session"), (
+            "timeline_session must not exist — use get_session_timeline()"
+        )
+
+    def test_get_planning_usage_exists(self):
+        """get_planning_usage() is the canonical name — no analyze_planning_usage alias."""
+        from ai_session_tools import AISession
+        import inspect
+        assert hasattr(AISession, "get_planning_usage")
+        sig = inspect.signature(AISession.get_planning_usage)
+        assert "kwargs" not in str(sig)
+        for name in ("since", "until", "project_filter", "commands", "limit"):
+            assert name in sig.parameters, f"get_planning_usage() missing param: {name}"
+        # No analyze_planning_usage alias (no backward compat)
+        assert not hasattr(AISession, "analyze_planning_usage"), (
+            "analyze_planning_usage must not exist — use get_planning_usage()"
+        )
+
+    def test_get_file_edits_exists(self):
+        """get_file_edits() is the canonical name — no cross_reference_session alias."""
+        from ai_session_tools import AISession
+        assert hasattr(AISession, "get_file_edits")
+        # No cross_reference_session alias (no backward compat)
+        assert not hasattr(AISession, "cross_reference_session"), (
+            "cross_reference_session must not exist — use get_file_edits()"
+        )
+
+    def test_get_session_markdown_exists(self):
+        """get_session_markdown() is the canonical name — no export_session_markdown alias."""
+        from ai_session_tools import AISession
+        assert hasattr(AISession, "get_session_markdown")
+        # No export_session_markdown alias (no backward compat)
+        assert not hasattr(AISession, "export_session_markdown"), (
+            "export_session_markdown must not exist — use get_session_markdown()"
+        )
+
+    def test_find_corrections_explicit_params(self):
+        """find_corrections() has explicit keyword-only params, not **kwargs."""
+        import inspect
+        from ai_session_tools import AISession
+        sig = inspect.signature(AISession.find_corrections)
+        assert "kwargs" not in str(sig)
+        for name in ("since", "until", "project_filter", "patterns", "limit"):
+            assert name in sig.parameters
+
+    # ── FilterSpec.with_when() ────────────────────────────────────────────────
+
+    def test_filterspec_with_when_duration(self):
+        """FilterSpec.with_when('7d') sets since."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_when("7d")
+        assert spec.since is not None and len(spec.since) >= 10
+
+    def test_filterspec_with_when_interval(self):
+        """FilterSpec.with_when('2026-01/2026-03') sets both since and until."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_when("2026-01/2026-03")
+        assert spec.since is not None and "2026" in spec.since
+        assert spec.until is not None and "2026" in spec.until
+
+    def test_filterspec_with_when_decade(self):
+        """FilterSpec.with_when('202X') covers the entire decade."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec().with_when("202X")
+        assert spec.since is not None and "2020" in spec.since
+        assert spec.until is not None and "2029" in spec.until
+
+    # ── Filter composability + by_date() ─────────────────────────────────────
+
+    def test_search_filter_by_date_exists(self):
+        """SearchFilter.by_date() exists and chains correctly."""
+        from ai_session_tools.filters import SearchFilter
+        sf = SearchFilter().by_date(since="2026-01-01")
+        assert callable(sf)
+
+    def test_search_filter_by_date_chains(self):
+        """SearchFilter.by_date().by_extension() chains without error."""
+        from ai_session_tools.filters import SearchFilter
+        sf = SearchFilter().by_date(since="2026-01-01").by_extension("py")
+        assert callable(sf)
+
+    def test_search_filter_and_composition(self):
+        """SearchFilter & SearchFilter returns a composable filter."""
+        from ai_session_tools.filters import SearchFilter
+        f1 = SearchFilter()
+        f2 = SearchFilter()
+        combined = f1 & f2
+        assert callable(combined)
+
+    def test_search_filter_or_composition(self):
+        """SearchFilter | SearchFilter returns a composable filter."""
+        from ai_session_tools.filters import SearchFilter
+        f1 = SearchFilter()
+        f2 = SearchFilter()
+        either = f1 | f2
+        assert callable(either)
+
+    # ── Formatter accepts generator ───────────────────────────────────────────
+
+    def test_formatter_accepts_generator(self):
+        """format_many() accepts a generator, not just a list."""
+        from ai_session_tools import PlainFormatter, SessionMessage, MessageType
+        fmt = PlainFormatter()
+        gen = (SessionMessage(type=MessageType.USER, timestamp="2026-01-01T00:00:00",
+               content=f"msg {i}", session_id="s1") for i in range(3))
+        result = fmt.format_many(gen)
+        assert isinstance(result, str)
+
+    # ── Protocols in types ────────────────────────────────────────────────────
+
+    def test_predicate_protocol_exists(self):
+        """Predicate protocol is importable from ai_session_tools.types."""
+        from ai_session_tools.types import Predicate
+        assert callable(Predicate)
+
+    def test_composable_protocol_exists(self):
+        """Composable protocol is importable from ai_session_tools.types."""
+        from ai_session_tools.types import Composable
+        assert callable(Composable)
+
+    # ── get_sources() and export_sessions_markdown() ──────────────────────────
+
+    def test_get_sources_exists(self):
+        """AISession.get_sources() returns list of active source names."""
+        from ai_session_tools import AISession
+        assert hasattr(AISession, "get_sources")
+        with AISession() as s:
+            sources = s.get_sources()
+            assert isinstance(sources, list)
+            assert len(sources) >= 1
+            assert all(isinstance(src, str) for src in sources)
+
+    def test_export_sessions_markdown_exists(self):
+        """AISession.export_sessions_markdown() bulk exports sessions."""
+        from ai_session_tools import AISession
+        assert hasattr(AISession, "export_sessions_markdown")
+        import inspect
+        sig = inspect.signature(AISession.export_sessions_markdown)
+        for param in ("since", "until", "project_filter"):
+            assert param in sig.parameters
+
+
+class TestAISessionRename:
+    """AISession is the main class — RAII, context manager, multi-source."""
+
+    def test_aisession_class_exists(self):
+        """AISession is importable as the main class."""
+        from ai_session_tools import AISession
+        assert callable(AISession)
+
+    def test_aisession_is_first_in_all(self):
+        """AISession is the first export — signals primacy."""
+        import ai_session_tools as aise
+        assert aise.__all__[0] == "AISession", (
+            f"AISession must be first in __all__, got: {aise.__all__[0]!r}"
+        )
+
+    def test_aisession_zero_arg_construction(self):
+        """AISession() with no arguments auto-detects and connects."""
+        from ai_session_tools import AISession
+        session = AISession()
+        assert hasattr(session, "get_sessions")
+        assert hasattr(session, "search_messages")
+        assert hasattr(session, "search_files")
+
+    def test_aisession_context_manager(self):
+        """`with AISession() as s:` works correctly."""
+        from ai_session_tools import AISession
+        with AISession() as s:
+            assert s is not None
+            assert hasattr(s, "get_sessions")
+
+    def test_connect_is_aisession(self):
+        """`connect` is AISession — not a separate factory function."""
+        import ai_session_tools as aise
+        assert aise.connect is aise.AISession
+
+    def test_session_backend_removed(self):
+        """SessionBackend name is removed — AISession is the only name."""
+        import ai_session_tools.engine as eng
+        assert not hasattr(eng, "SessionBackend"), (
+            "SessionBackend must not exist — AISession is the canonical class name"
+        )
+
+    def test_aisession_source_param(self):
+        """AISession(source='claude') accepts source override."""
+        from ai_session_tools import AISession
+        session = AISession(source="claude")
+        assert session.source == "claude"
+
+    def test_aisession_in_all_not_session_backend(self):
+        """__all__ has AISession, not SessionBackend."""
+        import ai_session_tools as aise
+        assert "AISession" in aise.__all__
+        assert "SessionBackend" not in aise.__all__
+
+
+class TestAISessionCLI:
+    """Verify CLI correctly uses AISession as its engine."""
+
+    def test_resolve_engine_returns_aisession(self):
+        """_resolve_engine() return type annotation references AISession."""
+        import inspect
+        from ai_session_tools.cli import _resolve_engine
+        hints = _resolve_engine.__annotations__
+        ret = hints.get("return", "")
+        assert "AISession" in str(ret), (
+            f"_resolve_engine return annotation must reference AISession, got: {ret!r}"
+        )
+
+    def test_aisession_importable_from_engine(self):
+        """AISession is importable from engine module (primary location)."""
+        from ai_session_tools.engine import AISession
+        assert callable(AISession)
+
+    def test_session_backend_not_in_engine(self):
+        """SessionBackend is removed — AISession is the only class name."""
+        import ai_session_tools.engine as eng
+        assert not hasattr(eng, "SessionBackend"), (
+            "SessionBackend must not exist — AISession is the canonical class name"
+        )
+
+    def test_get_session_backend_not_in_engine(self):
+        """get_session_backend is removed — use AISession() directly."""
+        import ai_session_tools.engine as eng
+        assert not hasattr(eng, "get_session_backend"), (
+            "get_session_backend must not exist — use AISession() directly"
+        )
+
+    def test_get_engine_private_in_cli(self):
+        """get_engine() is private (_get_engine) in cli.py."""
+        import ai_session_tools.cli as cli_module
+        # Either get_engine doesn't exist (fully removed) or _get_engine exists
+        if hasattr(cli_module, "get_engine"):
+            assert False, (
+                "cli.get_engine() must be renamed to _get_engine() — "
+                "external code should use AISession(source='claude')"
+            )
+
+
+class TestGenericFilterBase:
+    """Filter[T] base class — DRY, WOLOG, composable."""
+
+    def test_filter_base_exists(self):
+        """Filter is the generic base class for SearchFilter and MessageFilter."""
+        from ai_session_tools.filters import Filter, SearchFilter, MessageFilter
+        assert issubclass(SearchFilter, Filter)
+        assert issubclass(MessageFilter, Filter)
+
+    def test_search_filter_and_via_base(self):
+        """SearchFilter.__and__ is inherited from Filter[T] — no duplication."""
+        from ai_session_tools.filters import SearchFilter
+        assert "__and__" in dir(SearchFilter)
+        assert "__and__" not in SearchFilter.__dict__
+
+    def test_message_filter_and_via_base(self):
+        """MessageFilter.__and__ is inherited from Filter[T] — no duplication."""
+        from ai_session_tools.filters import MessageFilter
+        assert "__and__" in dir(MessageFilter)
+        assert "__and__" not in MessageFilter.__dict__
+
+    def test_filter_and_preserves_subclass_type(self):
+        """SearchFilter & SearchFilter returns SearchFilter, not Filter."""
+        from ai_session_tools.filters import SearchFilter
+        f1 = SearchFilter()
+        f2 = SearchFilter()
+        combined = f1 & f2
+        assert type(combined) is SearchFilter, (
+            f"f1 & f2 should return SearchFilter, got {type(combined).__name__}"
+        )
+
+    def test_filter_or_disjunction(self):
+        """SearchFilter | SearchFilter correctly implements OR logic."""
+        from ai_session_tools.filters import SearchFilter
+        from ai_session_tools import SessionFile
+        py_filter = SearchFilter().by_extension("py")
+        ts_filter = SearchFilter().by_extension("ts")
+        either = py_filter | ts_filter
+        files = [
+            SessionFile(name="a.py", path="/a.py"),
+            SessionFile(name="b.ts", path="/b.ts"),
+            SessionFile(name="c.md", path="/c.md"),
+        ]
+        result = either(files)
+        assert {f.name for f in result} == {"a.py", "b.ts"}
+
+    def test_and_operator_equals_sequential_filter(self):
+        """(f1 & f2)(items) equals applying f1 then f2 sequentially."""
+        from ai_session_tools.filters import SearchFilter
+        from ai_session_tools import SessionFile
+        f_py = SearchFilter().by_extension("py")
+        f_big = SearchFilter().by_size(min_size=100)
+        files = [
+            SessionFile(name="a.py", path="/a.py", size_bytes=200),
+            SessionFile(name="b.py", path="/b.py", size_bytes=50),
+            SessionFile(name="c.md", path="/c.md", size_bytes=300),
+        ]
+        # Verify & produces same result as applying predicates in sequence
+        and_result = (f_py & f_big)(files)
+        sequential = f_big(f_py(files))  # apply f_py first, then f_big
+        assert sorted(f.name for f in and_result) == sorted(f.name for f in sequential)
+
+    def test_by_session_on_filter_base(self):
+        """by_session() is on Filter[T] base — NOT duplicated in SearchFilter/MessageFilter."""
+        from ai_session_tools.filters import Filter, SearchFilter, MessageFilter
+        assert "by_session" in dir(SearchFilter)
+        assert "by_session" not in SearchFilter.__dict__, (
+            "by_session() must NOT be on SearchFilter — it is on Filter[T] base"
+        )
+        assert "by_session" not in MessageFilter.__dict__, (
+            "by_session() must NOT be on MessageFilter — it is on Filter[T] base"
+        )
+        assert "by_session" in Filter.__dict__, (
+            "by_session() MUST be defined on Filter[T] base class"
+        )
+
+    def test_custom_on_filter_base(self):
+        """custom() is on Filter[T] base — NOT duplicated in SearchFilter/MessageFilter."""
+        from ai_session_tools.filters import Filter, SearchFilter, MessageFilter
+        assert "custom" in Filter.__dict__, "custom() must be on Filter[T] base"
+        assert "custom" not in SearchFilter.__dict__
+        assert "custom" not in MessageFilter.__dict__
+
+    def test_search_filter_and_message_filter_separate_domains(self):
+        """SearchFilter and MessageFilter kept separate — different item type domains."""
+        from ai_session_tools.filters import SearchFilter, MessageFilter
+        from ai_session_tools import SessionFile, SessionMessage, MessageType
+        sf = SearchFilter().by_extension("py")
+        files = [SessionFile(name="a.py", path="/a.py"), SessionFile(name="b.md", path="/b.md")]
+        result = sf(files)
+        assert len(result) == 1 and result[0].name == "a.py"
+        mf = MessageFilter().by_type(MessageType.USER)
+        msgs = [
+            SessionMessage(type=MessageType.USER, timestamp="", content="hi", session_id="s1"),
+            SessionMessage(type=MessageType.ASSISTANT, timestamp="", content="hi", session_id="s1"),
+        ]
+        result = mf(msgs)
+        assert len(result) == 1 and result[0].type == MessageType.USER
+
+    def test_composable_filter_removed_from_types(self):
+        """ComposableFilter Protocol removed — superseded by Filter[T] operators."""
+        try:
+            from ai_session_tools.types import ComposableFilter
+            assert False, "ComposableFilter should be removed from types.py"
+        except ImportError:
+            pass
+
+    def test_composable_search_removed_from_types(self):
+        """ComposableSearch Protocol removed — superseded by FilterSpec/SearchFilter."""
+        try:
+            from ai_session_tools.types import ComposableSearch
+            assert False, "ComposableSearch should be removed from types.py"
+        except ImportError:
+            pass
+
+
+class TestFilterSpecCallable:
+    """FilterSpec.__call__() makes it duck-typed with SearchFilter."""
+
+    def test_filterspec_is_callable(self):
+        """FilterSpec instances are callable — same interface as SearchFilter."""
+        from ai_session_tools import FilterSpec
+        spec = FilterSpec()
+        assert callable(spec), "FilterSpec instance must be callable"
+
+    def test_filterspec_call_filters_files(self):
+        """FilterSpec().__call__(files) returns filtered list like SearchFilter."""
+        from ai_session_tools import FilterSpec, SessionFile
+        spec = FilterSpec(min_edits=3)
+        files = [
+            SessionFile(name="a.py", path="/a.py", edits=5),
+            SessionFile(name="b.py", path="/b.py", edits=1),
+        ]
+        result = spec(files)
+        assert [f.name for f in result] == ["a.py"]
+
+    def test_filterspec_and_search_filter_interchangeable(self):
+        """search_files() accepts FilterSpec OR SearchFilter — duck-typed."""
+        from ai_session_tools import FilterSpec
+        from ai_session_tools.filters import SearchFilter
+        spec = FilterSpec()
+        sf = SearchFilter()
+        assert callable(spec) and callable(sf)

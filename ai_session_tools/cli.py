@@ -822,7 +822,7 @@ _g_claude_dir: Optional[str] = None
 
 # Import config loading and session backend from shared modules
 from ai_session_tools.config import load_config, set_config_path, get_config_section, invalidate_config_cache  # noqa: E402
-from ai_session_tools.engine import get_session_backend  # noqa: E402
+from ai_session_tools.engine import AISession  # noqa: E402
 
 
 # ── Root app callback (global options + composition root) ────────────────────────
@@ -863,7 +863,7 @@ def app_callback(
         ),
     ),
 ) -> None:
-    """Composition root: builds SessionBackend once, injects into ctx.obj for all subcommands.
+    """Composition root: builds AISession once, injects into ctx.obj for all subcommands.
 
     Priority for --config flag:
       1. --config CLI flag (absolute priority)
@@ -877,14 +877,14 @@ def app_callback(
     # Notify shared config module about --config flag so all parts of app use same config
     set_config_path(config)
 
-    # ── COMPOSITION ROOT: Build SessionBackend ONCE, inject into ctx.obj ──
+    # ── COMPOSITION ROOT: Build AISession ONCE, inject into ctx.obj ──
     # ctx.obj is inherited by all child contexts (sub-apps, sub-commands)
     ctx.ensure_object(dict)
     cfg = load_config()  # already handles _g_config_path / env var priority
     # Resolve provider: CLI flag > config 'defaults.provider' > "all"
     if provider is None:
         provider = cfg.get("defaults", {}).get("provider", "all")
-    ctx.obj["engine"] = get_session_backend(source=provider, claude_dir=claude_dir, config=cfg)
+    ctx.obj["engine"] = AISession(source=provider, claude_dir=claude_dir, config=cfg)
     ctx.obj["source"] = provider  # can be accessed by commands for source filtering
 
     if ctx.invoked_subcommand is None:
@@ -894,15 +894,15 @@ def app_callback(
 
 # ── Engine factory ────────────────────────────────────────────────────────────
 
-def _resolve_engine(ctx: typer.Context, source: Optional[str] = None) -> "SessionBackend":
+def _resolve_engine(ctx: typer.Context, source: Optional[str] = None) -> "AISession":
     """Return engine from ctx.obj, rebuilding with a different source if --source given per-command."""
     if source:
         cfg = load_config()
-        return get_session_backend(source=source, config=cfg, claude_dir=_g_claude_dir)
+        return AISession(source=source, config=cfg, claude_dir=_g_claude_dir)
     return ctx.obj.get("engine") if ctx.obj else None
 
 
-def get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] = None) -> SessionRecoveryEngine:
+def _get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] = None) -> SessionRecoveryEngine:
     """
     Get or create recovery engine.
 
@@ -1305,13 +1305,13 @@ def _do_files_search(
     inc_sessions = {s.strip() for s in include_sessions.split(",") if s.strip()} if include_sessions else set()
     exc_sessions = {s.strip() for s in exclude_sessions.split(",") if s.strip()} if exclude_sessions else set()
 
-    filters = FilterSpec(min_edits=min_edits, max_edits=max_edits, after=since, before=until)
+    filters = FilterSpec(min_edits=min_edits, max_edits=max_edits, since=since, until=until)
     if inc_ext or exc_ext:
         filters.with_extensions(include=inc_ext or None, exclude=exc_ext or None)
     if inc_sessions or exc_sessions:
         filters.with_sessions(include=inc_sessions or None, exclude=exc_sessions or None)
 
-    results = engine.search(pattern, filters)
+    results = engine.search_files(pattern, filters)
     if limit:
         results = results[:limit]
 
@@ -1355,7 +1355,7 @@ def _do_messages_search(
         valid_session_ids = {s.session_id for s in sessions}
 
     if context > 0:
-        ctx_results = engine.search_messages_with_context(
+        ctx_results = engine.search_messages(
             query, context=context, message_type=message_type, tool=tool
         )
         if valid_session_ids is not None:
@@ -1383,7 +1383,7 @@ def _do_messages_search(
         console.print(f"\n[bold]Found {len(ctx_results)} matches{tag} (context ±{context})[/bold]")
         return
 
-    all_results = engine.search_messages(query, message_type, tool=tool)
+    all_results = engine.search_messages(query, message_type=message_type, tool=tool)
     if valid_session_ids is not None:
         all_results = [m for m in all_results if m.session_id in valid_session_ids]
     results = all_results[:limit]
@@ -1573,7 +1573,7 @@ def _do_messages_planning(
         else:
             # Built-in defaults — lowest priority (engine uses DEFAULT_PLANNING_COMMANDS)
             commands = None
-    results = engine.analyze_planning_usage(
+    results = engine.get_planning_usage(
         project_filter=project, since=since, until=until,
         commands=commands,
     )
@@ -1613,7 +1613,7 @@ def _do_messages_analyze(
     fmt: str = "table",
 ) -> None:
     """Show per-session statistics."""
-    result = engine.analyze_session(session_id)
+    result = engine.get_session_analysis(session_id)
     if result is None:
         err_console.print(f"[red]No session found matching:[/red] {session_id!r}")
         raise typer.Exit(code=1)
@@ -1657,7 +1657,7 @@ def _do_messages_timeline(
     until: Optional[str] = None,   # canonical; before= is a hidden alias
 ) -> None:
     """Show chronological event timeline for a session."""
-    events = engine.timeline_session(session_id, preview_chars=preview_chars)
+    events = engine.get_session_timeline(session_id, preview_chars=preview_chars)
     if message_type:
         events = [e for e in events if e.get("type") == message_type]
     if since:
@@ -1689,7 +1689,7 @@ def _do_files_cross_ref(
         err_console.print(f"[red]File not found:[/red] {file}")
         raise typer.Exit(code=1)
     current_content = file_path.read_text(errors="replace")
-    results = engine.cross_reference_session(
+    results = engine.get_file_edits(
         file_path.name, current_content, session_id=session
     )
     spec = TableSpec(
@@ -1732,7 +1732,7 @@ def _do_export_session(
 ) -> None:
     """Export one session to markdown."""
     try:
-        md = engine.export_session_markdown(session_id)
+        md = engine.get_session_markdown(session_id)
     except ValueError as e:
         err_console.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1)
@@ -1772,7 +1772,7 @@ def _do_export_recent(
     parts = []
     for s in sessions:
         try:
-            parts.append(engine.export_session_markdown(s.session_id))
+            parts.append(engine.get_session_markdown(s.session_id))
         except ValueError:
             continue
     combined = "\n\n".join(parts)
@@ -1895,7 +1895,7 @@ def _do_get(
 
 
 def _do_stats(
-    engine: "SessionBackend",
+    engine: "AISession",
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
     fmt: Optional[str] = None,

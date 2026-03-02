@@ -53,8 +53,8 @@ class AiStudioSource:
     # ── Storage protocol ────────────────────────────────────────────────────
 
     def list_files(self):  # type: ignore[override]
-        """List all session files (Storage protocol). Returns list of RecoveredFile-like dicts."""
-        from ai_session_tools.models import RecoveredFile
+        """List all session files (Storage protocol). Returns list of SessionFile objects."""
+        from ai_session_tools.models import SessionFile
         result = []
         for d in self.source_dirs:
             if not d.exists():
@@ -62,7 +62,7 @@ class AiStudioSource:
             for f in d.iterdir():
                 if f.suffix.lower() in BINARY_EXTS or f.is_dir():
                     continue
-                result.append(RecoveredFile(
+                result.append(SessionFile(
                     name=f.name,
                     path=str(f),
                     location=str(d),

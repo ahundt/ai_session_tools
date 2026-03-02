@@ -2,22 +2,23 @@
 Type protocols for composable, extensible architecture.
 
 Protocols allow dependency injection and multiple implementations.
+Import from this module to implement custom backends or filters.
 
 Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 """
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, List, Optional, Protocol, runtime_checkable
 
-from .models import FileVersion, FilterSpec, RecoveredFile
+from .models import FileVersion, FilterSpec, SessionFile
 
 
 @runtime_checkable
 class Searchable(Protocol):
     """Protocol for searchable storage backends."""
 
-    def search(self, pattern: str, filters: Optional[FilterSpec] = None) -> List[RecoveredFile]:
+    def search(self, pattern: str, filters: Optional[FilterSpec] = None) -> List[SessionFile]:
         """Search for files matching pattern with optional filters."""
         ...
 
@@ -49,32 +50,10 @@ class Filterable(Protocol):
 
 
 @runtime_checkable
-class Formatter(Protocol):
-    """Protocol for output formatting."""
-
-    def format(self, data: Any) -> str:
-        """Format data for output."""
-        ...
-
-    def format_many(self, items: List[Any]) -> str:
-        """Format multiple items."""
-        ...
-
-
-@runtime_checkable
-class Reporter(Protocol):
-    """Protocol for report generation."""
-
-    def generate(self, data: Dict[str, Any]) -> str:
-        """Generate a report from data."""
-        ...
-
-
-@runtime_checkable
 class Storage(Protocol):
     """Protocol for storage backends."""
 
-    def list_files(self) -> List[RecoveredFile]:
+    def list_files(self) -> List[SessionFile]:
         """List all available files."""
         ...
 
@@ -87,57 +66,49 @@ class Storage(Protocol):
         ...
 
 
-class ComposableFilter:
-    """Composable filter builder using fluent API."""
+@runtime_checkable
+class Predicate(Protocol):
+    """Protocol for single-item filter predicates.
 
-    def __init__(self):
-        """Initialize filter."""
-        self._filters: List[Callable] = []
+    Used for custom predicates passed to SearchFilter.custom() or
+    MessageFilter.custom(). Returns True if item should be included.
 
-    def add(self, predicate: Callable) -> "ComposableFilter":
-        """Add a filter predicate."""
-        self._filters.append(predicate)
-        return self
+    Example::
 
-    def apply(self, items: List[Any]) -> List[Any]:
-        """Apply all filters to items."""
-        result = items
-        for filter_fn in self._filters:
-            result = [item for item in result if filter_fn(item)]
-        return result
+        def is_large(f: SessionFile) -> bool:
+            return f.size_bytes > 10_000
 
-    def __call__(self, items: List[Any]) -> List[Any]:
-        """Support callable interface."""
-        return self.apply(items)
+        sf = SearchFilter().custom(is_large)
+    """
+
+    def __call__(self, item: Any) -> bool:
+        """Return True if item passes this predicate."""
+        ...
 
 
-class ComposableSearch:
-    """Composable search builder with chaining."""
+@runtime_checkable
+class Composable(Protocol):
+    """Protocol for composable list-based filters supporting | and & operators.
 
-    def __init__(self, searcher: Searchable):
-        """Initialize with searcher."""
-        self._searcher = searcher
-        self._pattern = "*"
-        self._filters: Optional[FilterSpec] = None
+    Composable filters accept a sequence and return a filtered subset.
+    Implemented by SearchFilter and MessageFilter.
 
-    def pattern(self, pattern: str) -> "ComposableSearch":
-        """Set search pattern."""
-        self._pattern = pattern
-        return self
+    Example::
 
-    def with_filters(self, filters: FilterSpec) -> "ComposableSearch":
-        """Add filters."""
-        self._filters = filters
-        return self
+        py_filter = SearchFilter().by_extension("py")
+        ts_filter = SearchFilter().by_extension("ts")
+        combined  = py_filter & ts_filter   # AND composition
+        either    = py_filter | ts_filter   # OR composition
+    """
 
-    def execute(self) -> List[RecoveredFile]:
-        """Execute the search."""
-        return self._searcher.search(self._pattern, self._filters)
+    def __or__(self, other: "Composable") -> "Composable":
+        """OR composition — item passes either filter."""
+        ...
 
-    def __iter__(self):
-        """Support iteration."""
-        return iter(self.execute())
+    def __and__(self, other: "Composable") -> "Composable":
+        """AND composition — item passes both filters."""
+        ...
 
-    def __len__(self):
-        """Support len()."""
-        return len(self.execute())
+    def __call__(self, items: Any) -> Any:
+        """Apply filter to sequence."""
+        ...

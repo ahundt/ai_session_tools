@@ -4,18 +4,36 @@ AI Session Tools — Python library + CLI for Claude Code, AI Studio, and Gemini
 Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 
-Quickstart (Claude Code single-source):
+Quickstart (RECOMMENDED — zero-config RAII, auto-detects all sources):
+    import ai_session_tools as aise
+    from ai_session_tools import AISession, FilterSpec
+
+    # All equivalent — AISession() auto-detects Claude, AI Studio, Gemini CLI:
+    session = aise.AISession()               # direct RAII (class name = concept)
+    session = aise.connect()                 # convenience alias (connect = AISession)
+
+    with aise.AISession() as session:        # context manager (recommended)
+        sessions = session.get_sessions(since="7d")
+        messages = session.search_messages("authentication")
+        files    = session.search_files("*.py")
+
+        # Fluent FilterSpec builder:
+        results = session.search_files(
+            "*.py",
+            FilterSpec().with_since("7d").with_extensions(include={"py"})
+        )
+
+Quickstart (explicit source override):
+    from ai_session_tools import AISession, FilterSpec
+
+    with AISession(source="claude", claude_dir="~/.claude") as session:
+        sessions = session.get_sessions(since="7d")
+
+Quickstart (Claude Code only, explicit paths — advanced):
     from ai_session_tools import SessionRecoveryEngine, FilterSpec
 
     engine = SessionRecoveryEngine(projects_dir, recovery_dir)
     results = engine.search("*.py", FilterSpec(min_edits=5))
-
-Quickstart (multi-source, auto-configured):
-    from ai_session_tools import get_session_backend
-
-    backend = get_session_backend()        # auto-detects Claude, AI Studio, Gemini CLI
-    sessions = backend.get_sessions(since="7d")
-    messages = backend.search_messages("authentication")
 
 Configuration:
     from ai_session_tools import load_config, write_config
@@ -23,6 +41,9 @@ Configuration:
     cfg = load_config()
     cfg.setdefault("source_dirs", {})["aistudio"] = ["/path/to/ai-studio"]
     write_config(cfg)
+
+Note: Protocol types (Searchable, Extractable, Filterable, Storage, Predicate,
+Composable) are importable from ai_session_tools.types for custom implementors.
 """
 
 try:
@@ -33,13 +54,11 @@ except Exception:
 
 __author__ = "Andrew Hundt"
 
-# Core engine + multi-source entry points
+# Primary entry point — AISession is the main class
 from .engine import (
-    SessionRecoveryEngine,
-    SessionBackend,
-    MultiSourceEngine,
-    get_session_backend,
-    get_multi_engine,
+    AISession,          # RECOMMENDED: auto-detects all sources; zero-config RAII
+    connect,            # Convenience alias for AISession() (connect = AISession)
+    SessionRecoveryEngine,  # Claude Code only, explicit paths (advanced)
     parse_date_input,
 )
 
@@ -47,7 +66,10 @@ from .engine import (
 from .sources import AiStudioSource, GeminiCliSource
 
 # Filters
-from .filters import ChainedFilter, LocationMatcher, MessageFilter, SearchFilter
+from .filters import MessageFilter, SearchFilter
+
+# FilterSpec in models
+from .models import FilterSpec
 
 # Formatters
 from .formatters import (
@@ -65,27 +87,14 @@ from .models import (
     ContextMatch,
     CorrectionMatch,
     FileVersion,
-    FilterSpec,
     MessageType,
     PlanningCommandCount,
-    RecoveredFile,
-    RecoveryStatistics,
     SessionAnalysis,
+    SessionFile,
     SessionInfo,
     SessionMessage,
     SessionMetadata,
-)
-
-# Type protocols
-from .types import (
-    ComposableFilter,
-    ComposableSearch,
-    Extractable,
-    Filterable,
-    Formatter,
-    Reporter,
-    Searchable,
-    Storage,
+    SessionStatistics,
 )
 
 # Config API
@@ -97,54 +106,44 @@ from .config import (
 )
 
 __all__ = [
-    # Core engine
-    "SessionRecoveryEngine",
-    "SessionBackend",
-    "MultiSourceEngine",
-    "get_session_backend",
-    "get_multi_engine",
-    "parse_date_input",
-    # Source backends
+    # --- Primary entry point — THE main class (zero-config RAII) ---
+    "AISession",              # RECOMMENDED: auto-detects all sources; connect = AISession
+    "connect",                # Convenience alias for AISession() (connect = AISession)
+    # --- Advanced entry points ---
+    "SessionRecoveryEngine",  # Claude Code only, explicit paths (advanced)
+    "parse_date_input",       # Date/EDTF parsing utility
+    # --- Source backends ---
     "AiStudioSource",
     "GeminiCliSource",
-    # Filters
-    "ChainedFilter",
-    "LocationMatcher",
-    "MessageFilter",
-    "SearchFilter",
-    # Formatters
-    "CsvFormatter",
-    "JsonFormatter",
-    "MessageFormatter",
-    "PlainFormatter",
-    "ResultFormatter",
+    # --- Filters ---
+    "FilterSpec",             # Declarative filter (.with_since, .with_until, .with_extensions, ...)
+    "SearchFilter",           # Imperative file filter with by_location_pattern(), by_date(), &/| operators
+    "MessageFilter",          # Message filter with &/| composability
+    # --- Formatters ---
+    "get_formatter",          # Factory: "table" | "json" | "csv" | "plain" | "message"
     "TableFormatter",
-    "get_formatter",
-    # Models
-    "ContextMatch",
-    "CorrectionMatch",
-    "FileVersion",
-    "FilterSpec",
-    "MessageType",
-    "PlanningCommandCount",
-    "RecoveredFile",
-    "RecoveryStatistics",
-    "SessionAnalysis",
+    "JsonFormatter",
+    "CsvFormatter",
+    "PlainFormatter",
+    "MessageFormatter",
+    "ResultFormatter",
+    # --- Data models ---
+    "SessionFile",
+    "SessionStatistics",
     "SessionInfo",
     "SessionMessage",
     "SessionMetadata",
-    # Type protocols
-    "ComposableFilter",
-    "ComposableSearch",
-    "Extractable",
-    "Filterable",
-    "Formatter",
-    "Reporter",
-    "Searchable",
-    "Storage",
-    # Config
+    "SessionAnalysis",
+    "FileVersion",
+    "CorrectionMatch",
+    "PlanningCommandCount",
+    "ContextMatch",
+    "MessageType",
+    # --- Config ---
     "load_config",
     "get_config_path",
     "write_config",
     "get_config_section",
 ]
+# Protocol types (Searchable, Extractable, Filterable, Storage, Predicate, Composable)
+# are importable from ai_session_tools.types for custom implementors.

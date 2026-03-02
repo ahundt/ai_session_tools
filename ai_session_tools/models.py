@@ -9,7 +9,7 @@ Licensed under the Apache License, Version 2.0
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set
 
 
 class MessageType(str, Enum):
@@ -38,8 +38,8 @@ class FileVersion:
 
 
 @dataclass
-class RecoveredFile:
-    """Recovered file from Claude Code sessions with edit history.
+class SessionFile:
+    """File found in AI session history with edit tracking.
 
     Attributes:
         name: Filename (e.g., "session_manager.py")
@@ -174,8 +174,9 @@ class FilterSpec:
     exclude_folders: Set[str] = field(default_factory=set)
 
     # Datetime range filtering (ISO format: "2026-02-22" or "2026-02-22T14:30:00")
-    after: Optional[str] = None
-    before: Optional[str] = None
+    # ``since`` and ``until`` are the CANONICAL names, matching CLI --since / --until.
+    since: Optional[str] = None
+    until: Optional[str] = None
 
     # File size range (bytes)
     min_size: int = 0
@@ -248,7 +249,7 @@ class FilterSpec:
         return True
 
     def matches_datetime(self, datetime_str: Optional[str]) -> bool:
-        """Check if datetime falls within after/before range.
+        """Check if datetime falls within since/until range.
 
         Accepts any ISO 8601 prefix: "2026-02-22", "2026-02-22T14:30:00", etc.
         Lexicographic comparison works for all ISO 8601 precisions.
@@ -261,15 +262,15 @@ class FilterSpec:
             are excluded when a filter IS set (conservative: unknown datetime treated as out-of-range).
         """
         if not datetime_str:
-            return not (self.after or self.before)
-        if self.after or self.before:
+            return not (self.since or self.until)
+        if self.since or self.until:
             # Truncate to 19 chars to strip timezone designators (+00:00, Z) and
             # sub-second precision so that all sources compare correctly against
             # the naive ISO strings produced by _parse_date_input.
             datetime_str = datetime_str[:19]
-        if self.after and datetime_str < self.after:
+        if self.since and datetime_str < self.since:
             return False
-        if self.before and datetime_str > self.before:
+        if self.until and datetime_str > self.until:
             return False
         return True
 
@@ -319,11 +320,201 @@ class FilterSpec:
             self.exclude_extensions = exclude
         return self
 
+    def with_since(self, since: str) -> "FilterSpec":
+        """Builder: filter to items modified ON OR AFTER this date.
+
+        Args:
+            since: ISO date, duration shorthand, or EDTF expression.
+                   Examples: "2026-01-01", "7d", "2w", "2026-01-01T14:30:00"
+
+        Returns:
+            Self for chaining: FilterSpec().with_since("7d").with_extensions({"py"})
+        """
+        self.since = since
+        return self
+
+    def with_until(self, until: str) -> "FilterSpec":
+        """Builder: filter to items modified ON OR BEFORE this date.
+
+        Args:
+            until: ISO date or duration shorthand.
+                   Examples: "2026-12-31", "2026-06-01T00:00:00"
+
+        Returns:
+            Self for chaining.
+        """
+        self.until = until
+        return self
+
+    def with_date_range(
+        self,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+    ) -> "FilterSpec":
+        """Builder: set both since and until bounds in one call.
+
+        Args:
+            since: Lower bound (inclusive). None = no lower bound.
+            until: Upper bound (inclusive). None = no upper bound.
+
+        Returns:
+            Self for chaining: FilterSpec().with_date_range(since="7d")
+
+        Examples::
+
+            FilterSpec().with_date_range(since="2026-01-01", until="2026-06-30")
+            FilterSpec().with_date_range(since="7d")    # last 7 days, no upper bound
+        """
+        if since is not None:
+            self.since = since
+        if until is not None:
+            self.until = until
+        return self
+
+    def with_when(self, when: str) -> "FilterSpec":
+        """Builder: set both since and until from an EDTF expression or duration shorthand.
+
+        Mirrors CLI --when option. Parses the expression and sets both bounds.
+
+        Args:
+            when: Accepts:
+                - Duration shorthand: "7d", "2w", "1m", "1y"
+                - ISO date interval: "2026-01/2026-03" (Q1 2026)
+                - EDTF decade pattern: "202X" (entire decade)
+                - ISO single date: "2026-01-15" (exact day → since=that day)
+
+        Returns:
+            Self for chaining.
+
+        Examples::
+
+            FilterSpec().with_when("7d")              # last 7 days
+            FilterSpec().with_when("2026-01/2026-03") # Q1 2026
+            FilterSpec().with_when("202X")            # 2020-2029
+        """
+        if "/" in when:
+            # ISO interval: "2026-01/2026-03"
+            parts = when.split("/", 1)
+            # Expand partial dates: "2026-01" → "2026-01-01", "2026-03" → "2026-03-31"
+            self.since = _expand_partial_date(parts[0], start=True)
+            self.until = _expand_partial_date(parts[1], start=False)
+        elif "X" in when.upper() or "x" in when:
+            # EDTF decade/year pattern: "202X" → 2020 to 2029
+            upper = when.upper()
+            decade_start = upper.replace("X", "0")
+            decade_end = upper.replace("X", "9")
+            self.since = f"{decade_start}-01-01T00:00:00"
+            self.until = f"{decade_end}-12-31T23:59:59"
+        else:
+            # Duration or ISO date — treat as since (no upper bound)
+            # Lazy import to avoid circular dependency (engine imports models)
+            try:
+                from .engine import parse_date_input as _parse
+                parsed = _parse(when)
+                if parsed:
+                    self.since = parsed
+            except ImportError:
+                # Fallback: store as-is (will be interpreted by engine when filtering)
+                self.since = when
+        return self
+
+    def with_edit_range(
+        self,
+        min_edits: int = 0,
+        max_edits: Optional[int] = None,
+    ) -> "FilterSpec":
+        """Builder: filter by edit count range.
+
+        Args:
+            min_edits: Minimum edits (inclusive). Default 0.
+            max_edits: Maximum edits (inclusive). None = no upper bound.
+
+        Returns:
+            Self for chaining: FilterSpec().with_edit_range(min_edits=3)
+        """
+        self.min_edits = min_edits
+        self.max_edits = max_edits
+        return self
+
+    def __call__(self, files: "Iterable") -> list:
+        """Apply this FilterSpec as a post-glob predicate filter.
+
+        Makes FilterSpec duck-type compatible with SearchFilter — both can be
+        passed to search_files() without isinstance dispatch. Both are callable.
+
+        Applies: extension, edits, size, location, and datetime filters.
+        Session filtering uses include/exclude semantics.
+
+        Args:
+            files: Iterable of SessionFile objects.
+
+        Returns:
+            list[SessionFile] passing all filters.
+
+        Example::
+
+            spec = FilterSpec().with_since("7d").with_extensions(include={"py"})
+            filtered = spec(all_files)   # directly callable like SearchFilter
+        """
+        result = []
+        for f in files:
+            if not self.matches_extension(f.file_type):
+                continue
+            if not self.matches_edits(f.edits):
+                continue
+            if not self.matches_size(f.size_bytes):
+                continue
+            if not self.matches_location(f.location):
+                continue
+            if not self.matches_datetime(f.last_modified or ""):
+                continue
+            # Session filter: include if ANY session passes include and NONE trigger exclude
+            if self.include_sessions or self.exclude_sessions:
+                if not any(self.matches_session(s) for s in (f.sessions or [])):
+                    continue
+            result.append(f)
+        return result
+
+
+def _expand_partial_date(date_str: str, start: bool) -> str:
+    """Expand a partial ISO date string to a full YYYY-MM-DDTHH:MM:SS string.
+
+    Args:
+        date_str: Partial date like "2026-01", "2026", "2026-03-15"
+        start: If True, expand to start of period; if False, expand to end.
+
+    Examples:
+        _expand_partial_date("2026-01", start=True)  → "2026-01-01T00:00:00"
+        _expand_partial_date("2026-03", start=False) → "2026-03-31T23:59:59"
+        _expand_partial_date("2026", start=False)    → "2026-12-31T23:59:59"
+    """
+    import calendar
+    parts = date_str.strip().split("-")
+    if len(parts) == 1:
+        year = int(parts[0])
+        if start:
+            return f"{year:04d}-01-01T00:00:00"
+        else:
+            return f"{year:04d}-12-31T23:59:59"
+    elif len(parts) == 2:
+        year, month = int(parts[0]), int(parts[1])
+        if start:
+            return f"{year:04d}-{month:02d}-01T00:00:00"
+        else:
+            last_day = calendar.monthrange(year, month)[1]
+            return f"{year:04d}-{month:02d}-{last_day:02d}T23:59:59"
+    else:
+        # Already has day component
+        base = "-".join(parts[:3])
+        if start:
+            return f"{base}T00:00:00"
+        else:
+            return f"{base}T23:59:59"
 
 
 @dataclass
-class RecoveryStatistics:
-    """Recovery operation statistics."""
+class SessionStatistics:
+    """Session operation statistics."""
 
     total_sessions: int = 0
     total_files: int = 0
@@ -350,6 +541,7 @@ class RecoveryStatistics:
             "total_size_bytes": self.total_size_bytes,
             "avg_versions_per_file": self.avg_versions_per_file,
         }
+
 
 
 @dataclass

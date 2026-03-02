@@ -46,10 +46,10 @@ class GeminiCliSource:
 
     def list_files(self):  # type: ignore[override]
         """List all Gemini CLI session files (Storage protocol)."""
-        from ai_session_tools.models import RecoveredFile
+        from ai_session_tools.models import SessionFile
         result = []
         for chat_file in self._iter_chat_files():
-            result.append(RecoveredFile(
+            result.append(SessionFile(
                 name=chat_file.name,
                 path=str(chat_file),
                 location=str(chat_file.parent),

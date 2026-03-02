@@ -5,17 +5,117 @@ Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 """
 
-from typing import Any, Callable, List, Optional
+from __future__ import annotations
 
-from .models import MessageType, RecoveredFile, SessionMessage
+import fnmatch as _fnmatch
+from collections.abc import Callable as _Callable, Iterable as _Iterable
+from typing import Generic, List, Optional, TypeVar
+
+from .models import MessageType, SessionFile, SessionMessage
+
+T = TypeVar("T")
 
 
-class SearchFilter:
-    """Composable file search filter."""
+class Filter(Generic[T]):
+    """Generic composable filter — base class for SearchFilter and MessageFilter.
 
-    def __init__(self):
-        """Initialize filter."""
-        self._predicates: List[Callable[[RecoveredFile], bool]] = []
+    Subclasses inherit & (AND) and | (OR) operators automatically.
+    Each .by_*() builder appends a predicate; apply() / __call__() runs all predicates.
+
+    AND composition: combine predicate lists (both must pass)
+    OR  composition: wrap both in a single disjunctive predicate
+
+    Type-parameterized for IDE autocomplete:
+        SearchFilter = Filter[SessionFile]
+        MessageFilter = Filter[SessionMessage]
+    """
+
+    def __init__(self) -> None:
+        self._predicates: List[_Callable[[T], bool]] = []
+
+    def custom(self, predicate: _Callable[[T], bool]) -> "Filter[T]":
+        """Add an arbitrary predicate function. Returns self for chaining.
+
+        Type-independent — works for both SessionFile and SessionMessage predicates.
+        Moved from SearchFilter and MessageFilter to Filter[T] base (DRY fix).
+        """
+        self._predicates.append(predicate)
+        return self
+
+    def by_session(self, session_id: str) -> "Filter[T]":
+        """Filter items to those belonging to a specific session.
+
+        Handles both SessionFile (.sessions list) and SessionMessage (.session_id str).
+        Moved from SearchFilter and MessageFilter to Filter[T] base (DRY fix).
+        """
+        def predicate(item: T) -> bool:
+            sid = getattr(item, "session_id", None)
+            if sid is None:
+                sessions = getattr(item, "sessions", [])
+                return session_id in sessions
+            return sid == session_id
+        self._predicates.append(predicate)
+        return self
+
+    def apply(self, items: _Iterable[T]) -> List[T]:
+        """Apply all predicates to items — AND logic (all must pass)."""
+        result = list(items)
+        for pred in self._predicates:
+            result = [i for i in result if pred(i)]
+        return result
+
+    def __call__(self, items: _Iterable[T]) -> List[T]:
+        """Support callable interface — same as apply()."""
+        return self.apply(items)
+
+    def __and__(self, other: "Filter[T]") -> "Filter[T]":
+        """AND composition: item must pass ALL predicates from BOTH filters.
+
+        Implemented by merging predicate lists — preserves subclass type.
+        SearchFilter & SearchFilter → SearchFilter (not bare Filter).
+
+        Example::
+            py_big = SearchFilter().by_extension("py") & SearchFilter().by_size(min_size=100)
+        """
+        result = type(self)()
+        result._predicates = list(self._predicates) + list(other._predicates)
+        return result
+
+    def __or__(self, other: "Filter[T]") -> "Filter[T]":
+        """OR composition: item must pass at LEAST ONE of the two filters.
+
+        Wrapped as a single disjunctive predicate to preserve AND-chain semantics.
+
+        Example::
+            py_or_ts = SearchFilter().by_extension("py") | SearchFilter().by_extension("ts")
+        """
+        left_preds = list(self._predicates)
+        right_preds = list(other._predicates)
+
+        def _or_predicate(item: T) -> bool:
+            return all(p(item) for p in left_preds) or all(p(item) for p in right_preds)
+
+        result = type(self)()
+        result._predicates.append(_or_predicate)
+        return result
+
+
+class SearchFilter(Filter[SessionFile]):
+    """Composable file search filter — imperative predicate chain.
+
+    Inherits & / | operators and by_session() / custom() from Filter[T].
+    Use by_location_pattern() for glob-based location filtering.
+
+    Example::
+        recent_py = (SearchFilter()
+                     .by_date(since="7d")
+                     .by_location_pattern(include=["*/src/*"])
+                     .by_extension("py"))
+        files = session.search_files("*", recent_py)
+
+        # OR: Python or TypeScript
+        py_or_ts = SearchFilter().by_extension("py") | SearchFilter().by_extension("ts")
+    """
 
     def by_edits(self, min_edits: int = 0, max_edits: Optional[int] = None) -> "SearchFilter":
         """Filter by edit count range.
@@ -23,7 +123,7 @@ class SearchFilter:
         max_edits=0 means "only files with zero edits" (not unlimited).
         """
 
-        def predicate(f: RecoveredFile) -> bool:
+        def predicate(f: SessionFile) -> bool:
             if f.edits < min_edits:
                 return False
             if max_edits is not None and f.edits > max_edits:
@@ -34,28 +134,75 @@ class SearchFilter:
         return self
 
     def by_extension(self, extension: str) -> "SearchFilter":
-        """Filter by file extension (e.g., 'py', 'md', 'json')."""
+        """Filter by file extension (e.g., 'py', 'md', 'json').
 
-        def predicate(f: RecoveredFile) -> bool:
-            return f.file_type == extension
+        Matches against ``file_type`` first; falls back to inferring from the
+        filename when ``file_type`` is unset (``"unknown"`` or ``""``).
+        """
+        ext = extension.lstrip(".")
+
+        def predicate(f: SessionFile) -> bool:
+            if f.file_type and f.file_type not in ("unknown", ""):
+                return f.file_type == ext
+            # Fallback: infer from filename
+            return f.name.endswith(f".{ext}")
 
         self._predicates.append(predicate)
         return self
 
     def by_location(self, location: str) -> "SearchFilter":
-        """Filter by location."""
+        """Filter by location substring (simple string match).
 
-        def predicate(f: RecoveredFile) -> bool:
+        For glob-pattern matching with include/exclude, use by_location_pattern().
+        """
+
+        def predicate(f: SessionFile) -> bool:
             return location.lower() in f.location.lower()
 
         self._predicates.append(predicate)
         return self
 
-    def by_session(self, session_id: str) -> "SearchFilter":
-        """Filter by session."""
+    def by_location_pattern(
+        self,
+        include: "List[str] | None" = None,
+        exclude: "List[str] | None" = None,
+    ) -> "SearchFilter":
+        """Filter by location using fnmatch glob patterns.
 
-        def predicate(f: RecoveredFile) -> bool:
-            return session_id in f.sessions
+        Replaces ``LocationMatcher`` with a composable SearchFilter predicate.
+
+        Args:
+            include: fnmatch patterns for locations to include (e.g. ``["*/src/*", "*/lib/*"]``).
+                     If given, only files whose location matches ANY pattern are kept.
+                     If None or empty, all locations pass the include check.
+            exclude: fnmatch patterns for locations to exclude (e.g. ``["*/test/*"]``).
+                     Files matching ANY exclude pattern are dropped. Applied AFTER include.
+
+        Returns:
+            Self for chaining.
+
+        Example::
+
+            # Only Python files in src/ or lib/, not in tests/:
+            sf = (SearchFilter()
+                  .by_location_pattern(include=["*/src/*", "*/lib/*"], exclude=["*/test*/*"])
+                  .by_extension("py"))
+
+            # Compose with OR:
+            src_files  = SearchFilter().by_location_pattern(include=["*/src/*"])
+            busy_files = SearchFilter().by_edits(min_edits=5)
+            combined   = src_files | busy_files
+        """
+        _include = [p.lower() for p in (include or [])]
+        _exclude = [p.lower() for p in (exclude or [])]
+
+        def predicate(f: SessionFile) -> bool:
+            loc = f.location.lower()
+            if _include and not any(_fnmatch.fnmatch(loc, p) for p in _include):
+                return False
+            if _exclude and any(_fnmatch.fnmatch(loc, p) for p in _exclude):
+                return False
+            return True
 
         self._predicates.append(predicate)
         return self
@@ -66,7 +213,7 @@ class SearchFilter:
         max_size=0 means "only empty files" (not unlimited).
         """
 
-        def predicate(f: RecoveredFile) -> bool:
+        def predicate(f: SessionFile) -> bool:
             if f.size_bytes < min_size:
                 return False
             if max_size is not None and f.size_bytes > max_size:
@@ -76,44 +223,63 @@ class SearchFilter:
         self._predicates.append(predicate)
         return self
 
-    def custom(self, predicate: Callable[[RecoveredFile], bool]) -> "SearchFilter":
-        """Add custom filter predicate."""
+    def by_date(
+        self,
+        since: "str | None" = None,
+        until: "str | None" = None,
+    ) -> "SearchFilter":
+        """Filter by last_modified date range using FilterSpec.matches_datetime().
+
+        Args:
+            since: ISO date or duration shorthand (e.g. "7d", "2026-01-01").
+                   Files with no last_modified date are excluded when since/until set.
+            until: ISO date upper bound. None = no upper bound.
+
+        Returns:
+            Self for chaining: SearchFilter().by_date(since="7d").by_extension("py")
+
+        Example::
+
+            recent_py = SearchFilter().by_date(since="7d").by_extension("py")
+            files = session.search_files("*", recent_py)
+        """
+        from .models import FilterSpec
+        _spec = FilterSpec(since=since, until=until)
+
+        def predicate(f: SessionFile) -> bool:
+            return _spec.matches_datetime(f.last_modified or "")
+
         self._predicates.append(predicate)
         return self
 
-    def apply(self, files: List[RecoveredFile]) -> List[RecoveredFile]:
-        """Apply all filters to file list."""
-        result = files
-        for predicate in self._predicates:
-            result = [f for f in result if predicate(f)]
-        return result
 
-    def __call__(self, files: List[RecoveredFile]) -> List[RecoveredFile]:
-        """Support callable interface."""
-        return self.apply(files)
+class MessageFilter(Filter[SessionMessage]):
+    """Composable message filter.
 
+    Inherits & / | operators and by_session() / custom() from Filter[T].
 
-class MessageFilter:
-    """Composable message filter."""
+    Why separate from SearchFilter? MessageFilter predicates operate on SessionMessage
+    fields (type, content, is_long). SearchFilter predicates operate on SessionFile
+    fields (edits, extension, location, size). Merging would produce a type-unsafe class.
+    Filter[T] base already unifies all shared behavior.
 
-    def __init__(self):
-        """Initialize filter."""
-        self._predicates: List[Callable[[SessionMessage], bool]] = []
+    Example::
+        user_auth = (MessageFilter()
+                     .by_type(MessageType.USER)
+                     .by_content("authentication"))
+        matches = user_auth(all_messages)
+
+        # OR: user messages OR long assistant messages:
+        user_msgs = MessageFilter().by_type(MessageType.USER)
+        long_msgs = MessageFilter().by_type(MessageType.ASSISTANT).long_messages_only()
+        either = user_msgs | long_msgs
+    """
 
     def by_type(self, message_type: MessageType) -> "MessageFilter":
         """Filter by message type."""
 
         def predicate(m: SessionMessage) -> bool:
             return m.type == message_type
-
-        self._predicates.append(predicate)
-        return self
-
-    def by_session(self, session_id: str) -> "MessageFilter":
-        """Filter by session."""
-
-        def predicate(m: SessionMessage) -> bool:
-            return m.session_id == session_id
 
         self._predicates.append(predicate)
         return self
@@ -132,74 +298,4 @@ class MessageFilter:
         self._predicates.append(lambda m: m.is_long)
         return self
 
-    def custom(self, predicate: Callable[[SessionMessage], bool]) -> "MessageFilter":
-        """Add custom filter predicate."""
-        self._predicates.append(predicate)
-        return self
 
-    def apply(self, messages: List[SessionMessage]) -> List[SessionMessage]:
-        """Apply all filters to message list."""
-        result = messages
-        for predicate in self._predicates:
-            result = [m for m in result if predicate(m)]
-        return result
-
-    def __call__(self, messages: List[SessionMessage]) -> List[SessionMessage]:
-        """Support callable interface."""
-        return self.apply(messages)
-
-
-class LocationMatcher:
-    """Location matching with pattern support."""
-
-    def __init__(
-        self,
-        include_patterns: Optional[List[str]] = None,
-        exclude_patterns: Optional[List[str]] = None,
-    ):
-        """Initialize with patterns."""
-        self.include_patterns = include_patterns or []
-        self.exclude_patterns = exclude_patterns or []
-
-    def matches(self, location: str) -> bool:
-        """Check if location matches patterns."""
-        location_lower = location.lower()
-
-        # Check inclusions
-        if self.include_patterns:
-            if not any(inc.lower() in location_lower for inc in self.include_patterns):
-                return False
-
-        # Check exclusions
-        if self.exclude_patterns:
-            if any(exc.lower() in location_lower for exc in self.exclude_patterns):
-                return False
-
-        return True
-
-    def filter_files(self, files: List[RecoveredFile]) -> List[RecoveredFile]:
-        """Filter files by location."""
-        return [f for f in files if self.matches(f.location)]
-
-    def __call__(self, location: str) -> bool:
-        """Support callable interface."""
-        return self.matches(location)
-
-
-class ChainedFilter:
-    """Combine multiple filters with AND logic."""
-
-    def __init__(self, *filters):
-        """Initialize with filters."""
-        self._filters = filters
-
-    def apply(self, items: List[Any]) -> List[Any]:
-        """Apply all filters in sequence."""
-        result = items
-        for f in self._filters:
-            result = f(result) if callable(f) else f.apply(result)
-        return result
-
-    def __call__(self, items: List[Any]) -> List[Any]:
-        """Support callable interface."""
-        return self.apply(items)

@@ -29,11 +29,11 @@ from .models import (
     FilterSpec,
     MessageType,
     PlanningCommandCount,
-    RecoveredFile,
-    RecoveryStatistics,
     SessionAnalysis,
+    SessionFile,
     SessionInfo,
     SessionMessage,
+    SessionStatistics,
 )
 from ai_session_tools.config import get_config_path, load_config, write_config
 
@@ -273,7 +273,7 @@ class SessionRecoveryEngine:
         """
         self.projects_dir = Path(projects_dir)
         self.recovery_dir = Path(recovery_dir)
-        self._file_cache: Dict[str, RecoveredFile] = {}
+        self._file_cache: Dict[str, SessionFile] = {}
         self._version_cache: Dict[str, List[FileVersion]] = {}
 
     # ── Project name helpers ─────────────────────────────────────────────────
@@ -403,7 +403,7 @@ class SessionRecoveryEngine:
         except re.error as exc:
             raise ValueError(f"Invalid search pattern {pattern!r}: {exc}") from exc
 
-    def _get_or_create_file_info(self, file_path: Path) -> Optional[RecoveredFile]:
+    def _get_or_create_file_info(self, file_path: Path) -> Optional[SessionFile]:
         """Get or create cached file info.
 
         Cache is keyed by filename (basename): across multiple session dirs the same
@@ -412,7 +412,7 @@ class SessionRecoveryEngine:
         all session_all_versions_*/ dirs.
 
         Returns:
-            RecoveredFile, or None if the file's stat() call fails (e.g. broken symlink).
+            SessionFile, or None if the file's stat() call fails (e.g. broken symlink).
         """
         if file_path.name not in self._file_cache:
             try:
@@ -424,7 +424,7 @@ class SessionRecoveryEngine:
                 created_date = datetime.datetime.fromtimestamp(
                     stat.st_ctime, tz=datetime.timezone.utc
                 ).strftime("%Y-%m-%dT%H:%M:%S")
-                self._file_cache[file_path.name] = RecoveredFile(
+                self._file_cache[file_path.name] = SessionFile(
                     name=file_path.name,
                     path=str(file_path.resolve()),
                     location="recovery",
@@ -439,7 +439,7 @@ class SessionRecoveryEngine:
                 return None
         return self._file_cache.get(file_path.name)
 
-    def _apply_all_filters(self, file_info: RecoveredFile, filters: FilterSpec) -> bool:
+    def _apply_all_filters(self, file_info: SessionFile, filters: FilterSpec) -> bool:
         """Check if file passes all filters. Returns True if file should be included.
 
         Order: cheapest checks first (extension, size, datetime) before expensive ones
@@ -472,7 +472,7 @@ class SessionRecoveryEngine:
         self,
         pattern: str,
         filters: Optional[FilterSpec] = None,
-    ) -> List[RecoveredFile]:
+    ) -> List[SessionFile]:
         """Search files with optional filtering.
 
         Args:
@@ -480,7 +480,7 @@ class SessionRecoveryEngine:
             filters: Optional FilterSpec for advanced filtering
 
         Returns:
-            List of RecoveredFile objects sorted by edits (descending).
+            List of SessionFile objects sorted by edits (descending).
             Returns empty list if recovery_dir does not exist.
 
         Raises:
@@ -499,7 +499,7 @@ class SessionRecoveryEngine:
         if filters.include_folders and not filters.matches_location("recovery"):
             return []
 
-        results: List[RecoveredFile] = []
+        results: List[SessionFile] = []
         seen_names: Set[str] = set()
 
         with os.scandir(self.recovery_dir) as it:
@@ -534,7 +534,7 @@ class SessionRecoveryEngine:
                             continue
 
                         # Stat pre-filter: check date/size before expensive get_versions.
-                        if filters.after or filters.before or filters.min_size or (filters.max_size is not None):
+                        if filters.since or filters.until or filters.min_size or (filters.max_size is not None):
                             try:
                                 s = file_path.stat()
                                 mtime = datetime.datetime.fromtimestamp(
@@ -1462,7 +1462,7 @@ class SessionRecoveryEngine:
         self,
         since: Optional[str] = None,   # canonical; --after is a hidden alias
         until: Optional[str] = None,   # canonical; --before is a hidden alias
-    ) -> RecoveryStatistics:
+    ) -> SessionStatistics:
         """Get recovery statistics. Defaults to all sessions (no date restriction).
 
         When since/until given, counts only sessions whose timestamp_first is in range.
@@ -1514,7 +1514,7 @@ class SessionRecoveryEngine:
                     largest_edits = edits
                     largest_file = filename
 
-        return RecoveryStatistics(
+        return SessionStatistics(
             total_sessions=total_sessions,
             total_files=total_files,
             total_versions=total_versions,
@@ -1694,8 +1694,8 @@ class ClaudeSource:
         return {"claude_sessions": s.total_sessions}
 
 
-def get_multi_engine(config: dict | None = None):
-    """Factory: builds MultiSourceEngine from config. WOLOG: no hardcoded paths."""
+def _get_multi_engine(config: dict | None = None):
+    """Internal factory: builds MultiSourceEngine from config. Not for library users — use AISession()."""
     import contextlib
     from pathlib import Path as _Path
     from ai_session_tools.sources.aistudio import AiStudioSource, load_config
@@ -1926,21 +1926,91 @@ def _detect_default_source(cfg: dict) -> str:
     return "claude"
 
 
-class SessionBackend:
-    """Uniform interface for all session backends. All CLI commands use this exclusively.
+class AISession:
+    """Main entry point for ai_session_tools.
 
-    Wraps SessionRecoveryEngine (Claude single-source) or MultiSourceEngine (multiple sources).
-    Claude-specific operations return graceful empty results with clear messages
-    when called on non-Claude backends — no crashes, no silent failures.
+    Auto-detects and connects to all configured AI session sources
+    (Claude Code, AI Studio, Gemini CLI) on instantiation (RAII).
 
-    Composition Root: constructed ONCE in app_callback → ctx.obj["engine"].
-    All commands read ctx.obj["engine"]; no globals, no hidden ordering.
+    The library is named ``ai_session_tools``; the main class is ``AISession``.
+    Both names share the same root: your AI sessions, all in one object.
+
+    Example (RECOMMENDED — zero-config RAII)::
+
+        import ai_session_tools as aise
+
+        # All of these are equivalent:
+        session = aise.AISession()          # direct RAII — class name IS the concept
+        session = aise.connect()            # convenience alias (connect = AISession)
+        with aise.AISession() as session:   # context manager (recommended)
+
+    Args:
+        source:     Which source to use: "claude", "aistudio", "gemini", "all".
+                    Default None → auto-detects based on configured source dirs.
+        claude_dir: Override Claude projects directory (default: ~/.claude).
+        config:     Pre-loaded config dict. Default None → loads from config.json.
+
+    Supports multiple sources::
+
+        aise.AISession(source="aistudio")   # AI Studio only
+        aise.AISession(source="all")        # all configured sources
+        aise.AISession()                    # auto-detect (recommended)
     """
 
-    def __init__(self, backend: "SessionRecoveryEngine | MultiSourceEngine",
-                 source: str) -> None:
-        self._backend = backend
-        self._source = source
+    def __init__(
+        self,
+        source: "str | None" = None,
+        claude_dir: "str | None" = None,
+        config: "dict | None" = None,
+    ) -> None:
+        """Initialize and auto-connect. All arguments optional (RAII).
+
+        Called as: AISession() or AISession(source="claude") or AISession(source="all").
+        Delegates source detection to _build_ai_session() which uses _from_backend()
+        to avoid re-entering __init__.
+        """
+        _sb = _build_ai_session(source=source, claude_dir=claude_dir, config=config)
+        self._backend = _sb._backend
+        self._source = _sb._source
+
+    @classmethod
+    def _from_backend(cls, backend: "SessionRecoveryEngine | MultiSourceEngine",
+                      source: str) -> "AISession":
+        """Internal: construct AISession from an already-built backend (no __init__ loop).
+
+        Used by get_session_backend() to avoid recursive __init__ calls.
+        """
+        obj = cls.__new__(cls)
+        obj._backend = backend
+        obj._source = source
+        return obj
+
+    # ── Context manager protocol ──────────────────────────────────────────────
+
+    def __enter__(self) -> "AISession":
+        """Support use as a context manager. Returns self.
+
+        Enables::
+
+            with AISession() as s:
+                sessions = s.get_sessions(since="7d")
+
+            with connect() as s:
+                files = s.search_files("*.py")
+        """
+        return self
+
+    def __exit__(
+        self,
+        exc_type: "type | None",
+        exc_val: "BaseException | None",
+        exc_tb: "object | None",
+    ) -> None:
+        """Context manager exit. No-op — AISession holds only in-memory caches.
+
+        Future: may flush caches or close connection pools.
+        """
+        pass
 
     @property
     def source(self) -> str:
@@ -1966,9 +2036,33 @@ class SessionBackend:
 
     # ── Cross-backend operations (work for all sources) ──────────────────────
 
-    def search_messages(self, query: str, message_type: str | None = None,
-                        tool: str | None = None) -> list:
-        """Unified search. Unifies SRE(query, type, tool) and MSE(query, type)."""
+    def search_messages(
+        self,
+        query: str,
+        *,
+        context: int = 0,
+        message_type: str | None = None,
+        tool: str | None = None,
+    ) -> "list[SessionMessage] | list[ContextMatch]":
+        """Search messages across all configured AI session sources.
+
+        Args:
+            query:        Text or regex pattern to match in message content.
+            context:      Number of surrounding messages to include per match (default 0).
+                          When >0, returns list[ContextMatch]; when 0, returns list[SessionMessage].
+            message_type: Filter by "user", "assistant", or "system". Default: all types.
+            tool:         (Claude-only) Filter to messages containing a specific tool call.
+
+        Returns:
+            list[SessionMessage] when context=0 (default).
+            list[ContextMatch]   when context>0 (each match wrapped with before/after messages).
+        """
+        if context > 0:
+            if self._is_claude:
+                return self._backend.search_messages_with_context(
+                    query, context, message_type, tool
+                )
+            # Non-Claude: no context support, return plain messages
         if self._is_claude:
             return self._backend.search_messages(query, message_type, tool)
         if tool:
@@ -1977,15 +2071,6 @@ class SessionBackend:
                 "[yellow]--tool filter not supported for non-Claude sources[/yellow]"
             )
         return self._backend.search_messages(query, message_type)
-
-    def search_messages_with_context(self, query: str, context: int = 3,
-                                     message_type: str | None = None,
-                                     tool: str | None = None) -> list:
-        if self._is_claude:
-            return self._backend.search_messages_with_context(
-                query, context, message_type, tool
-            )
-        return self.search_messages(query, message_type)  # no context for non-Claude
 
     def get_sessions(self, project_filter: str | None = None,
                      since: str | None = None,   # canonical; after= is a hidden alias
@@ -2029,7 +2114,7 @@ class SessionBackend:
         """Get stats as a normalized dict. Default since=None, until=None: no date restriction.
 
         Returns keys: total_sessions, total_files, total_versions.
-        Avoids RecoveryStatistics | dict union type — callers never need isinstance checks.
+        Avoids SessionStatistics | dict union type — callers never need isinstance checks.
         """
         if self._is_claude:
             s = self._backend.get_statistics(since=since, until=until)
@@ -2050,49 +2135,248 @@ class SessionBackend:
         total = sum(v for v in raw.values() if isinstance(v, int))
         return {"total_sessions": total, "total_files": 0, "total_versions": 0, **raw}
 
-    # Alias for backward compat with display helpers that called get_stats()
+    # Alias for display helpers that called get_stats()
     get_stats = get_statistics
+
+    # ── Cross-backend: latest session context ────────────────────────────────
+
+    def get_latest_session_context(
+        self,
+        *,
+        message_limit: int = 20,
+        project_filter: "str | None" = None,
+    ) -> "tuple[SessionInfo, list[SessionMessage]] | None":
+        """Get the most recent session and its messages in a single call.
+
+        THE most common use case: "What was I just working on?"
+
+        Args:
+            message_limit: Max messages to return (default 20, 0 = all).
+            project_filter: Optional project name substring to filter sessions.
+
+        Returns:
+            (SessionInfo, list[SessionMessage]) or None if no sessions exist.
+
+        Example::
+
+            context = session.get_latest_session_context()
+            if context:
+                info, messages = context
+                print(f"Last session: {info.project_display}")
+        """
+        sessions = self.get_sessions(project_filter=project_filter)
+        if not sessions:
+            return None
+        latest = sessions[0]  # newest first
+        messages = self.get_messages(latest.session_id)
+        if message_limit:
+            messages = messages[:message_limit]
+        return (latest, messages)
+
+    # ── Source introspection ─────────────────────────────────────────────────
+
+    def get_sources(self) -> "list[str]":
+        """List active session source names.
+
+        Returns:
+            List of source names: e.g. ["claude"], ["aistudio", "gemini_cli"]
+
+        Example::
+
+            with AISession() as s:
+                print(s.get_sources())   # ["claude"]
+        """
+        if self._is_claude:
+            return ["claude"]
+        sources = []
+        for src in getattr(self._backend, "_sources", []):
+            name = type(src).__name__.lower().replace("source", "").replace("cli", "_cli")
+            sources.append(name)
+        return sources or [self._source]
 
     # ── Claude-only operations — graceful degradation (using DRY _claude_only helper) ──
 
-    def search(self, pattern: str, filters=None) -> list:
+    def search_files(
+        self,
+        pattern: str,
+        filters: "FilterSpec | SearchFilter | None" = None,
+    ) -> "list[SessionFile]":
+        """Search recovered files matching glob pattern.
+
+        Args:
+            pattern: Glob pattern (e.g. "*.py", "src/**/*.ts")
+            filters: Optional filter. Accepts:
+                     - ``FilterSpec``: declarative spec (date/size/ext bounds).
+                     - ``SearchFilter``: composable predicate chain (|/& operators).
+                     - ``None``: no filtering.
+
+        Returns:
+            list[SessionFile] matching pattern and filters.
+
+        Example::
+
+            with AISession() as s:
+                py = SearchFilter().by_extension("py")
+                ts = SearchFilter().by_extension("ts")
+                files = s.search_files("*", py | ts)
+        """
+        from .filters import SearchFilter as _SF
+        if filters is not None and callable(filters) and not isinstance(filters, type):
+            # Duck-typed: both FilterSpec and SearchFilter are callable
+            all_files = self._claude_only("search", [], pattern, None)
+            return list(filters(all_files))
         return self._claude_only("search", [], pattern, filters)
 
-    def get_versions(self, filename: str) -> list:
+    def get_versions(self, filename: str) -> "list[FileVersion]":
         return self._claude_only("get_versions", [], filename)
 
-    def extract_final(self, filename: str, output_dir) -> object:
+    def extract_final(self, filename: str, output_dir: "Path") -> "Path | None":
         return self._claude_only("extract_final", None, filename, output_dir)
 
-    def extract_all(self, filename: str, output_dir) -> list:
+    def extract_all(self, filename: str, output_dir: "Path") -> "list[Path]":
         return self._claude_only("extract_all", [], filename, output_dir)
 
-    def find_corrections(self, **kwargs) -> list:
-        return self._claude_only("find_corrections", [], **kwargs)
+    def find_corrections(
+        self,
+        *,
+        since: "str | None" = None,
+        until: "str | None" = None,
+        project_filter: "str | None" = None,
+        patterns: "list | None" = None,
+        limit: int = 50,
+    ) -> "list[CorrectionMatch]":
+        """Find user messages where Claude was corrected. Claude-only.
 
-    def analyze_planning_usage(self, **kwargs) -> list:
-        return self._claude_only("analyze_planning_usage", [], **kwargs)
+        Args:
+            since:          Only search sessions after this date.
+            until:          Only search sessions before this date.
+            project_filter: Filter to sessions in projects matching this substring.
+            patterns:       Custom correction pattern list (overrides defaults).
+            limit:          Max results to return. Default 50, 0 = all.
 
-    def cross_reference_session(self, *args, **kwargs) -> list:
-        return self._claude_only("cross_reference_session", [], *args, **kwargs)
+        Returns:
+            list[CorrectionMatch] sorted by timestamp descending.
+        """
+        return self._claude_only(
+            "find_corrections", [],
+            project_filter=project_filter,
+            since=since,
+            until=until,
+            patterns=patterns,
+            limit=limit,
+        )
 
-    def export_session_markdown(self, session_id: str) -> str:
+    def get_planning_usage(
+        self,
+        *,
+        commands: "list[str] | None" = None,
+        project_filter: "str | None" = None,
+        since: "str | None" = None,
+        until: "str | None" = None,
+        limit: int = 50,
+    ) -> "list[PlanningCommandCount]":
+        """Count slash command usage across sessions. Claude-only.
+
+        Args:
+            commands:       Filter to specific command strings. Default None = all.
+            project_filter: Filter to sessions in projects matching this substring.
+            since:          Only count commands from sessions after this date.
+            until:          Only count commands from sessions before this date.
+            limit:          Max number of results. Default 50, 0 = all.
+
+        Returns:
+            list[PlanningCommandCount] sorted by count descending.
+        """
+        results = self._claude_only(
+            "analyze_planning_usage", [],
+            commands=commands,
+            project_filter=project_filter,
+            since=since,
+            until=until,
+        )
+        if limit:
+            results = results[:limit]
+        return results
+
+    def get_file_edits(
+        self,
+        filename: str,
+        current_content: "str | None" = None,
+        session_id: "str | None" = None,
+        snippet_chars: int = 200,
+    ) -> "list[dict]":
+        """Find Edit/Write tool calls for a file across sessions. Claude-only.
+
+        If current_content is provided, each result includes 'found_in_current'
+        indicating whether that edit's content appears in current_content.
+
+        Args:
+            filename:        Filename to search for.
+            current_content: Optional current file contents for diff matching.
+            session_id:      Optional session ID to restrict search to.
+            snippet_chars:   Max chars per snippet. Default 200.
+
+        Returns:
+            list[dict] with session_id, timestamp, snippet, found_in_current fields.
+        """
+        return self._claude_only(
+            "cross_reference_session", [],
+            filename,
+            current_content or "",
+            session_id,
+            snippet_chars,
+        )
+
+    def get_session_markdown(self, session_id: str) -> str:
+        """Export session messages as a markdown string. Claude-only.
+
+        Returns markdown string — caller handles writing to file.
+        """
         return self._claude_only("export_session_markdown", "", session_id)
 
-    def get_clipboard_content(self, session_id: str) -> list:
+    def export_sessions_markdown(
+        self,
+        since: "str | None" = None,
+        until: "str | None" = None,
+        project_filter: "str | None" = None,
+    ) -> "list[str]":
+        """Export multiple sessions as markdown strings. Claude-only.
+
+        Bulk version of get_session_markdown(). Returns one markdown string per
+        session, newest-first.
+
+        Args:
+            since:          Only sessions after this date. Default: all.
+            until:          Only sessions before this date. Default: all.
+            project_filter: Optional project name substring filter.
+
+        Returns:
+            list[str]: One markdown string per session.
+        """
+        sessions = self.get_sessions(since=since, until=until, project_filter=project_filter)
+        results = []
+        for session in sessions:
+            md = self.get_session_markdown(session.session_id)
+            if md:
+                results.append(md)
+        return results
+
+    def get_clipboard_content(self, session_id: str) -> "list[dict]":
         return self._claude_only("get_clipboard_content", [], session_id)
 
-    def analyze_session(self, session_id: str) -> object:
+    def get_session_analysis(self, session_id: str) -> "SessionAnalysis | None":
+        """Per-session statistics: message counts, tool usage, files touched. Claude-only."""
         return self._claude_only("analyze_session", None, session_id)
 
-    def inspect_session(self, session_id: str) -> object:
-        """Deep analysis of one session (messages inspect command). Claude only."""
-        return self.analyze_session(session_id)
-
-    def timeline_session(self, session_id: str, preview_chars: int = 150) -> list:
+    def get_session_timeline(
+        self,
+        session_id: str,
+        preview_chars: int = 150,
+    ) -> "list[dict]":
+        """Chronological event timeline for one session. Claude-only."""
         return self._claude_only("timeline_session", [], session_id, preview_chars)
 
-    def get_original_path(self, filename: str) -> str | None:
+    def get_original_path(self, filename: str) -> "str | None":
         return self._claude_only("get_original_path", None, filename)
 
     @property
@@ -2104,12 +2388,16 @@ class SessionBackend:
         return Path()
 
 
-def get_session_backend(
+def _build_ai_session(
     source: str | None = None,
     claude_dir: str | None = None,
     config: dict | None = None,
-) -> SessionBackend:
-    """Build SessionBackend. Auto-discovers sources if source is None.
+) -> "AISession":
+    """Internal factory: build AISession without triggering __init__ recursion.
+
+    NOTE: External code should use ``AISession()`` directly.
+    This internal function exists to avoid infinite recursion:
+    AISession.__init__ → _build_ai_session → AISession._from_backend (no __init__).
 
     Args:
         source: "claude", "aistudio", "gemini", "all", or None (auto-detect)
@@ -2117,7 +2405,7 @@ def get_session_backend(
         config: Config dict (default: load from config.json)
 
     Returns:
-        SessionBackend wrapping either SessionRecoveryEngine or MultiSourceEngine.
+        AISession wrapping either SessionRecoveryEngine or MultiSourceEngine.
 
     Strategy:
         source=None      → auto: 'all' if any non-Claude sources discovered, else 'claude'
@@ -2153,7 +2441,7 @@ def get_session_backend(
             "AI_SESSION_TOOLS_RECOVERY", str(base / "recovery")
         )).expanduser()
         backend = SessionRecoveryEngine(projects, recovery)
-        return SessionBackend(backend, "claude")
+        return AISession._from_backend(backend, "claude")
 
     # Non-Claude: build MultiSourceEngine with requested sources
     sources: list = []
@@ -2193,7 +2481,15 @@ def get_session_backend(
 
     if not sources:
         # Nothing configured/discovered — fall back to Claude
-        return get_session_backend("claude", claude_dir, config)
+        return _build_ai_session("claude", claude_dir, config)
 
     backend = MultiSourceEngine(sources)
-    return SessionBackend(backend, effective_source)
+    return AISession._from_backend(backend, effective_source)
+
+
+# ── Module-level aliases (after AISession class) ──────────────────────────────
+
+# stdlib-consistent alias: connect() is how Python DB-API users expect to start.
+# connect = AISession means type(connect()) is AISession — no wrapper, no indirection.
+connect = AISession
+
