@@ -8349,3 +8349,208 @@ class TestStatsDateFiltering:
         assert result.exit_code == 0
         assert "not yet applied" not in result.output
         assert "planned for a future release" not in result.output
+
+
+import json as _json_bugs
+import re as _re_bugs
+
+
+class TestBugFixes:
+    """Regression tests for edge cases found in post-v0.2.0 review."""
+
+    # ── Bug: _passes_date_filter must handle timezone-aware timestamps (HIGH) ──
+
+    def test_passes_date_filter_tz_aware_z_suffix(self):
+        """Timestamp with Z suffix must not be incorrectly excluded at boundary."""
+        from ai_session_tools.engine import _passes_date_filter
+        # "2026-03-01T23:59:59Z" is the same moment as "2026-03-01T23:59:59"
+        # With before="2026-03-01T23:59:59", session should be INCLUDED not excluded.
+        assert _passes_date_filter("2026-03-01T23:59:59Z", None, "2026-03-01T23:59:59") is True
+
+    def test_passes_date_filter_tz_aware_plus_offset(self):
+        """Timestamp with +00:00 offset must not be incorrectly excluded at boundary."""
+        from ai_session_tools.engine import _passes_date_filter
+        assert _passes_date_filter("2026-03-01T23:59:59+00:00", None, "2026-03-01T23:59:59") is True
+
+    def test_passes_date_filter_with_microseconds(self):
+        """Timestamp with microseconds must compare correctly against second-precision bound."""
+        from ai_session_tools.engine import _passes_date_filter
+        # 23:59:59.999 is within [*, 23:59:59] when seconds match
+        assert _passes_date_filter("2026-03-01T23:59:59.999999", None, "2026-03-01T23:59:59") is True
+        # 00:00:00.001 is within [00:00:00, *]
+        assert _passes_date_filter("2026-03-01T00:00:00.001", "2026-03-01T00:00:00", None) is True
+
+    def test_passes_date_filter_tz_aware_excluded_correctly(self):
+        """Timestamps clearly outside range are still excluded when tz-aware."""
+        from ai_session_tools.engine import _passes_date_filter
+        # 2027 is beyond before=2026-12-31T23:59:59 regardless of timezone
+        assert _passes_date_filter("2027-01-01T00:00:00Z", None, "2026-12-31T23:59:59") is False
+        assert _passes_date_filter("2025-12-31T23:59:59+00:00", "2026-01-01T00:00:00", None) is False
+
+    def test_passes_date_filter_none_ts_excluded(self):
+        """None timestamp (not just empty string) must be treated as absent."""
+        from ai_session_tools.engine import _passes_date_filter
+        # None is falsy like "" — must not crash, must return False when filter active
+        assert _passes_date_filter(None, "2026-01-01", None) is False
+        assert _passes_date_filter(None, None, "2026-12-31") is False
+        assert _passes_date_filter(None, None, None) is True  # no filter: pass through
+
+    # ── Bug: gemini_cli filename timestamp missing seconds (MEDIUM) ──
+
+    def test_gemini_timestamp_format_has_seconds(self, tmp_path):
+        """Gemini session filename timestamp must include seconds (YYYY-MM-DDTHH:MM:SS)."""
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        # Create a minimal gemini session file matching the expected filename pattern
+        chats_dir = tmp_path / "hash123" / "chats"
+        chats_dir.mkdir(parents=True)
+        session_file = chats_dir / "session-2026-02-23T04-07-abc123.json"
+        session_file.write_text(_json_bugs.dumps({"messages": []}))
+        src = GeminiCliSource(tmp_path)
+        info = src._make_session_info(session_file)
+        # Must be 19 chars: YYYY-MM-DDTHH:MM:SS
+        assert len(info.timestamp_first) == 19, (
+            f"Expected 19-char timestamp, got {len(info.timestamp_first)!r}: {info.timestamp_first!r}"
+        )
+        assert info.timestamp_first == "2026-02-23T04:07:00"
+
+    def test_gemini_timestamp_with_seconds_in_filename(self, tmp_path):
+        """Gemini filename with HH-MM-SS must use actual seconds, not hardcoded 00."""
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "hash123" / "chats"
+        chats_dir.mkdir(parents=True)
+        # Filename with seconds: T04-07-25-hash
+        session_file = chats_dir / "session-2026-02-23T04-07-25-abc123.json"
+        session_file.write_text(_json_bugs.dumps({"messages": []}))
+        src = GeminiCliSource(tmp_path)
+        info = src._make_session_info(session_file)
+        assert info.timestamp_first == "2026-02-23T04:07:25", (
+            f"Seconds must come from filename, not be hardcoded 00: {info.timestamp_first!r}"
+        )
+
+    def test_gemini_timestamp_date_only_filename(self, tmp_path):
+        """Gemini filename with only a date (no time) defaults to T00:00:00."""
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "hash123" / "chats"
+        chats_dir.mkdir(parents=True)
+        session_file = chats_dir / "session-2026-02-23-abc123.json"
+        session_file.write_text(_json_bugs.dumps({"messages": []}))
+        src = GeminiCliSource(tmp_path)
+        info = src._make_session_info(session_file)
+        assert info.timestamp_first == "2026-02-23T00:00:00", (
+            f"Date-only filename must default time to T00:00:00: {info.timestamp_first!r}"
+        )
+
+    # ── Bug: gemini_cli timestamp_first=None when JSON has null startTime (HIGH) ──
+
+    def test_gemini_null_start_time_falls_back_to_filename(self, tmp_path):
+        """Gemini session with JSON startTime=null must use filename timestamp, not None."""
+        from ai_session_tools.sources.gemini_cli import GeminiCliSource
+        chats_dir = tmp_path / "hash123" / "chats"
+        chats_dir.mkdir(parents=True)
+        session_file = chats_dir / "session-2026-02-23T04-07-abc123.json"
+        session_file.write_text(_json_bugs.dumps({"startTime": None, "messages": []}))
+        src = GeminiCliSource(tmp_path)
+        info = src._make_session_info(session_file)
+        # Must not be None — must fall back to filename-extracted timestamp
+        assert info.timestamp_first is not None
+        assert info.timestamp_first != "None"
+        assert info.timestamp_first == "2026-02-23T04:07:00"
+
+    # ── Bug: aistudio timestamp has +00:00 timezone suffix (HIGH) ──
+
+    def test_aistudio_timestamp_is_naive_iso(self, tmp_path):
+        """AI Studio session timestamp must be naive ISO (no timezone suffix)."""
+        from ai_session_tools.sources.aistudio import AiStudioSource
+        session_dir = tmp_path / "sessions"
+        session_dir.mkdir()
+        session_file = session_dir / "test_session.json"
+        session_file.write_text(_json_bugs.dumps({}))
+        src = AiStudioSource([session_dir])
+        info = src._make_session_info(session_file)
+        # Must be 19 chars: YYYY-MM-DDTHH:MM:SS (no +00:00, no Z, no microseconds)
+        if info.timestamp_first:
+            assert len(info.timestamp_first) == 19, (
+                f"AI Studio timestamp must be 19-char naive ISO, got: {info.timestamp_first!r}"
+            )
+            assert "+" not in info.timestamp_first, "No timezone offset allowed"
+            assert info.timestamp_first.endswith("Z") is False, "No Z suffix allowed"
+
+    # ── Bug: config cache not invalidated on env var change (CRITICAL) ──
+
+    def test_config_cache_invalidated_on_env_var_change(self, tmp_path, monkeypatch):
+        """load_config() must re-read when AI_SESSION_TOOLS_CONFIG env var changes."""
+        import ai_session_tools.config as _cfg_mod
+        from ai_session_tools.config import load_config, invalidate_config_cache
+
+        config1 = tmp_path / "config1.json"
+        config2 = tmp_path / "config2.json"
+        config1.write_text(_json_bugs.dumps({"_marker": "config1"}))
+        config2.write_text(_json_bugs.dumps({"_marker": "config2"}))
+
+        # Clear any cached state
+        invalidate_config_cache()
+        _cfg_mod._g_config_path = None
+
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config1))
+        c1 = load_config()
+        assert c1.get("_marker") == "config1", f"Expected config1, got {c1}"
+
+        # Change env var — cache must be invalidated
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(config2))
+        invalidate_config_cache()  # explicit invalidation
+        c2 = load_config()
+        assert c2.get("_marker") == "config2", (
+            f"load_config() returned stale cache after env var change: {c2}"
+        )
+
+    # ── Bug: inverted date range silently returns 0 results (HIGH) ──
+
+    def test_stats_inverted_range_warns_or_errors(self, tmp_path, monkeypatch):
+        """--since after --until must produce a warning/error, not silent empty results."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["stats", "--since", "2099-01-01", "--until", "2020-01-01"])
+        # Either exit nonzero OR print a warning about the inverted range
+        has_warning = (
+            "inverted" in result.output.lower()
+            or "after" in result.output.lower()
+            or "before" in result.output.lower()
+            or "range" in result.output.lower()
+            or result.exit_code != 0
+        )
+        assert has_warning, (
+            f"Inverted range produced no warning. exit={result.exit_code} output={result.output!r}"
+        )
+
+    def test_list_inverted_range_warns_or_errors(self, tmp_path, monkeypatch):
+        """aise list --since after --until must warn or error."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["list", "--since", "2099-01-01", "--until", "2020-01-01"])
+        has_warning = (
+            "inverted" in result.output.lower()
+            or "range" in result.output.lower()
+            or result.exit_code != 0
+        )
+        assert has_warning, (
+            f"Inverted range produced no warning. exit={result.exit_code} output={result.output!r}"
+        )
+
+    # ── Bug: removeprefix() without startswith guard (MEDIUM) ──
+
+    def test_passes_date_filter_stats_unexpected_dir_skipped(self, tmp_path):
+        """get_statistics must skip recovery dirs not starting with 'session_'."""
+        from ai_session_tools.engine import SessionRecoveryEngine
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        recovery_dir = tmp_path / "recovery"
+        recovery_dir.mkdir()
+        # Create an unexpected directory that doesn't match the "session_" prefix
+        unexpected = recovery_dir / "backup_old_data"
+        unexpected.mkdir()
+        (unexpected / "somefile.txt").write_text("data")
+
+        engine = SessionRecoveryEngine(projects_dir, recovery_dir)
+        stats = engine.get_statistics()
+        # The unexpected dir must NOT inflate file counts
+        assert stats.total_files == 0, (
+            f"Unexpected dir inflated total_files to {stats.total_files}"
+        )

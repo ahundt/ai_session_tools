@@ -203,12 +203,20 @@ def _passes_date_filter(ts: str, after: Optional[str], before: Optional[str]) ->
     """Return True iff ISO timestamp ts falls within [after, before] (inclusive).
 
     - Both after and before default to None (no restriction); any combination works.
-    - Empty ts with any active filter → False (consistent with FilterSpec semantics).
+    - None/empty ts with any active filter → False (consistent with FilterSpec semantics).
+    - Normalizes ts to 19 chars (YYYY-MM-DDTHH:MM:SS) before comparison, stripping
+      timezone designators (+00:00, Z) and sub-second precision so that timestamps
+      from all sources (Claude, AI Studio, Gemini CLI) compare correctly against
+      the naive ISO strings produced by _parse_date_input.
     - ISO 8601 lexicographic order == chronological for fixed-width prefixes.
     - Pure function: no I/O, no side effects. O(1).
     """
     if (after or before) and not ts:
-        return False   # unknown timestamp excluded when filtering is active
+        return False   # unknown/None timestamp excluded when filtering is active
+    if ts and (after or before):
+        # Strip timezone suffix and sub-second precision for uniform comparison.
+        # after/before from _parse_date_input are always 19-char naive ISO strings.
+        ts = ts[:19]
     if after and ts < after:
         return False
     if before and ts > before:

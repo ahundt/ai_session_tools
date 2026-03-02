@@ -687,6 +687,14 @@ def _normalize_date_range(
             raise typer.Exit(1)
         resolved_before = result
 
+    # Warn if the range is inverted (after > before) — no sessions will match.
+    if resolved_after and resolved_before and resolved_after > resolved_before:
+        Console(stderr=True).print(
+            f"[yellow]Warning: --since/--after ({resolved_after[:10]}) is later than "
+            f"--until/--before ({resolved_before[:10]}); the date range is inverted and "
+            "no sessions will match.[/yellow]"
+        )
+
     return resolved_after, resolved_before
 
 

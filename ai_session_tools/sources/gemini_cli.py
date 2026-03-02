@@ -180,9 +180,19 @@ class GeminiCliSource:
         session_id = path.stem  # filename without .json extension
         project_hash = path.parent.parent.name
         timestamp = ""
-        m = re.search(r"session-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})", path.name)
+        m = re.search(
+            r"session-(\d{4}-\d{2}-\d{2})"  # date (required)
+            r"(?:T(\d{2})"                    # T + HH (optional)
+            r"(?:-(\d{2})"                    # -MM (optional)
+            r"(?:-(\d{2})(?=-))?)?)?",        # -SS only if followed by '-' (avoids eating hash)
+            path.name,
+        )
         if m:
-            timestamp = f"{m.group(1)}T{m.group(2)}:{m.group(3)}"
+            date = m.group(1)
+            hh = m.group(2) or "00"
+            mm = m.group(3) or "00"
+            ss = m.group(4) or "00"
+            timestamp = f"{date}T{hh}:{mm}:{ss}"  # always produces YYYY-MM-DDTHH:MM:SS (19 chars)
 
         # Resolve hash → real project path (best-effort; "" if unknown)
         cwd = self._get_hash_to_path().get(project_hash, "")
@@ -198,7 +208,7 @@ class GeminiCliSource:
                 project_dir=str(path.parent),
                 cwd=cwd,
                 git_branch="",
-                timestamp_first=data.get("startTime", timestamp),
+                timestamp_first=data.get("startTime") or timestamp,  # "startTime": null → fallback
                 timestamp_last=data.get("lastUpdated", ""),
                 message_count=user_count,
                 has_compact_summary=False,

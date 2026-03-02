@@ -159,7 +159,7 @@ class AiStudioSource:
         import datetime
         try:
             mtime = path.stat().st_mtime
-            ts = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
+            ts = datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         except OSError:
             ts = ""
         message_count = 0
