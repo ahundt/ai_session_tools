@@ -8885,3 +8885,80 @@ class TestConfigMigration:
         on_disk = json.loads(cfg_file.read_text())
         assert on_disk.get("defaults", {}).get("since") == "2026-01-01"
         assert "after" not in on_disk.get("defaults", {})
+
+
+class TestLibraryAPI:
+    """All key classes/functions must be importable from top-level package."""
+
+    def test_session_backend_importable(self):
+        from ai_session_tools import SessionBackend
+        assert SessionBackend is not None
+
+    def test_get_session_backend_importable(self):
+        from ai_session_tools import get_session_backend
+        assert callable(get_session_backend)
+
+    def test_get_multi_engine_importable(self):
+        from ai_session_tools import get_multi_engine
+        assert callable(get_multi_engine)
+
+    def test_multi_source_engine_importable(self):
+        from ai_session_tools import MultiSourceEngine
+        assert MultiSourceEngine is not None
+
+    def test_message_formatter_importable(self):
+        from ai_session_tools import MessageFormatter
+        assert MessageFormatter is not None
+
+    def test_get_formatter_importable(self):
+        from ai_session_tools import get_formatter
+        assert callable(get_formatter)
+
+    def test_aistudio_source_importable(self):
+        from ai_session_tools import AiStudioSource
+        assert AiStudioSource is not None
+
+    def test_gemini_cli_source_importable(self):
+        from ai_session_tools import GeminiCliSource
+        assert GeminiCliSource is not None
+
+    def test_config_api_importable(self):
+        from ai_session_tools import load_config, get_config_path, write_config, get_config_section
+        assert callable(load_config)
+        assert callable(get_config_path)
+        assert callable(write_config)
+        assert callable(get_config_section)
+
+    def test_parse_date_input_importable(self):
+        from ai_session_tools import parse_date_input
+        assert callable(parse_date_input)
+
+    def test_parse_date_input_works(self):
+        from ai_session_tools import parse_date_input
+        result = parse_date_input("2026-01-01")
+        # Function may return "2026-01-01" or "2026-01-01T00:00:00" depending on EDTF mode
+        assert isinstance(result, str) and result.startswith("2026-01-01"), (
+            f"Expected result starting with '2026-01-01', got: {result!r}"
+        )
+
+    def test_sources_subpackage_importable(self):
+        from ai_session_tools.sources import AiStudioSource, GeminiCliSource
+        assert AiStudioSource is not None
+        assert GeminiCliSource is not None
+
+    def test_all_exports_importable(self):
+        """Every symbol in __all__ must be importable."""
+        import ai_session_tools as aise
+        for name in aise.__all__:
+            assert hasattr(aise, name), f"{name!r} in __all__ but not importable"
+
+    def test_star_import_completeness(self):
+        """__all__ must cover the complete public API (>=43 symbols).
+
+        Count breakdown: 6 core engine + 2 sources + 4 filters + 7 formatters
+        + 12 models + 8 type protocols + 4 config = 43 total.
+        """
+        import ai_session_tools as aise
+        assert len(aise.__all__) >= 43, (
+            f"Expected >=43 exports in __all__, got {len(aise.__all__)}"
+        )

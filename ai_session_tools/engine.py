@@ -38,8 +38,12 @@ from .models import (
 from ai_session_tools.config import get_config_path, load_config, write_config
 
 
-def _parse_date_input(s: str, mode: str = "start") -> "str | tuple[str, str]":
+def parse_date_input(s: str, mode: str = "start") -> "str | tuple[str, str]":
     """Normalize flexible date/EDTF input to ISO 8601 for lexicographic comparison.
+
+    Public utility for library users who need the same date normalization as the
+    CLI date flags. Handles ISO dates, EDTF patterns (202X, 2026-01-1X), and
+    duration shorthands (7d, 2w, 1m, 24h, 30min).
 
     mode="start" → lower_strict() bound (earliest date in period)
     mode="end"   → upper_strict() bound (latest date in period)
@@ -208,6 +212,10 @@ DEFAULT_PLANNING_COMMANDS: List[str] = [
     r"/ar:planprocess\b", r"/ar:pp\b",
     r"/plannew\b", r"/planrefine\b", r"/planupdate\b", r"/planprocess\b",
 ]
+
+# Backward-compat alias: cli.py:673 imports _parse_date_input dynamically;
+# all internal callers continue to work without modification.
+_parse_date_input = parse_date_input
 
 #: Regex to auto-discover slash commands that START a user message.
 #: Matches e.g. "/ar:plannew", "/commit", "/help" — not file paths or URLs.

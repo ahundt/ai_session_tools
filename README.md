@@ -621,8 +621,8 @@ engine = SessionRecoveryEngine(
     Path.home() / ".claude" / "recovery",
 )
 
-# List sessions
-sessions = engine.get_sessions(project_filter="myproject", after="2026-01-01")
+# List sessions (since= is the canonical date flag; --after is a hidden alias)
+sessions = engine.get_sessions(project_filter="myproject", since="2026-01-01")
 for s in sessions:
     print(f"{s.session_id[:16]}  {s.git_branch}  {s.message_count} messages")
 
@@ -632,7 +632,7 @@ for f in all_files:
     print(f"{f.name}  ({f.edits} edits, last modified {f.last_modified})")
 
 # Filter to heavily-edited Python files
-filters = FilterSpec(min_edits=5, after="2026-01-01T00:00:00")
+filters = FilterSpec(min_edits=5)
 filters.with_extensions(include={"py"})
 results = engine.search("*", filters)
 
@@ -679,13 +679,17 @@ print(f"{stats.total_sessions} sessions, {stats.total_files} files, {stats.total
 ### Multi-source usage
 
 ```python
-from ai_session_tools.engine import get_session_backend
+from ai_session_tools import get_session_backend, AiStudioSource, GeminiCliSource
 
-# Auto-detect all configured sources
+# Auto-detect all configured sources (Claude Code, AI Studio, Gemini CLI)
 backend = get_session_backend()
 
 # List sessions from all sources
 sessions = backend.get_sessions()
+
+# Date filtering — same flags as CLI (since/until/EDTF patterns supported)
+recent = backend.get_sessions(since="7d")           # last 7 days
+decade = backend.get_sessions(since="202X")         # EDTF: whole 2020s decade
 
 # Narrow to one source
 aistudio_backend = get_session_backend(source="aistudio")
@@ -695,13 +699,38 @@ sessions = aistudio_backend.get_sessions()
 results = backend.search_messages("transcription")
 
 # Use AiStudioSource and GeminiCliSource directly
-from ai_session_tools.sources.aistudio import AiStudioSource
-from ai_session_tools.sources.gemini_cli import GeminiCliSource
-
 ai_source = AiStudioSource([Path("~/Downloads/Google AI Studio").expanduser()])
 for session_info in ai_source.stream_sessions():
     messages = ai_source.read_session(session_info)
     print(f"{session_info.session_id}: {len(messages)} messages")
+```
+
+### Date parsing utility
+
+```python
+from ai_session_tools import parse_date_input
+
+# All the same formats the CLI accepts
+parse_date_input("2026-01-15")        # → "2026-01-15T00:00:00" (start mode)
+parse_date_input("7d")                # → ISO datetime 7 days ago
+parse_date_input("202X", mode="end")  # → "2029-12-31T23:59:59" (end of decade)
+parse_date_input("2026-01/2026-03")   # → ("2026-01-01T00:00:00", "2026-03-31T23:59:59")
+```
+
+### Configuration API
+
+```python
+from ai_session_tools import load_config, write_config, get_config_path
+
+# Read current config (respects --config flag > AI_SESSION_TOOLS_CONFIG env > OS default)
+cfg = load_config()
+
+# Add an AI Studio source directory
+cfg.setdefault("source_dirs", {})["aistudio"] = ["/path/to/Google AI Studio"]
+write_config(cfg)
+
+# Check where the config file lives
+print(get_config_path())  # e.g. ~/Library/Application Support/ai_session_tools/config.json
 ```
 
 ### Key classes
