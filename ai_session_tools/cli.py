@@ -1867,6 +1867,8 @@ def _do_get(
     limit: int = 10,
     max_chars: Optional[int] = None,
     fmt: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
 ) -> None:
     """Get messages from a specific session."""
     if max_chars is None:
@@ -1874,7 +1876,11 @@ def _do_get(
     if not session_id:
         err_console.print("[red]Session ID is required.[/red] Use 'aise list' to find session IDs.")
         raise typer.Exit(code=1)
-    messages_list = engine.get_messages(session_id, message_type)[:limit]
+    messages_list = engine.get_messages(session_id, message_type)
+    if after or before:
+        from ai_session_tools.engine import _passes_date_filter
+        messages_list = [m for m in messages_list if _passes_date_filter(m.timestamp, after, before)]
+    messages_list = messages_list[:limit]
 
     if not messages_list:
         console.print("[yellow]No messages found[/yellow]")
@@ -2134,6 +2140,12 @@ def files_history(
     export_dir: Optional[str] = typer.Option(None, "--export-dir", help="Where to write exported files. Default: versions/ alongside original path."),
     stdout_mode: bool = typer.Option(False, "--stdout", help="Print all versions to stdout with === v1 === headers (for scripting/AI)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="With --export: show what would be written without writing."),
+    fmt: Optional[str] = _OPT_FORMAT,
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Show version history of a source file from Claude Code session data. Read-only by default.
 
@@ -2144,11 +2156,15 @@ def files_history(
 
     Examples:
         aise files history cli.py                           # show version table
+        aise files history cli.py --since 7d               # versions from last 7 days
+        aise files history cli.py --when 202X              # versions in the 2020s decade
+        aise files history cli.py --format json            # machine-readable
         aise files history cli.py --export                  # write cli_v1.py, cli_v2.py, ...
         aise files history cli.py --export --dry-run        # preview export
         aise files history cli.py --export --export-dir ./versions
         aise files history cli.py --stdout                  # all versions to stdout
     """
+    after, before = _normalize_date_range(since, until, when, after, before)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
@@ -2158,6 +2174,11 @@ def files_history(
     if session:
         versions = [v for v in versions if v.session_id.startswith(session)]
 
+    # Date filter: keep only versions whose timestamp falls in [after, before]
+    if after or before:
+        from ai_session_tools.engine import _passes_date_filter
+        versions = [v for v in versions if _passes_date_filter(v.timestamp or "", after, before)]
+
     if not versions:
         err_console.print(f"[red]No versions found for:[/red] {name}  (check filters)")
         raise typer.Exit(code=1)
@@ -2165,7 +2186,7 @@ def files_history(
     if stdout_mode:
         _do_history_stdout(engine, name, versions=versions)
     else:
-        _do_history_display(engine, name, versions=versions)
+        _do_history_display(engine, name, versions=versions, fmt=fmt)
         if export:
             _do_history_export(engine, name, export_dir=export_dir, dry_run=dry_run, versions=versions)
         elif dry_run:
@@ -2257,8 +2278,13 @@ def messages_get(
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
     limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
-    max_chars: int = _OPT_MAX_CHARS,
+    max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Read messages from one specific Claude Code session.
 
@@ -2266,14 +2292,16 @@ def messages_get(
         aise messages get ab841016              # positional
         aise messages get --session ab841016    # flag (backward compat)
         aise messages get ab841016 --type user
+        aise messages get ab841016 --since 14:00  # messages after 2pm
     """
+    after, before = _normalize_date_range(since, until, when, after, before)
     sid = session_id or session_opt
     # Get backend from composition root (ctx.obj injected by app_callback)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    _do_get(engine, sid, message_type, limit, max_chars, fmt)
+    _do_get(engine, sid, message_type, limit, max_chars, fmt, after=after, before=before)
 
 
 @messages_app.command("corrections")
@@ -2457,6 +2485,8 @@ def _do_messages_extract(
     content_type: str,
     fmt: str = "table",
     limit: Optional[int] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
 ) -> None:
     """Extract specific content type from a session."""
     if content_type not in _EXTRACT_TYPES:
@@ -2472,6 +2502,9 @@ def _do_messages_extract(
                 f"[red]No session found or no clipboard content for: {session_id!r}[/red]"
             )
             raise typer.Exit(code=1)
+        if after or before:
+            from ai_session_tools.engine import _passes_date_filter
+            results = [r for r in results if _passes_date_filter(r.get("timestamp", ""), after, before)]
         if limit is not None:
             results = results[:limit]
         _render_output(results, fmt, _EXTRACT_PBCOPY_SPEC, "No clipboard content found")
@@ -2489,6 +2522,11 @@ def messages_extract(
     ),
     fmt: Optional[str] = _OPT_FORMAT,
     limit: Optional[int] = typer.Option(None, "--limit", help="Max items to return. Default: unlimited."),
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Extract specific content from a Claude Code session.
 
@@ -2514,11 +2552,12 @@ def messages_extract(
 
         aise messages extract dddd0001 pbcopy --limit 3
     """
+    after, before = _normalize_date_range(since, until, when, after, before)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    _do_messages_extract(engine, session_id, content_type, fmt, limit=limit)
+    _do_messages_extract(engine, session_id, content_type, fmt, limit=limit, after=after, before=before)
 
 
 # ── tools_app commands ────────────────────────────────────────────────────────
