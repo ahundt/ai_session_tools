@@ -1,14 +1,14 @@
 """
-AI Session Tools — Python library + CLI for Claude Code, AI Studio, and Gemini CLI sessions.
+AI Session Tools - Python library + CLI for Claude Code, AI Studio, and Gemini CLI sessions.
 
 Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 
-Quickstart (RECOMMENDED — zero-config RAII, auto-detects all sources):
+Quickstart (RECOMMENDED - zero-config RAII, auto-detects all sources):
     import ai_session_tools as aise
     from ai_session_tools import AISession, FilterSpec
 
-    # All equivalent — AISession() auto-detects Claude, AI Studio, Gemini CLI:
+    # All equivalent - AISession() auto-detects Claude, AI Studio, Gemini CLI:
     session = aise.AISession()               # direct RAII (class name = concept)
     session = aise.connect()                 # convenience alias (connect = AISession)
 
@@ -29,7 +29,7 @@ Quickstart (explicit source override):
     with AISession(source="claude", claude_dir="~/.claude") as session:
         sessions = session.get_sessions(since="7d")
 
-Quickstart (Claude Code only, explicit paths — advanced):
+Quickstart (Claude Code only, explicit paths - advanced):
     from ai_session_tools import SessionRecoveryEngine, FilterSpec
 
     engine = SessionRecoveryEngine(projects_dir, recovery_dir)
@@ -62,7 +62,7 @@ except Exception:
 
 __author__ = "Andrew Hundt"
 
-# Primary entry point — AISession is the main class
+# Primary entry point - AISession is the main class
 from .engine import (
     AISession,          # RECOMMENDED: auto-detects all sources; zero-config RAII
     connect,            # Convenience alias for AISession() (connect = AISession)
@@ -114,7 +114,7 @@ from .config import (
 )
 
 __all__ = [
-    # --- Primary entry point — THE main class (zero-config RAII) ---
+    # --- Primary entry point - THE main class (zero-config RAII) ---
     "AISession",              # RECOMMENDED: auto-detects all sources; connect = AISession
     "connect",                # Convenience alias for AISession() (connect = AISession)
     # --- Advanced entry points ---

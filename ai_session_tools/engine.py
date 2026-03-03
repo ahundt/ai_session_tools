@@ -2180,7 +2180,7 @@ class AISession:
     def get_sessions(self, project_filter: str | None = None,
                      since: str | None = None,   # canonical; after= is a hidden alias
                      until: str | None = None,   # canonical; before= is a hidden alias
-                     ) -> list:
+                     ) -> "list[SessionInfo]":
         """List sessions. Applies date filter for all backends via _passes_date_filter."""
         if self._is_claude:
             return self._backend.get_sessions(project_filter, since, until)
@@ -2193,7 +2193,7 @@ class AISession:
         return sessions
 
     def get_messages(self, session_id: str,
-                     message_type: str | None = None) -> list:
+                     message_type: str | None = None) -> "list[SessionMessage]":
         """Get messages by session ID (substring match for non-Claude backends).
 
         Uses MultiSourceEngine.list_sessions() + read_session() public API — no private attribute access.
@@ -2215,7 +2215,7 @@ class AISession:
 
     def get_statistics(self, since: str | None = None,   # canonical; after= is a hidden alias
                        until: str | None = None,         # canonical; before= is a hidden alias
-                       ) -> dict:
+                       ) -> "dict[str, Any]":
         """Get stats as a normalized dict. Default since=None, until=None: no date restriction.
 
         Returns keys: total_sessions, total_files, total_versions.
@@ -2731,6 +2731,7 @@ class AISession:
             return self._backend.projects_dir
         from pathlib import Path
         return Path()
+
 
 
 def _build_ai_session(
