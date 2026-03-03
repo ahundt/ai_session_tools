@@ -7,6 +7,8 @@ Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 """
 
+from __future__ import annotations
+
 import re as _re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -99,7 +101,7 @@ class FileVersion:
     session_id: str
     timestamp: str = ""
 
-    def __lt__(self, other: "FileVersion") -> bool:
+    def __lt__(self, other: FileVersion) -> bool:
         """Compare by version number for sorting."""
         if not isinstance(other, FileVersion):
             return NotImplemented
@@ -372,12 +374,12 @@ class FilterSpec:
             return False
         return True
 
-    def with_pattern(self, *patterns: str) -> "FilterSpec":
+    def with_pattern(self, *patterns: str) -> FilterSpec:
         """Builder: set file patterns."""
         self.file_patterns = list(patterns)
         return self
 
-    def with_sessions(self, include: Optional[Set[str]] = None, exclude: Optional[Set[str]] = None) -> "FilterSpec":
+    def with_sessions(self, include: Optional[Set[str]] = None, exclude: Optional[Set[str]] = None) -> FilterSpec:
         """Builder: set session filtering.
 
         Args:
@@ -390,7 +392,7 @@ class FilterSpec:
             self.exclude_sessions = exclude
         return self
 
-    def with_extensions(self, include: Optional[Set[str]] = None, exclude: Optional[Set[str]] = None) -> "FilterSpec":
+    def with_extensions(self, include: Optional[Set[str]] = None, exclude: Optional[Set[str]] = None) -> FilterSpec:
         """Builder: filter by file extensions.
 
         Args:
@@ -412,7 +414,7 @@ class FilterSpec:
             self.exclude_extensions = exclude
         return self
 
-    def with_since(self, since: str) -> "FilterSpec":
+    def with_since(self, since: str) -> FilterSpec:
         """Builder: filter to items modified ON OR AFTER this date.
 
         Duration shorthands ("7d", "2w", "1m") are resolved to ISO datetimes
@@ -428,7 +430,7 @@ class FilterSpec:
         self.since = _resolve_date(since, "start")
         return self
 
-    def with_until(self, until: str) -> "FilterSpec":
+    def with_until(self, until: str) -> FilterSpec:
         """Builder: filter to items modified ON OR BEFORE this date.
 
         Duration shorthands are resolved to end-of-period ISO datetimes so that
@@ -448,7 +450,7 @@ class FilterSpec:
         self,
         since: Optional[str] = None,
         until: Optional[str] = None,
-    ) -> "FilterSpec":
+    ) -> FilterSpec:
         """Builder: set both since and until bounds in one call.
 
         Duration shorthands are resolved to ISO datetimes (see with_since / with_until).
@@ -471,7 +473,7 @@ class FilterSpec:
             self.until = _resolve_date(until, "end")
         return self
 
-    def with_when(self, when: str) -> "FilterSpec":
+    def with_when(self, when: str) -> FilterSpec:
         """Builder: set both since and until from an EDTF expression or duration shorthand.
 
         Mirrors CLI --when option. Parses the expression and sets both bounds.
@@ -524,7 +526,7 @@ class FilterSpec:
         self,
         min_edits: int = 0,
         max_edits: Optional[int] = None,
-    ) -> "FilterSpec":
+    ) -> FilterSpec:
         """Builder: filter by edit count range.
 
         Args:
@@ -538,7 +540,7 @@ class FilterSpec:
         self.max_edits = max_edits
         return self
 
-    def __call__(self, files: "Iterable") -> list:
+    def __call__(self, files: Iterable) -> list:
         """Apply this FilterSpec as a post-glob predicate filter.
 
         Makes FilterSpec duck-type compatible with SearchFilter — both can be
@@ -631,6 +633,7 @@ class SessionStatistics:
     largest_file: Optional[str] = None
     largest_file_edits: int = 0
     total_size_bytes: int = 0
+    per_source: Dict[str, int] = field(default_factory=dict)
 
     @property
     def avg_versions_per_file(self) -> float:
@@ -641,7 +644,7 @@ class SessionStatistics:
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
-        return {
+        d: dict = {
             "total_sessions": self.total_sessions,
             "total_files": self.total_files,
             "total_versions": self.total_versions,
@@ -650,6 +653,9 @@ class SessionStatistics:
             "total_size_bytes": self.total_size_bytes,
             "avg_versions_per_file": self.avg_versions_per_file,
         }
+        if self.per_source:
+            d["per_source"] = self.per_source
+        return d
 
 
 
@@ -779,9 +785,9 @@ class ContextMatch:
     before and after it from the same session file.
     """
 
-    match: "SessionMessage"
-    context_before: List["SessionMessage"]  # messages before match, oldest first
-    context_after: List["SessionMessage"]   # messages after match, oldest first
+    match: SessionMessage
+    context_before: List[SessionMessage]  # messages before match, oldest first
+    context_after: List[SessionMessage]   # messages after match, oldest first
 
     def to_dict(self) -> dict:
         return {

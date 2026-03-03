@@ -5562,12 +5562,15 @@ class TestSessionBackendDegradation:
         result = engine.get_versions("cli.py")
         assert result == []
 
-    def test_get_statistics_always_returns_dict(self):
-        """get_statistics() always returns dict (no SessionStatistics union type)."""
+    def test_get_statistics_returns_session_statistics(self):
+        """get_statistics() returns SessionStatistics for all backends."""
         from ai_session_tools.engine import AISession, MultiSourceEngine
+        from ai_session_tools.models import SessionStatistics
         engine = AISession._from_backend(MultiSourceEngine([]), "aistudio")
         stats = engine.get_statistics()
-        assert isinstance(stats, dict)
+        assert isinstance(stats, SessionStatistics)
+        assert hasattr(stats, "total_sessions")
+        assert hasattr(stats, "per_source")
 
 
 class TestSourceAutoDiscovery:

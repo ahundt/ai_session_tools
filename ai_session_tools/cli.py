@@ -8,6 +8,8 @@ Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re as _re
@@ -894,7 +896,7 @@ def app_callback(
 
 # ── Engine factory ────────────────────────────────────────────────────────────
 
-def _resolve_engine(ctx: typer.Context, source: Optional[str] = None) -> "Optional[AISession]":
+def _resolve_engine(ctx: typer.Context, source: Optional[str] = None) -> Optional[AISession]:
     """Return engine from ctx.obj, rebuilding with a different source if --source given per-command."""
     if source:
         cfg = load_config()
@@ -1475,7 +1477,7 @@ def _parse_pattern_options(raw: List[str]) -> List[tuple]:
         else:
             expanded.append(entry)
 
-    groups: "OrderedDict[str, List[str]]" = OrderedDict()
+    groups: OrderedDict[str, List[str]] = OrderedDict()
     for entry in expanded:
         if ":" not in entry:
             raise typer.BadParameter(
@@ -1906,7 +1908,7 @@ def _do_get(
 
 
 def _do_stats(
-    engine: "AISession",
+    engine: AISession,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
     fmt: Optional[str] = None,
@@ -1914,31 +1916,20 @@ def _do_stats(
     """Show recovery statistics. Default since=None, until=None: all sessions shown."""
     if fmt is None:
         fmt = _cfg_default("format", "table")
-    stats_data = engine.get_statistics(since=since, until=until)
-    # get_statistics() always returns dict; the else-branch was dead code.
-    stats_data = stats_data if isinstance(stats_data, dict) else {}
-    sessions = stats_data.get("total_sessions", 0)
-    files = stats_data.get("total_files", 0)
-    versions = stats_data.get("total_versions", 0)
-    largest = stats_data.get("largest_file", "—")
-    largest_edits = stats_data.get("largest_file_edits", 0)
-    # Collect per-source counts: keys like "aistudio_sessions", "gemini_cli_sessions"
+    stats = engine.get_statistics(since=since, until=until)
+    sessions = stats.total_sessions
+    files = stats.total_files
+    versions = stats.total_versions
+    largest = stats.largest_file
+    largest_edits = stats.largest_file_edits
     per_source = {
         k.replace("_sessions", ""): v
-        for k, v in stats_data.items()
-        if k.endswith("_sessions") and k != "total_sessions" and isinstance(v, int)
+        for k, v in stats.per_source.items()
+        if k != "total_sessions"
     }
 
     if fmt == "json":
-        out = {
-            "total_sessions": sessions,
-            "total_files": files,
-            "total_versions": versions,
-            "largest_file": largest,
-            "largest_file_edits": largest_edits,
-        }
-        if per_source:
-            out["per_source"] = per_source
+        out = stats.to_dict()
         sys.stdout.write(json.dumps(out, indent=2) + "\n")
         return
 
@@ -1948,11 +1939,12 @@ def _do_stats(
             f"    {src:<14} {count}" for src, count in sorted(per_source.items())
         )
 
+    largest_display = largest or "-"
     if fmt in ("csv", "plain"):
         console.print(f"Sessions: {sessions}")
         console.print(f"Files: {files}")
         console.print(f"Versions: {versions}")
-        console.print(f"Largest File: {largest} ({largest_edits} edits)")
+        console.print(f"Largest File: {largest_display} ({largest_edits} edits)")
         return
 
     console.print(
@@ -1961,7 +1953,7 @@ def _do_stats(
   Sessions:      {sessions}{breakdown}
   Files:         {files}
   Versions:      {versions}
-  Largest File:  {largest} ({largest_edits} edits)
+  Largest File:  {largest_display} ({largest_edits} edits)
 """
     )
 
