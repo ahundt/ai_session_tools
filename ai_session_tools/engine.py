@@ -888,7 +888,7 @@ class SessionRecoveryEngine:
         sessions: List[SessionInfo] = []
         for project_dir_name, jsonl_file in self._iter_all_jsonl(project_filter):
             session_id = jsonl_file.stem
-            cwd, git_branch = "", "unknown"
+            cwd, git_branch = "", ""
             ts_first, ts_last = "", ""
             message_count = 0
             has_compact = False
@@ -900,12 +900,22 @@ class SessionRecoveryEngine:
                     ts_last = ts
                 if not cwd and data.get("cwd"):
                     cwd = data["cwd"]
-                if git_branch == "unknown" and data.get("gitBranch"):
+                if not git_branch and data.get("gitBranch"):
                     git_branch = data["gitBranch"]
                 if data.get("isCompactSummary"):
                     has_compact = True
                 if data.get("type") in ("user", "assistant"):
                     message_count += 1
+            # Fallback: use file mtime when no timestamp found in JSONL records
+            # (e.g., empty sessions, system-only records, aborted sessions)
+            if not ts_first:
+                try:
+                    mtime = jsonl_file.stat().st_mtime
+                    ts_first = datetime.datetime.fromtimestamp(
+                        mtime, tz=datetime.timezone.utc
+                    ).strftime("%Y-%m-%dT%H:%M:%S")
+                except OSError:
+                    pass
             if not _passes_date_filter(ts_first, since, until):
                 continue
             sessions.append(SessionInfo(
@@ -1191,7 +1201,7 @@ class SessionRecoveryEngine:
         session_file, _project_dir_name = matches[0]
 
         # Scan file for metadata + messages
-        cwd, git_branch, ts_first = "", "unknown", ""
+        cwd, git_branch, ts_first = "", "", ""
         message_count = 0
         lines_md: List[str] = []
 
@@ -1201,7 +1211,7 @@ class SessionRecoveryEngine:
                 ts_first = ts
             if not cwd and data.get("cwd"):
                 cwd = data["cwd"]
-            if git_branch == "unknown" and data.get("gitBranch"):
+            if not git_branch and data.get("gitBranch"):
                 git_branch = data["gitBranch"]
             msg_type = data.get("type", "")
             if msg_type not in ("user", "assistant"):

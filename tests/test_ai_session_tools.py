@@ -4653,27 +4653,28 @@ class TestGetVersionsGlobEscape:
 
 
 class TestGetSessionsNoTimestampFilter:
-    """Bug fix: get_sessions should exclude no-timestamp sessions when date filter active."""
+    """get_sessions falls back to file mtime when no JSONL timestamp; sessions still participate in date filtering."""
 
-    def test_no_timestamp_session_excluded_when_after_filter_active(self, tmp_path):
-        """Sessions with no timestamp should be excluded when after= filter is set."""
+    def test_no_timestamp_session_included_via_mtime_when_since_filter_active(self, tmp_path):
+        """Sessions with no JSONL timestamp fall back to file mtime and are included when mtime >= since."""
         projects = _make_projects_for_edge_cases(tmp_path)
         engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
-        # since="2026-01-01" — s2 has no timestamp so should be excluded
+        # since="2026-01-01" — s2 has no JSONL timestamp but file was just created (mtime = now, after 2026-01-01)
         sessions = engine.get_sessions(since="2026-01-01")
         session_ids = [s.session_id for s in sessions]
-        assert "bbbb0002-0000-0000-0000-000000000000" not in session_ids, (
-            "Session with no timestamp should be excluded when since= filter is active"
+        assert "bbbb0002-0000-0000-0000-000000000000" in session_ids, (
+            "Session with no JSONL timestamp should be included via mtime fallback when mtime >= since"
         )
 
-    def test_no_timestamp_session_excluded_when_before_filter_active(self, tmp_path):
-        """Sessions with no timestamp should be excluded when until= filter is set."""
+    def test_no_timestamp_session_included_via_mtime_when_until_filter_active(self, tmp_path):
+        """Sessions with no JSONL timestamp fall back to file mtime and are included when mtime <= until."""
         projects = _make_projects_for_edge_cases(tmp_path)
         engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
-        sessions = engine.get_sessions(until="2026-12-31")
+        # until="2030-12-31" — far future; file mtime (now) is well before this date
+        sessions = engine.get_sessions(until="2030-12-31")
         session_ids = [s.session_id for s in sessions]
-        assert "bbbb0002-0000-0000-0000-000000000000" not in session_ids, (
-            "Session with no timestamp should be excluded when until= filter is active"
+        assert "bbbb0002-0000-0000-0000-000000000000" in session_ids, (
+            "Session with no JSONL timestamp should be included via mtime fallback when mtime <= until"
         )
 
     def test_no_timestamp_session_included_when_no_filter(self, tmp_path):
@@ -7595,18 +7596,18 @@ class TestBug6DisplayFormatting:
         assert _format_ts(ts) == expected, f"_format_ts({ts!r}) = {_format_ts(ts)!r}, expected {expected!r}"
 
     def test_list_spec_full_uuid(self, tmp_path, monkeypatch):
-        """aise list --provider claude must show full 36-char UUIDs, not truncated."""
+        """aise list --full-uuid must show full 36-char UUIDs, not 8-char prefix."""
         import re
         _make_session_jsonl(tmp_path, "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "full uuid test")
         monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
         monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
-        result = runner.invoke(app, ["list", "--provider", "claude"])
+        result = runner.invoke(app, ["list", "--provider", "claude", "--full-uuid"])
         assert result.exit_code == 0
         uuids = re.findall(
             r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
             result.output
         )
-        assert len(uuids) > 0, f"Full UUIDs must appear in table output. Got:\n{result.output}"
+        assert len(uuids) > 0, f"Full UUIDs must appear in --full-uuid output. Got:\n{result.output}"
 
     def test_list_spec_has_provider_column(self, tmp_path, monkeypatch):
         """aise list must show a 'Provider' column (visible when sessions exist)."""

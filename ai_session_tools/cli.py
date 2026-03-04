@@ -543,8 +543,22 @@ def _render_output(
         return
     # Default: Rich table
     from rich.table import Table
-    table = Table(title=spec.title_template.format(n=len(items)))
-    for col in spec.columns:
+    # When stdout is not a TTY (piped to head, grep, file, etc.), Rich defaults to 80 cols.
+    # Use 120 cols instead — prevents column crushing while staying readable in most contexts.
+    # sys already imported at cli.py:17; Console already imported at cli.py:24
+    render_console = console if sys.stdout.isatty() else Console(width=120)
+    # Pre-compute all rows once; used for both column suppression check and row insertion.
+    all_rows = [[str(v) for v in spec.row_fn(d)] for d in dicts]
+    n_cols = len(spec.columns)
+    # Suppress columns where every row value is "" (falsy); avoids invisible 0-width headers.
+    # Note: "0" is truthy — message count columns with all-zero values are NOT suppressed.
+    active = [i for i in range(n_cols) if any(row[i] for row in all_rows)]
+    if not active:
+        active = list(range(n_cols))  # guard: if all columns are empty, show all
+    # expand=True: table fills full console width; flexible columns get proportional space
+    table = Table(title=spec.title_template.format(n=len(items)), expand=True)
+    for i in active:
+        col = spec.columns[i]
         table.add_column(
             col.header,
             style=col.style or None,
@@ -553,11 +567,35 @@ def _render_output(
             overflow=col.overflow,
             min_width=col.min_width,
         )
-    for d in dicts:
-        table.add_row(*[str(v) for v in spec.row_fn(d)])
-    console.print(table)
+    for row in all_rows:
+        table.add_row(*[row[i] for i in active])
+    render_console.print(table)
     if spec.summary_template:
-        console.print(f"\n[bold]{spec.summary_template.format(n=len(items))}[/bold]")
+        render_console.print(f"\n[bold]{spec.summary_template.format(n=len(items))}[/bold]")
+
+
+def _spec_with_full_uuid(spec: "TableSpec", col_idx: int = 0) -> "TableSpec":
+    """Return a copy of spec where the session ID column shows full 36-char UUID.
+
+    col_idx: index of the Session column in spec.columns (default 0).
+    The original row_fn may truncate the session ID; this wrapper replaces that
+    value with d["session_id"] from the raw dict (the full UUID).
+    """
+    import dataclasses as _dc
+    cols = list(spec.columns)
+    cols[col_idx] = _dc.replace(cols[col_idx], min_width=36, no_wrap=True)
+    orig_fn = spec.row_fn
+    def full_row_fn(d: dict) -> list:
+        row = list(orig_fn(d))
+        row[col_idx] = d.get("session_id", row[col_idx])
+        return row
+    return _dc.replace(spec, columns=cols, row_fn=full_row_fn)
+
+
+_OPT_FULL_UUID = typer.Option(
+    False, "--full-uuid/--no-full-uuid",
+    help="Show full 36-char session UUID instead of 8-char prefix.",
+)
 
 
 def _register_alias(sub_app: "typer.Typer", func: _Callable, *names: str) -> None:
@@ -763,7 +801,7 @@ def _session_path_display(d: dict) -> str:
 _LIST_SPEC = TableSpec(
     title_template="Sessions ({n} found)",
     columns=[
-        ColumnSpec("Session", style="cyan", no_wrap=True, min_width=36),   # full UUID (36 chars)
+        ColumnSpec("Session", style="cyan", no_wrap=True, min_width=8),    # 8-char prefix (matches _CORRECTIONS_SPEC)
         ColumnSpec("Provider", style="magenta", no_wrap=True),             # source provider
         ColumnSpec("Path", style="blue"),                                   # cwd or decoded project
         ColumnSpec("Branch", style="green"),
@@ -772,7 +810,7 @@ _LIST_SPEC = TableSpec(
         ColumnSpec("Summary", style="dim"),
     ],
     row_fn=lambda d: [
-        d["session_id"],                                                    # full 36-char UUID
+        d["session_id"][:8],                                               # 8-char prefix; full ID via: aise messages get <prefix>
         d.get("provider", "claude"),                                        # source provider
         _session_path_display(d),                                           # cwd > project_display
         d.get("git_branch", ""),
@@ -1174,6 +1212,7 @@ def _do_history_display(
     name: str,
     versions: Optional[List[FileVersion]] = None,
     fmt: Optional[str] = None,
+    full_uuid: bool = False,
 ) -> None:
     """Show version history table (read-only, no disk writes).
 
@@ -1202,7 +1241,7 @@ def _do_history_display(
             "lines": v.line_count,
             "delta_lines": delta,
             "timestamp": v.timestamp or "—",
-            "session": v.session_id[:8],
+            "session": v.session_id if full_uuid else v.session_id[:8],
         })
         prev_lines = v.line_count
 
@@ -1343,6 +1382,7 @@ def _do_messages_search(
     context: int = 0,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
+    full_uuid: bool = False,
 ) -> None:
     """Search messages across all sessions. When context > 0, each result includes
     up to ``context`` surrounding messages from the same session file.
@@ -1405,18 +1445,20 @@ def _do_messages_search(
         # JSON format ignores row_fn entirely (uses to_dict() directly) so content
         # is always complete. csv/plain respects max_chars if set, else no truncation.
         truncate = max_chars if max_chars > 0 else None
+        sid_fn = (lambda d: d.get("session_id", "")) if full_uuid else (lambda d: d.get("session_id", "")[:12] + "\u2026")
+        sid_col = ColumnSpec("Session", style="blue", min_width=36 if full_uuid else None, no_wrap=full_uuid)
         spec = TableSpec(
             title_template=f"Messages ({{n}} found){tag}",
             columns=[
                 ColumnSpec("Timestamp", style="dim", no_wrap=True),
                 ColumnSpec("Type", style="cyan"),
-                ColumnSpec("Session", style="blue"),
+                sid_col,
                 ColumnSpec("Content"),
             ],
             row_fn=lambda d: [
                 d.get("timestamp", "")[:19],
                 d.get("type", ""),
-                (d.get("session_id", "")[:12] + "\u2026"),
+                sid_fn(d),
                 d.get("content", "")[:truncate],
             ],
             summary_template="Found {n} messages",
@@ -1436,12 +1478,14 @@ def _do_list_sessions(
     until: Optional[str] = None,   # canonical; before= is a hidden alias
     limit: Optional[int] = None,
     fmt: str = "table",
+    full_uuid: bool = False,
 ) -> None:
     """List sessions with metadata."""
     sessions = engine.get_sessions(project_filter=project, since=since, until=until)
     if limit:
         sessions = sessions[:limit]
-    _render_output(sessions, fmt, _LIST_SPEC, "No sessions found")
+    spec = _spec_with_full_uuid(_LIST_SPEC) if full_uuid else _LIST_SPEC
+    _render_output(sessions, fmt, spec, "No sessions found")
 
 
 def _parse_pattern_options(raw: List[str]) -> List[tuple]:
@@ -1525,6 +1569,7 @@ def _do_messages_corrections(
     limit: int = 20,
     fmt: str = "table",
     pattern_overrides: Optional[List[str]] = None,
+    full_uuid: bool = False,
 ) -> None:
     """Find user corrections across sessions.
 
@@ -1550,7 +1595,8 @@ def _do_messages_corrections(
         project_filter=project, since=since, until=until,
         limit=limit, patterns=patterns,
     )
-    _render_output(corrections, fmt, _CORRECTIONS_SPEC, "No corrections found")
+    spec = _spec_with_full_uuid(_CORRECTIONS_SPEC) if full_uuid else _CORRECTIONS_SPEC
+    _render_output(corrections, fmt, spec, "No corrections found")
 
 
 def _do_messages_planning(
@@ -1696,6 +1742,7 @@ def _do_files_cross_ref(
     file: str,
     session: Optional[str] = None,
     fmt: str = "table",
+    full_uuid: bool = False,
 ) -> None:
     """Cross-reference session edits against current file content."""
     file_path = Path(file)
@@ -1706,18 +1753,20 @@ def _do_files_cross_ref(
     results = engine.get_file_edits(
         file_path.name, current_content, session_id=session
     )
+    sid_fn = (lambda d: d["session_id"]) if full_uuid else (lambda d: d["session_id"][:8])
+    sid_col = ColumnSpec("Session", style="cyan", no_wrap=True, min_width=36 if full_uuid else None)
     spec = TableSpec(
         title_template=f"Cross-reference: {file_path.name} ({{n}} edits)",
         columns=[
             ColumnSpec("Timestamp", style="dim", no_wrap=True),
-            ColumnSpec("Session", style="cyan", no_wrap=True),
+            sid_col,
             ColumnSpec("Tool", style="blue"),
             ColumnSpec("Applied", justify="center"),
             ColumnSpec("Snippet"),
         ],
         row_fn=lambda d: [
             d["timestamp"][:19],
-            d["session_id"][:8],
+            sid_fn(d),
             d["tool"],
             "[green]\u2713[/green]" if d["found_in_current"] else "[red]\u2717[/red]",
             d["content_snippet"][:60],
@@ -1725,7 +1774,7 @@ def _do_files_cross_ref(
         plain_fn=lambda d: (
             "{ts}  {sid}  {tool}  {mark}  {snip}".format(
                 ts=d["timestamp"][:19],
-                sid=d["session_id"][:8],
+                sid=sid_fn(d),
                 tool=d["tool"],
                 mark="\u2713" if d["found_in_current"] else "\u2717",
                 snip=d["content_snippet"][:60],
@@ -2147,6 +2196,7 @@ def files_history(
     when: Optional[str] = _OPT_WHEN,
     after: Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
+    full_uuid: bool = _OPT_FULL_UUID,
 ) -> None:
     """Show version history of a source file from Claude Code session data. Read-only by default.
 
@@ -2187,7 +2237,7 @@ def files_history(
     if stdout_mode:
         _do_history_stdout(engine, name, versions=versions)
     else:
-        _do_history_display(engine, name, versions=versions, fmt=fmt)
+        _do_history_display(engine, name, versions=versions, fmt=fmt, full_uuid=full_uuid)
         if export:
             _do_history_export(engine, name, export_dir=export_dir, dry_run=dry_run, versions=versions)
         elif dry_run:
@@ -2201,6 +2251,7 @@ def files_cross_ref(
     file: str = typer.Argument(..., help="Path to a file to compare against session edits (e.g. ./cli.py)."),
     session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to one session (prefix match)."),
     fmt: Optional[str] = _OPT_FORMAT,
+    full_uuid: bool = _OPT_FULL_UUID,
 ) -> None:
     """Show which edits Claude made to a file are present in its current version.
 
@@ -2213,7 +2264,7 @@ def files_cross_ref(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
-    _do_files_cross_ref(engine, file, session, fmt)
+    _do_files_cross_ref(engine, file, session, fmt, full_uuid=full_uuid)
 
 
 # Add 'find' as alias for 'files search' (registered after files_search is defined below)
@@ -2242,6 +2293,7 @@ def _messages_search_cmd(
     when:   Optional[str] = _OPT_WHEN,
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
+    full_uuid: bool = _OPT_FULL_UUID,
 ) -> None:
     """Search conversation messages across all configured session sources.
 
@@ -2265,7 +2317,8 @@ def _messages_search_cmd(
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
     _do_messages_search(engine, q or "", message_type, limit, max_chars, fmt,
-                        tool=tool, context=context, since=since, until=until)
+                        tool=tool, context=context, since=since, until=until,
+                        full_uuid=full_uuid)
 
 
 _register_alias(messages_app, _messages_search_cmd, "search", "find")
@@ -2328,6 +2381,7 @@ def messages_corrections(
             "--pattern 'custom:you broke it'"
         ),
     ),
+    full_uuid: bool = _OPT_FULL_UUID,
 ) -> None:
     """Find user messages where corrections were given to Claude.
 
@@ -2352,7 +2406,7 @@ def messages_corrections(
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
     _do_messages_corrections(engine, project, since, until, limit, fmt,
-                              pattern_overrides=pattern)
+                              pattern_overrides=pattern, full_uuid=full_uuid)
 
 
 @messages_app.command("planning")
@@ -2695,6 +2749,7 @@ def list_sessions(
     before: Optional[str] = _OPT_BEFORE,
     limit: Optional[int] = typer.Option(None, "--limit", help="Max sessions to return. Default: unlimited."),
     fmt: Optional[str] = _OPT_FORMAT,
+    full_uuid: bool = _OPT_FULL_UUID,
 ) -> None:
     """List sessions with metadata.
 
@@ -2706,13 +2761,14 @@ def list_sessions(
         aise list --when 202X                  # all sessions in the 2020s decade
         aise list --since 2026-01 --until 2026-03  # January through March 2026
         aise list --format json                # JSON output
+        aise list --full-uuid                  # show full 36-char session UUIDs
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
-    _do_list_sessions(engine, project, since, until, limit, fmt)
+    _do_list_sessions(engine, project, since, until, limit, fmt, full_uuid=full_uuid)
 
 
 def _root_search_cmd(
@@ -2815,6 +2871,7 @@ def history(
     dry_run: bool = typer.Option(False, "--dry-run", help="With --export: show what would be written without writing."),
     fmt: Optional[str] = _OPT_FORMAT,
     provider: Optional[str] = _OPT_PROVIDER,
+    full_uuid: bool = _OPT_FULL_UUID,
 ) -> None:
     """Show all recorded versions of a file across sessions.
 
@@ -2837,7 +2894,7 @@ def history(
     if stdout_mode:
         _do_history_stdout(engine, name, versions=versions)
     else:
-        _do_history_display(engine, name, versions=versions, fmt=fmt)
+        _do_history_display(engine, name, versions=versions, fmt=fmt, full_uuid=full_uuid)
         if export:
             _do_history_export(engine, name, export_dir=export_dir, dry_run=dry_run, versions=versions)
         elif dry_run:

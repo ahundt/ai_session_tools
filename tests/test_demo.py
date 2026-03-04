@@ -937,14 +937,15 @@ class TestDemoFree:
         assert result.returncode == 0, f"aise stats failed: {result.stderr}"
 
     def test_aise_list_runs(self) -> None:
-        """aise list returns exit code 0 and shows synthetic session IDs."""
+        """aise list returns exit code 0 and shows synthetic session ID prefixes."""
         result = subprocess.run(
             ["aise", "list", "--provider", "claude"],
             env=DEMO_ENV, capture_output=True, text=True,
         )
         assert result.returncode == 0, f"aise list failed: {result.stderr}"
-        assert _S1 in result.stdout or _S6 in result.stdout, \
-            "Expected synthetic session ID in list output"
+        # Default output shows 8-char prefix; use --full-uuid for full UUIDs.
+        assert _S1[:8] in result.stdout or _S6[:8] in result.stdout, \
+            "Expected synthetic session ID prefix in list output"
 
     def test_aise_messages_search_authentication(self) -> None:
         """aise messages search finds 'authentication' in synthetic sessions."""
