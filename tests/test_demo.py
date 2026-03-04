@@ -73,6 +73,14 @@ def pause(seconds: float) -> None:
         time.sleep(seconds)
 
 
+def section(title: str) -> None:
+    """Print a visual section divider with a descriptive title (no act numbers)."""
+    sys.stdout.write(f"\n\033[90m{'─' * 60}\033[0m\n")
+    sys.stdout.write(f"\033[1;96m  {title}\033[0m\n")
+    sys.stdout.write(f"\033[90m{'─' * 60}\033[0m\n\n")
+    sys.stdout.flush()
+
+
 # ── Synthetic Session Data ─────────────────────────────────────────────────────
 
 # Project directory names follow Claude's encoding:
@@ -402,24 +410,46 @@ def create_dated_demo_dir() -> Path:
 
 # ── Demo recording ─────────────────────────────────────────────────────────────
 
-BANNER = r'''
-  ╔══════════════════════════════════════════════════════════════════════╗
-  ║  aise — search & recover Claude Code, AI Studio, Gemini sessions     ║
-  ╠══════════════════════════════════════════════════════════════════════╣
-  ║  Context compacted? Sessions lost? aise gives your history back.     ║
-  ║                                                                      ║
-  ║  Demo shows:                                                         ║
-  ║    1. aise stats              — total sessions, messages, and files  ║
-  ║    2. aise messages search    — recent user messages, last 3 days    ║
-  ║    3. aise list               — sessions across all projects         ║
-  ║    4. aise messages search    — find any past conversation fast      ║
-  ║    5. aise files search       — find files Claude edited most        ║
-  ║    6. aise messages corrections — spot patterns in AI mistakes       ║
-  ║    7. aise messages get       — recover a session (context rescue)   ║
-  ║                                                                      ║
-  ║  Claude Code: /ar:claude-session-tools  (via autorun plugin)         ║
-  ╚══════════════════════════════════════════════════════════════════════╝
-'''
+def _build_banner() -> str:
+    """Build the intro banner with programmatically padded lines to prevent misalignment.
+
+    Uses ljust(W) so adding/editing text never silently breaks the box borders.
+    Inner width W=90 fits well at 160-column terminal width.
+    """
+    W = 90  # visible chars inside box (between the ║ borders)
+
+    def row(text: str = "") -> str:
+        content = " " + text
+        return "  ║" + content.ljust(W) + "║"
+
+    def top() -> str: return "  ╔" + "═" * W + "╗"
+    def sep() -> str: return "  ╠" + "═" * W + "╣"
+    def bot() -> str: return "  ╚" + "═" * W + "╝"
+
+    lines = [
+        "",
+        top(),
+        row("ai_session_tools (aise) — search & recover Claude Code, AI Studio, and Gemini sessions"),
+        sep(),
+        row("Context compacted? Sessions lost? aise gives your history back."),
+        row(),
+        row("Commands shown in this demo:"),
+        row(),
+        row("    aise stats                — sessions, messages, and files at a glance"),
+        row("    aise messages search      — find recent user prompts or any past conversation"),
+        row("    aise list                 — all sessions across every project"),
+        row("    aise files search         — files Claude edited most, by edit count"),
+        row("    aise messages corrections — AI correction patterns, detected automatically"),
+        row("    aise messages get         — recover the full content of any session"),
+        row(),
+        row("  Claude Code: /ar:claude-session-tools  (via autorun: github.com/ahundt/autorun)"),
+        bot(),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+BANNER = _build_banner()
 
 
 def _type(text: str, delay: float = 0.04) -> None:
@@ -474,8 +504,7 @@ def run_demo_acts() -> None:
     PROV = "--provider claude"
 
     # ── Act 1: aise stats ─────────────────────────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 1: Overall statistics\033[0m\n")
-    sys.stdout.flush()
+    section("Statistics — sessions, messages, and files indexed")
     pause(1.5)
     _run(f"aise stats {PROV}")
     pause(5.0)
@@ -484,44 +513,38 @@ def run_demo_acts() -> None:
     # Compute --since dynamically; fixtures were date-shifted by create_dated_demo_dir()
     # so this always catches recent sessions regardless of when the demo is re-recorded.
     since = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
-    sys.stdout.write("\n\033[1;33m## Act 2: Recent user messages\033[0m\n")
-    sys.stdout.flush()
+    section("Recent prompts — your messages to Claude over the last 3 days")
     pause(1.5)
     _run(f"aise messages search '' --type user --since {since} {PROV}")
     pause(5.0)
 
     # ── Act 3: aise list ──────────────────────────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 3: Sessions across projects\033[0m\n")
-    sys.stdout.flush()
+    section("Session list — all sessions across every project")
     pause(1.5)
     _run(f"aise list {PROV}")
     pause(5.0)
 
     # ── Act 4: messages search --context 1 ───────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 4: Full-text search with context\033[0m\n")
-    sys.stdout.flush()
+    section("Message search — find any past conversation instantly")
     pause(1.5)
     _run(f"aise messages search authentication --context 1 {PROV}")
     pause(5.0)
 
     # ── Act 5: files search ────────────────────────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 5: Find frequently edited files\033[0m\n")
-    sys.stdout.flush()
+    section("File history — which files Claude edited most")
     pause(1.5)
     _run(f"aise files search --pattern '*.py' --min-edits 2 {PROV}")
     pause(5.0)
 
     # ── Act 6: messages corrections ───────────────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 6: Spot patterns in AI mistakes\033[0m\n")
-    sys.stdout.flush()
+    section("AI corrections — patterns in mistakes, detected automatically")
     pause(1.5)
     _run(f"aise messages corrections {PROV}")
     pause(6.0)
 
     # ── Act 7: messages get SESSION_ID --limit 10 (context rescue) ────────────
     session_id = get_first_session_id()
-    sys.stdout.write("\n\033[1;33m## Act 7: Recover a session (context rescue)\033[0m\n")
-    sys.stdout.flush()
+    section("Session recovery — restore context from a previous session")
     pause(1.5)
     _run(f"aise messages get {session_id} --limit 10 {PROV}")
     pause(6.0)
@@ -569,7 +592,7 @@ def record(cast_file: Path = CAST_FILE) -> None:
         subprocess.run([
             asciinema, "rec", str(cast_file),
             "--command", cmd,
-            "--window-size", "100x35",
+            "--window-size", "160x48",
             "--capture-env", "TERM,COLORTERM,CLAUDE_CONFIG_DIR",
             "--output-format", "asciicast-v2",
             "--quiet",
@@ -591,12 +614,10 @@ def convert_to_gif(cast_file: Path = CAST_FILE, gif_file: Path = GIF_FILE) -> No
     subprocess.run([
         agg, str(cast_file), str(gif_file),
         "--theme", "dracula",
-        "--font-size", "14",
-        "--renderer", "fontdue",
-        "--cols", "100",
-        "--rows", "35",
-        "--speed", "0.8",
-        "--idle-time-limit", "12",
+        "--font-size", "16",       # readable at 160-col width; agg reads cols/rows from cast
+        "--renderer", "fontdue",   # vector-quality anti-aliased text (vs default bitmap)
+        "--speed", "0.75",
+        "--idle-time-limit", "10",
         "--last-frame-duration", "5",
         "--quiet",
     ], check=True)
