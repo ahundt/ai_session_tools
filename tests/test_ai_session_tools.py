@@ -10673,3 +10673,281 @@ class TestDeepAuditRegressions:
         finally:
             os.chmod(tmp_path, 0o644)
             os.unlink(tmp_path)
+
+
+# ── Round 1: regression tests for 0cc23ea commit ─────────────────────────────
+
+class TestRoundOneRegressions:
+    """Tests for 0cc23ea: column collapse fixes, missing dates, --full-uuid."""
+
+    def test_list_default_shows_8char_prefix(self, tmp_path, monkeypatch):
+        """aise list without --full-uuid shows 8-char session ID prefix, not full UUID."""
+        sid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        _make_session_jsonl(tmp_path, sid, "prefix test")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+        assert sid not in result.output, "Full UUID must not appear without --full-uuid"
+        assert sid[:8] in result.output, "8-char prefix must appear by default"
+
+    def test_git_branch_default_empty_string(self, tmp_path):
+        """get_sessions returns git_branch='' (not 'unknown') when absent from JSONL."""
+        proj = tmp_path / "-Users-test-nob"
+        proj.mkdir(parents=True)
+        sid = "bbbb0001-0000-0000-0000-000000000000"
+        line = json.dumps({"sessionId": sid, "type": "user",
+                           "timestamp": "2026-01-01T10:00:00.000Z",
+                           "message": {"role": "user", "content": "hi"}})
+        (proj / f"{sid}.jsonl").write_text(line)
+        engine = SessionRecoveryEngine(tmp_path, tmp_path / "recovery")
+        sessions = engine.get_sessions()
+        assert sessions, "Expected at least one session"
+        assert sessions[0].git_branch == "", (
+            f"git_branch must be '' when absent; got {sessions[0].git_branch!r}")
+
+    def test_branch_column_suppressed_when_all_empty(self, tmp_path, monkeypatch):
+        """Branch column hidden in table output when all sessions have no git branch."""
+        sid = "cccc0001-0000-0000-0000-000000000000"
+        proj = tmp_path / "-Users-test-nobranch"
+        proj.mkdir(parents=True)
+        line = json.dumps({"sessionId": sid, "type": "user",
+                           "timestamp": "2026-01-01T10:00:00.000Z",
+                           "message": {"role": "user", "content": "test"}})
+        (proj / f"{sid}.jsonl").write_text(line)
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+        assert "Branch" not in result.output, (
+            f"Branch column must be suppressed when empty; output:\n{result.output}")
+
+    def test_mtime_fallback_session_shows_in_list(self, tmp_path, monkeypatch):
+        """Session with no JSONL timestamp appears in aise list via file mtime fallback."""
+        proj = tmp_path / "-Users-test-nomtime"
+        proj.mkdir(parents=True)
+        sid = "dddd0001-0000-0000-0000-000000000000"
+        line = json.dumps({"sessionId": sid, "type": "system",
+                           "message": {"role": "system", "content": "init"}})
+        (proj / f"{sid}.jsonl").write_text(line)
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+        assert sid[:8] in result.output, (
+            f"Session with no timestamp must appear via mtime fallback. Got:\n{result.output}")
+
+    def test_full_uuid_messages_search(self, tmp_path, monkeypatch):
+        """aise messages search QUERY --full-uuid shows full 36-char UUID in Session column."""
+        sid = "eeee0001-0000-0000-0000-000000000000"
+        proj = tmp_path / "-Users-test-fuuidsearch"
+        proj.mkdir(parents=True)
+        line = json.dumps({"sessionId": sid, "type": "user",
+                           "timestamp": "2026-01-01T10:00:00.000Z",
+                           "message": {"role": "user", "content": "uuid test message"}})
+        (proj / f"{sid}.jsonl").write_text(line)
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["messages", "search", "uuid test", "--full-uuid",
+                                     "--format", "plain", "--provider", "claude"])
+        assert result.exit_code == 0
+        assert sid in result.output, (
+            f"Full UUID {sid!r} must appear with --full-uuid --format plain. Got:\n{result.output}")
+
+    def test_full_uuid_messages_corrections(self, tmp_path, monkeypatch):
+        """aise messages corrections --full-uuid shows full 36-char UUIDs."""
+        sid = "ffff0001-0000-0000-0000-000000000000"
+        proj = tmp_path / "-Users-test-fuuidcorr"
+        proj.mkdir(parents=True)
+        line = json.dumps({"sessionId": sid, "type": "user",
+                           "timestamp": "2026-01-01T10:00:00.000Z",
+                           "message": {"role": "user",
+                                       "content": "actually you were wrong about that"}})
+        (proj / f"{sid}.jsonl").write_text(line)
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["messages", "corrections", "--full-uuid",
+                                     "--provider", "claude"])
+        assert result.exit_code == 0
+        assert sid in result.output, (
+            f"Full UUID {sid!r} must appear with --full-uuid. Got:\n{result.output}")
+
+    def test_fmt_default_table_files_search(self, tmp_path, monkeypatch):
+        """aise files search without --format works (fmt=fmt or 'table' fix)."""
+        recovery = tmp_path / "recovery"
+        session_dir = recovery / "session_abc123"
+        session_dir.mkdir(parents=True)
+        (session_dir / "hello.py").write_text("print('hello')")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(recovery))
+        result = runner.invoke(app, ["files", "search", "--provider", "claude"])
+        assert result.exit_code == 0, (
+            f"files search without --format must not crash; got:\n{result.output}\n{result.exception}")
+
+    def test_spec_with_full_uuid_unit(self):
+        """_spec_with_full_uuid wraps spec row_fn to return full session_id."""
+        from ai_session_tools.cli import _spec_with_full_uuid, ColumnSpec, TableSpec
+        orig_spec = TableSpec(
+            title_template="Test ({n})",
+            columns=[ColumnSpec("Session", style="cyan")],
+            row_fn=lambda d: [d["session_id"][:8]],
+        )
+        full_spec = _spec_with_full_uuid(orig_spec, col_idx=0)
+        full_sid = "aaaa0001-bbbb-cccc-dddd-eeeeeeeeeeee"
+        row = full_spec.row_fn({"session_id": full_sid})
+        assert row[0] == full_sid, (
+            f"_spec_with_full_uuid must pass full session_id; got {row[0]!r}")
+        assert full_spec.columns[0].min_width == 36, (
+            f"Wrapped column must have min_width=36; got {full_spec.columns[0].min_width!r}")
+
+    def test_full_uuid_files_history_cli(self, tmp_path, monkeypatch):
+        """aise files history FILE --full-uuid shows full session UUID (not truncated)."""
+        full_sid = "cafe0099-cafe-cafe-cafe-000000000099"
+        recovery = tmp_path / "recovery"
+        vers_dir = recovery / f"session_all_versions_{full_sid}"
+        vers_dir.mkdir(parents=True)
+        (vers_dir / "hello.py_v000001_line_3.txt").write_text("print('v1')\n" * 3)
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path / "projects"))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(recovery))
+        result = runner.invoke(app, ["files", "history", "hello.py", "--full-uuid"])
+        assert result.exit_code == 0, f"files history --full-uuid failed: {result.output}"
+        assert full_sid in result.output, (
+            f"Full UUID {full_sid!r} must appear with --full-uuid. Got:\n{result.output}")
+
+    def test_export_session_markdown_no_unknown_branch(self, tmp_path):
+        """export_session_markdown() must not include 'unknown' for git_branch when absent."""
+        proj = tmp_path / "-Users-test-exportnob"
+        proj.mkdir(parents=True)
+        sid = "gggg0001-0000-0000-0000-000000000000"
+        line = json.dumps({"sessionId": sid, "type": "user",
+                           "timestamp": "2026-01-01T10:00:00.000Z",
+                           "message": {"role": "user", "content": "hello export test"}})
+        (proj / f"{sid}.jsonl").write_text(line)
+        engine = SessionRecoveryEngine(tmp_path, tmp_path / "recovery")
+        md = engine.export_session_markdown(sid)
+        assert "unknown" not in md, (
+            f"export_session_markdown must not show 'unknown' for missing git_branch; got:\n{md[:300]}")
+
+    def test_column_suppression_zero_not_suppressed(self, tmp_path, monkeypatch):
+        """Message count column with '0' values is NOT suppressed (str '0' is truthy)."""
+        for sid, proj_name in [
+            ("hhhh0001-0000-0000-0000-000000000000", "-test-zero-a"),
+            ("hhhh0002-0000-0000-0000-000000000000", "-test-zero-b"),
+        ]:
+            proj = tmp_path / proj_name
+            proj.mkdir(parents=True)
+            line = json.dumps({"sessionId": sid, "type": "system",
+                               "timestamp": "2026-01-01T10:00:00.000Z",
+                               "message": {"role": "system", "content": "init"}})
+            (proj / f"{sid}.jsonl").write_text(line)
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+        assert "Messages" in result.output, (
+            f"Messages column must show even when all 0; got:\n{result.output}")
+
+
+# ── Round 2: TDD tests for Issues 1–6 (fail before fix, pass after) ──────────
+
+class TestRoundTwoPlannedFixes:
+    """TDD tests for Issues 1–6. Fail before fix; pass after."""
+
+    # Issue 1: find alias hidden in help
+
+    def test_find_not_in_aise_help(self):
+        """'find' must not appear as a listed command in aise --help."""
+        import re
+        result = runner.invoke(app, ["--help"])
+        # Typer/Rich help wraps commands in a table: "│ find   description │"
+        # Match the command-name entry (pipe border + spaces + "find" + spaces)
+        assert not re.search(r"[│\s]\s*find\s{2,}", result.output), (
+            f"'find' must be hidden alias, not listed in help:\n{result.output}")
+
+    def test_find_not_in_files_help(self):
+        """'find' must not appear as a listed command in aise files --help."""
+        import re
+        result = runner.invoke(app, ["files", "--help"])
+        assert not re.search(r"[│\s]\s*find\s{2,}", result.output), (
+            f"'find' must be hidden alias in files help:\n{result.output}")
+
+    def test_find_not_in_messages_help(self):
+        """'find' must not appear as a listed command in aise messages --help."""
+        import re
+        result = runner.invoke(app, ["messages", "--help"])
+        assert not re.search(r"[│\s]\s*find\s{2,}", result.output), (
+            f"'find' must be hidden alias in messages help:\n{result.output}")
+
+    def test_find_alias_still_works(self, tmp_path, monkeypatch):
+        """aise messages find QUERY still executes successfully (non-regression)."""
+        proj = tmp_path / "-Users-test-findalias"
+        proj.mkdir(parents=True)
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["messages", "find", "anything", "--provider", "claude"])
+        assert result.exit_code == 0
+
+    # Issue 2: project filter matches underscore → hyphen encoding
+
+    def test_project_filter_underscore_matches_hyphen_dir(self, tmp_path):
+        """engine.get_sessions(project_filter='my_project') matches dir '-Users-x-my-project'."""
+        proj = tmp_path / "-Users-x-my-project"
+        proj.mkdir(parents=True)
+        sid = "aaaa0002-0000-0000-0000-000000000000"
+        line = json.dumps({"sessionId": sid, "type": "user",
+                           "timestamp": "2026-01-01T10:00:00.000Z",
+                           "message": {"role": "user", "content": "hi"},
+                           "cwd": "/Users/x/my_project"})
+        (proj / f"{sid}.jsonl").write_text(line)
+        engine = SessionRecoveryEngine(tmp_path, tmp_path / "recovery")
+        sessions = engine.get_sessions(project_filter="my_project")
+        assert len(sessions) == 1, (
+            f"project_filter='my_project' must match dir '-Users-x-my-project'; got {sessions}")
+
+    def test_project_filter_decoded_last_component(self, tmp_path):
+        """engine.get_sessions(project_filter='myproject') matches decoded last dir component."""
+        proj = tmp_path / "-Users-alice-work-myproject"
+        proj.mkdir(parents=True)
+        sid = "bbbb0002-0000-0000-0000-000000000000"
+        line = json.dumps({"sessionId": sid, "type": "user",
+                           "timestamp": "2026-01-01T10:00:00.000Z",
+                           "message": {"role": "user", "content": "hi"}})
+        (proj / f"{sid}.jsonl").write_text(line)
+        engine = SessionRecoveryEngine(tmp_path, tmp_path / "recovery")
+        sessions = engine.get_sessions(project_filter="myproject")
+        assert len(sessions) == 1, (
+            f"project_filter='myproject' must match decoded name; got {sessions}")
+
+    # Issue 3: ColumnSpec ratio field + _LIST_SPEC Path ratio
+
+    def test_column_spec_has_ratio_field(self):
+        """ColumnSpec dataclass must have a 'ratio' field (Optional[int])."""
+        from ai_session_tools.cli import ColumnSpec
+        import dataclasses
+        fields = {f.name for f in dataclasses.fields(ColumnSpec)}
+        assert "ratio" in fields, f"ColumnSpec must have 'ratio' field; got fields: {fields}"
+
+    def test_list_spec_path_column_has_ratio(self):
+        """_LIST_SPEC Path column must have ratio=4 for proportional width allocation."""
+        from ai_session_tools.cli import _LIST_SPEC
+        path_cols = [c for c in _LIST_SPEC.columns if c.header == "Path"]
+        assert len(path_cols) == 1, f"Expected 1 Path column in _LIST_SPEC; got {path_cols}"
+        assert path_cols[0].ratio == 4, (
+            f"Path column ratio must be 4; got {path_cols[0].ratio!r}")
+
+    # Issue 5: extract help text
+
+    def test_extract_help_mentions_source_file(self):
+        """aise extract --help must mention 'source file'."""
+        result = runner.invoke(app, ["extract", "--help"])
+        assert "source file" in result.output.lower(), (
+            f"extract --help must mention 'source file'; got:\n{result.output}")
+
+    # Issue 6: Compact column header
+
+    def test_list_spec_compact_not_summary(self):
+        """_LIST_SPEC must have a column named 'Compact', not 'Summary'."""
+        from ai_session_tools.cli import _LIST_SPEC
+        headers = [c.header for c in _LIST_SPEC.columns]
+        assert "Compact" in headers, f"_LIST_SPEC must have 'Compact' column; headers: {headers}"
+        assert "Summary" not in headers, f"_LIST_SPEC must not have 'Summary'; headers: {headers}"

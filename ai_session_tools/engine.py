@@ -338,8 +338,13 @@ class SessionRecoveryEngine:
         for project_dir in self.projects_dir.glob("*"):
             if not project_dir.is_dir():
                 continue
-            if project_filter and project_filter.lower() not in project_dir.name.lower():
-                continue
+            if project_filter:
+                pf_raw = project_filter.lower()
+                pf_norm = pf_raw.replace("_", "-")        # ai_session_tools → ai-session-tools
+                decoded = self.extract_project_name(project_dir.name).lower()  # "ai-session-tools"
+                encoded = project_dir.name.lower()         # "-Users-athundt--claude-ai-session-tools"
+                if pf_norm not in encoded and pf_raw not in decoded and pf_norm not in decoded:
+                    continue
             for jsonl_file in project_dir.glob("*.jsonl"):
                 yield project_dir.name, jsonl_file
 

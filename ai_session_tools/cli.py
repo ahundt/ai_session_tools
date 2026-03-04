@@ -498,6 +498,7 @@ class ColumnSpec:
     justify: str = "left"
     overflow: str = "fold"          # Rich overflow mode: fold, crop, ellipsis, ignore
     min_width: Optional[int] = None  # Minimum column width in chars (prevents Rich collapsing)
+    ratio: Optional[int] = None      # Proportional width hint when expand=True (e.g. ratio=4 for wider columns)
 
 
 @dataclass
@@ -566,6 +567,7 @@ def _render_output(
             justify=col.justify,
             overflow=col.overflow,
             min_width=col.min_width,
+            ratio=col.ratio,
         )
     for row in all_rows:
         table.add_row(*[row[i] for i in active])
@@ -598,10 +600,14 @@ _OPT_FULL_UUID = typer.Option(
 )
 
 
-def _register_alias(sub_app: "typer.Typer", func: _Callable, *names: str) -> None:
-    """Register func as a command under each name in names on sub_app."""
-    for name in names:
-        sub_app.command(name)(func)
+def _register_alias(sub_app: "typer.Typer", func: _Callable, *names: str, hidden_after_first: bool = True) -> None:
+    """Register func as a command under each name in names on sub_app.
+
+    The first name is the canonical command shown in --help; all subsequent names
+    are hidden aliases (not listed in help but still functional).
+    """
+    for i, name in enumerate(names):
+        sub_app.command(name, hidden=(hidden_after_first and i > 0))(func)
 
 
 # ── Module-level TableSpec constants ─────────────────────────────────────────
@@ -803,11 +809,11 @@ _LIST_SPEC = TableSpec(
     columns=[
         ColumnSpec("Session", style="cyan", no_wrap=True, min_width=8),    # 8-char prefix (matches _CORRECTIONS_SPEC)
         ColumnSpec("Provider", style="magenta", no_wrap=True),             # source provider
-        ColumnSpec("Path", style="blue"),                                   # cwd or decoded project
+        ColumnSpec("Path", style="blue", ratio=4),                          # cwd or decoded project; ratio=4 ensures proportionally wider column
         ColumnSpec("Branch", style="green"),
         ColumnSpec("Date", style="dim", no_wrap=True, min_width=16),       # "YYYY-MM-DD HH:MM"
         ColumnSpec("Messages", justify="right"),
-        ColumnSpec("Summary", style="dim"),
+        ColumnSpec("Compact", style="dim"),
     ],
     row_fn=lambda d: [
         d["session_id"][:8],                                               # 8-char prefix; full ID via: aise messages get <prefix>
@@ -1259,7 +1265,11 @@ def _do_history_display(
     table.add_column("Lines", justify="right", style="magenta")
     table.add_column("\u0394Lines", justify="right")
     table.add_column("Timestamp", style="dim")
-    table.add_column("Session", style="blue")
+    session_col_kw: dict = {"style": "blue"}
+    if full_uuid:
+        session_col_kw["min_width"] = 36
+        session_col_kw["no_wrap"] = True
+    table.add_column("Session", **session_col_kw)
     for r in rows:
         table.add_row(r["version"], str(r["lines"]), r["delta_lines"], r["timestamp"], r["session"])
     console.print(table)
@@ -1467,8 +1477,9 @@ def _do_messages_search(
         return
 
     formatter = MessageFormatter(max_chars=max_chars)
-    console.print(formatter.format_many(results))
-    console.print(f"\n[bold]Found {len(results)} messages[/bold]")
+    render_console = console if sys.stdout.isatty() else Console(width=120)
+    render_console.print(formatter.format_many(results))
+    render_console.print(f"\n[bold]Found {len(results)} messages[/bold]")
 
 
 def _do_list_sessions(
@@ -2106,8 +2117,8 @@ def files_search(
     _do_files_search(engine, pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, since, until, limit, fmt)
 
 
-# Register 'find' as alias for 'files search'
-files_app.command("find")(files_search)
+# Register 'find' as hidden alias for 'files search'
+files_app.command("find", hidden=True)(files_search)
 
 
 @files_app.command("extract")
@@ -2848,10 +2859,12 @@ def extract(
         help="Show what would be extracted/written without producing any output.",
     ),
 ) -> None:
-    """Extract the latest (or a specific) version of a file from session history.
+    """Extract the latest (or a specific) version of a source file from session history.
 
     Equivalent to 'aise files extract'. Use 'aise search' to find available filenames.
     By default prints the latest version to stdout (pipe-friendly).
+
+    See also: 'aise messages get <session-id>' to retrieve session messages.
     """
     engine = ctx.obj.get("engine") if ctx.obj else None
     if not engine:

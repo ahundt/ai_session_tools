@@ -1032,6 +1032,47 @@ class TestDemoFree:
             assert real_home not in content, \
                 f"Real home directory {real_home} found in synthetic data: {jsonl_file}"
 
+    def test_aise_list_project_filter(self) -> None:
+        """aise list --project webauth finds sessions in the webauth synthetic project."""
+        result = subprocess.run(
+            ["aise", "list", "--project", "webauth", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"aise list --project webauth failed: {result.stderr}"
+        assert _S1[:8] in result.stdout or _S2[:8] in result.stdout, \
+            f"Expected webauth session IDs in output; got:\n{result.stdout}"
+
+    def test_find_not_in_aise_help(self) -> None:
+        """aise --help must not list 'find' as an explicit command (hidden alias)."""
+        result = subprocess.run(
+            ["aise", "--help"], env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert not re.search(r"[│\s]\s*find\s{2,}", result.stdout), \
+            f"'find' must be hidden alias, not listed in aise --help:\n{result.stdout}"
+
+    def test_aise_list_full_uuid(self) -> None:
+        """aise list --full-uuid shows full 36-char UUIDs for synthetic sessions."""
+        result = subprocess.run(
+            ["aise", "list", "--full-uuid", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"aise list --full-uuid failed: {result.stderr}"
+        assert _S1 in result.stdout or _S6 in result.stdout, \
+            f"Expected full UUID in --full-uuid output; got:\n{result.stdout}"
+
+    def test_aise_list_compact_column_header(self) -> None:
+        """aise list must not show old 'Summary' column header (was renamed to 'Compact')."""
+        result = subprocess.run(
+            ["aise", "list", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        # Column may be suppressed when no sessions have compact summaries, but the old
+        # name 'Summary' must never appear. The rename is unit-verified by test_list_spec_compact_not_summary.
+        assert "Summary" not in result.stdout, \
+            f"Old 'Summary' column header must not appear (renamed to 'Compact'); got:\n{result.stdout}"
+
 
 # ── Main entrypoint ────────────────────────────────────────────────────────────
 
