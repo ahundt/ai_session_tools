@@ -1,0 +1,736 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Demo harness for ai_session_tools (aise CLI).
+
+Dual purpose:
+  Standalone: python tests/test_demo.py --record   # record asciinema + produce GIF/MP4
+              python tests/test_demo.py --verify   # verify recording tool calls
+  Pytest:     pytest tests/test_demo.py::TestDemoFree    # always safe, no cost
+
+PRIVACY: The demo uses ONLY synthetic session data in /tmp/aise-demo/.
+No real ~/.claude session data is ever read or recorded.
+The synthetic data contains generic dev conversations with no personal information.
+
+Usage:
+  # First time or to regenerate:
+  python tests/test_demo.py --record
+
+  # Convert to GIF only (cast already exists):
+  python tests/test_demo.py --gif-only
+
+  # Verify the recording captured expected commands:
+  python tests/test_demo.py --verify
+
+Dependencies:
+  asciinema   brew install asciinema
+  agg         brew install agg
+  ffmpeg      brew install ffmpeg
+
+Output files (gitignored):
+  demo.cast   raw asciinema recording
+  demo.gif    animated GIF
+  demo.mp4    MP4 video
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+
+DEMO_DIR = Path(__file__).parent / "aise-demo"
+PROJECTS_DIR = DEMO_DIR / "projects"
+OUTPUT_DIR = Path(__file__).parent.parent  # repo root
+CAST_FILE = OUTPUT_DIR / "demo.cast"
+GIF_FILE  = OUTPUT_DIR / "demo.gif"
+MP4_FILE  = OUTPUT_DIR / "demo.mp4"
+
+# Set CLAUDE_CONFIG_DIR so aise uses committed fixture data, never ~/.claude
+DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(DEMO_DIR)}
+
+# Whether to add typing delays and pauses (True when recording, False in tests)
+_TIMED = False
+
+
+def pause(seconds: float) -> None:
+    """Sleep only when recording (timing mode enabled)."""
+    if _TIMED:
+        time.sleep(seconds)
+
+
+# ── Synthetic Session Data ─────────────────────────────────────────────────────
+
+# Project directory names follow Claude's encoding:
+# /Users/demo/<project> → -Users-demo-<project>
+# The demo user is called "demo" so no real username appears in paths.
+
+_S1 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000001"))
+_S2 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000002"))
+_S3 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000003"))
+_S4 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000004"))
+_S5 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000005"))
+_S6 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000006"))
+
+def _msg(session_id: str, role: str, content, timestamp: str,
+         cwd: str | None = None, git_branch: str | None = None) -> str:
+    """Build a single JSONL record."""
+    obj: dict = {
+        "sessionId": session_id,
+        "type": role,
+        "timestamp": timestamp,
+        "message": {
+            "role": role,
+            "content": content,
+        },
+    }
+    if cwd:
+        obj["cwd"] = cwd
+    if git_branch:
+        obj["gitBranch"] = git_branch
+    return json.dumps(obj)
+
+
+def _tool_write(session_id: str, timestamp: str, file_path: str, content: str,
+                cwd: str | None = None) -> str:
+    """Build an assistant JSONL record containing a Write tool call."""
+    return _msg(
+        session_id, "assistant",
+        [{"type": "tool_use", "id": f"t-{uuid.uuid4().hex[:8]}", "name": "Write",
+          "input": {"file_path": file_path, "content": content}}],
+        timestamp, cwd,
+    )
+
+
+def _tool_edit(session_id: str, timestamp: str, file_path: str,
+               old_string: str, new_string: str, cwd: str | None = None) -> str:
+    """Build an assistant JSONL record containing an Edit tool call."""
+    return _msg(
+        session_id, "assistant",
+        [{"type": "tool_use", "id": f"t-{uuid.uuid4().hex[:8]}", "name": "Edit",
+          "input": {"file_path": file_path,
+                    "old_string": old_string, "new_string": new_string}}],
+        timestamp, cwd,
+    )
+
+
+def _tool_bash(session_id: str, timestamp: str, command: str,
+               cwd: str | None = None) -> str:
+    """Build an assistant JSONL record containing a Bash tool call."""
+    return _msg(
+        session_id, "assistant",
+        [{"type": "tool_use", "id": f"t-{uuid.uuid4().hex[:8]}", "name": "Bash",
+          "input": {"command": command, "description": command[:60]}}],
+        timestamp, cwd,
+    )
+
+
+# ── Project 1: webauth — authentication and API ───────────────────────────────
+
+_WEB_CWD = "/Users/demo/webauth"
+_WEB_PROJ = "-Users-demo-webauth"
+
+_WEB_SESSION_1 = [
+    _msg(_S1, "user",
+         "I need to implement JWT authentication for the web app. "
+         "Can you create an auth module with login, logout, and token validation?",
+         "2026-02-10T09:00:00.000Z", _WEB_CWD, "main"),
+    _msg(_S1, "assistant",
+         "I'll create a JWT authentication module with login, logout, and token validation.",
+         "2026-02-10T09:00:10.000Z", _WEB_CWD),
+    _tool_write(_S1, "2026-02-10T09:00:15.000Z",
+                f"{_WEB_CWD}/auth/jwt.py",
+                "\"\"\"JWT authentication utilities.\"\"\"\nimport jwt\nimport time\n\nSECRET = 'change-in-production'\nALGORITHM = 'HS256'\n\ndef create_token(user_id: str, expires_in: int = 3600) -> str:\n    payload = {'sub': user_id, 'exp': time.time() + expires_in}\n    return jwt.encode(payload, SECRET, algorithm=ALGORITHM)\n\ndef verify_token(token: str) -> dict | None:\n    try:\n        return jwt.decode(token, SECRET, algorithms=[ALGORITHM])\n    except jwt.ExpiredSignatureError:\n        return None\n    except jwt.InvalidTokenError:\n        return None\n",
+                _WEB_CWD),
+    _msg(_S1, "user",
+         "Great! Now add a login endpoint that validates credentials and returns a token.",
+         "2026-02-10T09:05:00.000Z", _WEB_CWD, "main"),
+    _tool_write(_S1, "2026-02-10T09:05:30.000Z",
+                f"{_WEB_CWD}/auth/routes.py",
+                "\"\"\"Authentication route handlers.\"\"\"\nfrom flask import Blueprint, request, jsonify\nfrom .jwt import create_token, verify_token\nfrom .models import User\n\nauth_bp = Blueprint('auth', __name__, url_prefix='/auth')\n\n@auth_bp.route('/login', methods=['POST'])\ndef login():\n    data = request.get_json()\n    user = User.query.filter_by(email=data.get('email')).first()\n    if user and user.check_password(data.get('password')):\n        token = create_token(str(user.id))\n        return jsonify({'token': token, 'expires_in': 3600})\n    return jsonify({'error': 'Invalid credentials'}), 401\n\n@auth_bp.route('/logout', methods=['POST'])\ndef logout():\n    # Token invalidation handled client-side\n    return jsonify({'message': 'Logged out successfully'})\n",
+                _WEB_CWD),
+    _msg(_S1, "user",
+         "Please add unit tests for the JWT functions.",
+         "2026-02-10T09:10:00.000Z", _WEB_CWD, "main"),
+    _tool_write(_S1, "2026-02-10T09:10:45.000Z",
+                f"{_WEB_CWD}/tests/test_auth.py",
+                "\"\"\"Tests for JWT authentication module.\"\"\"\nimport pytest\nfrom auth.jwt import create_token, verify_token\n\ndef test_create_token_returns_string():\n    token = create_token('user-123')\n    assert isinstance(token, str)\n    assert len(token) > 0\n\ndef test_verify_valid_token():\n    token = create_token('user-42')\n    payload = verify_token(token)\n    assert payload is not None\n    assert payload['sub'] == 'user-42'\n\ndef test_verify_invalid_token_returns_none():\n    result = verify_token('not-a-real-token')\n    assert result is None\n",
+                _WEB_CWD),
+    _msg(_S1, "assistant",
+         "I've created the test file with three test cases covering token creation, "
+         "valid token verification, and invalid token handling.",
+         "2026-02-10T09:11:00.000Z", _WEB_CWD),
+]
+
+_WEB_SESSION_2 = [
+    _msg(_S2, "user",
+         "The authentication middleware is returning 403 for valid tokens. "
+         "Can you investigate and fix the issue?",
+         "2026-02-20T14:00:00.000Z", _WEB_CWD, "fix/auth-middleware"),
+    _msg(_S2, "assistant",
+         "I'll investigate the authentication middleware issue. Let me check the token verification logic.",
+         "2026-02-20T14:00:10.000Z", _WEB_CWD),
+    _tool_bash(_S2, "2026-02-20T14:00:15.000Z",
+               "grep -n 'verify_token\\|check_auth' /Users/demo/webauth/middleware.py",
+               _WEB_CWD),
+    _msg(_S2, "assistant",
+         "Found the issue — the middleware is checking token expiry with the wrong timezone. "
+         "The verify_token function uses UTC but the middleware compares against local time.",
+         "2026-02-20T14:01:00.000Z", _WEB_CWD),
+    _tool_edit(_S2, "2026-02-20T14:01:30.000Z",
+               f"{_WEB_CWD}/auth/jwt.py",
+               "exp': time.time() + expires_in",
+               "exp': time.time() + expires_in  # UTC timestamp",
+               _WEB_CWD),
+    _tool_edit(_S2, "2026-02-20T14:01:45.000Z",
+               f"{_WEB_CWD}/middleware.py",
+               "if current_time > payload['exp']:",
+               "if time.time() > payload['exp']:  # compare UTC",
+               _WEB_CWD),
+    _msg(_S2, "user",
+         "Also update the tests to cover the timezone fix.",
+         "2026-02-20T14:05:00.000Z", _WEB_CWD, "fix/auth-middleware"),
+    _tool_edit(_S2, "2026-02-20T14:05:30.000Z",
+               f"{_WEB_CWD}/tests/test_auth.py",
+               "def test_verify_invalid_token_returns_none():",
+               "def test_expired_token_returns_none():\n    token = create_token('user-1', expires_in=-1)\n    assert verify_token(token) is None\n\ndef test_verify_invalid_token_returns_none():",
+               _WEB_CWD),
+    _msg(_S2, "assistant",
+         "Fixed the timezone issue and added a test for expired tokens. "
+         "The authentication middleware should now work correctly.",
+         "2026-02-20T14:06:00.000Z", _WEB_CWD),
+]
+
+# ── Project 2: datapipe — ETL and processing ─────────────────────────────────
+
+_DATA_CWD = "/Users/demo/datapipe"
+_DATA_PROJ = "-Users-demo-datapipe"
+
+_DATA_SESSION_3 = [
+    _msg(_S3, "user",
+         "I need to build a data processing pipeline that reads CSV files, "
+         "validates the schema, transforms records, and writes output to parquet.",
+         "2026-02-15T10:00:00.000Z", _DATA_CWD, "main"),
+    _msg(_S3, "assistant",
+         "I'll build a data processing pipeline with CSV input, schema validation, "
+         "transformation, and parquet output.",
+         "2026-02-15T10:00:15.000Z", _DATA_CWD),
+    _tool_write(_S3, "2026-02-15T10:01:00.000Z",
+                f"{_DATA_CWD}/pipeline/reader.py",
+                "\"\"\"CSV reader with schema validation.\"\"\"\nimport pandas as pd\nfrom pathlib import Path\n\nREQUIRED_COLUMNS = ['id', 'timestamp', 'value', 'category']\n\ndef read_csv(path: str | Path) -> pd.DataFrame:\n    df = pd.read_csv(path)\n    missing = set(REQUIRED_COLUMNS) - set(df.columns)\n    if missing:\n        raise ValueError(f'Missing required columns: {missing}')\n    return df\n",
+                _DATA_CWD),
+    _tool_write(_S3, "2026-02-15T10:02:00.000Z",
+                f"{_DATA_CWD}/pipeline/transformer.py",
+                "\"\"\"Data transformation functions.\"\"\"\nimport pandas as pd\n\ndef normalize_timestamps(df: pd.DataFrame) -> pd.DataFrame:\n    df = df.copy()\n    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)\n    return df\n\ndef filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:\n    return df[df['value'].notna() & (df['value'] > 0)]\n\ndef transform(df: pd.DataFrame) -> pd.DataFrame:\n    df = normalize_timestamps(df)\n    df = filter_valid_records(df)\n    df['year'] = df['timestamp'].dt.year\n    df['month'] = df['timestamp'].dt.month\n    return df\n",
+                _DATA_CWD),
+    _tool_write(_S3, "2026-02-15T10:03:00.000Z",
+                f"{_DATA_CWD}/pipeline/writer.py",
+                "\"\"\"Parquet writer for processed data.\"\"\"\nimport pandas as pd\nfrom pathlib import Path\n\ndef write_parquet(df: pd.DataFrame, output_path: str | Path, partition_cols: list[str] | None = None) -> None:\n    output_path = Path(output_path)\n    output_path.parent.mkdir(parents=True, exist_ok=True)\n    if partition_cols:\n        df.to_parquet(output_path, partition_cols=partition_cols, index=False)\n    else:\n        df.to_parquet(output_path, index=False)\n",
+                _DATA_CWD),
+    _msg(_S3, "user",
+         "Add a main pipeline script that ties these together.",
+         "2026-02-15T10:10:00.000Z", _DATA_CWD, "main"),
+    _tool_write(_S3, "2026-02-15T10:10:30.000Z",
+                f"{_DATA_CWD}/run_pipeline.py",
+                "#!/usr/bin/env python3\n\"\"\"Main data processing pipeline.\"\"\"\nimport argparse\nfrom pipeline.reader import read_csv\nfrom pipeline.transformer import transform\nfrom pipeline.writer import write_parquet\n\ndef main() -> None:\n    parser = argparse.ArgumentParser(description='Process CSV data to parquet')\n    parser.add_argument('input', help='Input CSV file path')\n    parser.add_argument('output', help='Output parquet file path')\n    parser.add_argument('--partition', nargs='+', help='Partition columns')\n    args = parser.parse_args()\n\n    print(f'Reading: {args.input}')\n    df = read_csv(args.input)\n    print(f'Loaded {len(df)} records')\n    df = transform(df)\n    print(f'After transform: {len(df)} valid records')\n    write_parquet(df, args.output, partition_cols=args.partition)\n    print(f'Written to: {args.output}')\n\nif __name__ == '__main__':\n    main()\n",
+                _DATA_CWD),
+]
+
+_DATA_SESSION_4 = [
+    _msg(_S4, "user",
+         "The pipeline is failing on records with null category values. "
+         "Can you add better null handling to the transformer?",
+         "2026-02-25T11:00:00.000Z", _DATA_CWD, "fix/null-handling"),
+    _msg(_S4, "assistant",
+         "I'll add null handling to the transformer to handle missing category values gracefully.",
+         "2026-02-25T11:00:10.000Z", _DATA_CWD),
+    _tool_edit(_S4, "2026-02-25T11:01:00.000Z",
+               f"{_DATA_CWD}/pipeline/transformer.py",
+               "def filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:\n    return df[df['value'].notna() & (df['value'] > 0)]",
+               "def filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:\n    df = df.copy()\n    df['category'] = df['category'].fillna('unknown')\n    return df[df['value'].notna() & (df['value'] > 0)]",
+               _DATA_CWD),
+    _tool_write(_S4, "2026-02-25T11:02:00.000Z",
+                f"{_DATA_CWD}/tests/test_transformer.py",
+                "\"\"\"Tests for data transformation functions.\"\"\"\nimport pytest\nimport pandas as pd\nfrom pipeline.transformer import filter_valid_records, transform\n\ndef test_null_category_filled_with_unknown():\n    df = pd.DataFrame({'id': [1], 'timestamp': ['2026-01-01'], 'value': [10.0], 'category': [None]})\n    result = filter_valid_records(df)\n    assert result['category'].iloc[0] == 'unknown'\n\ndef test_negative_values_filtered():\n    df = pd.DataFrame({'id': [1, 2], 'timestamp': ['2026-01-01', '2026-01-01'],\n                       'value': [-5.0, 10.0], 'category': ['A', 'B']})\n    result = filter_valid_records(df)\n    assert len(result) == 1\n    assert result['value'].iloc[0] == 10.0\n",
+                _DATA_CWD),
+    _msg(_S4, "assistant",
+         "Added null handling for category values and wrote tests to verify the fix.",
+         "2026-02-25T11:03:00.000Z", _DATA_CWD),
+]
+
+# ── Project 3: mlresearch — model training ────────────────────────────────────
+
+_ML_CWD = "/Users/demo/mlresearch"
+_ML_PROJ = "-Users-demo-mlresearch"
+
+_ML_SESSION_5 = [
+    _msg(_S5, "user",
+         "Set up a training script for a text classification model using scikit-learn.",
+         "2026-02-18T09:00:00.000Z", _ML_CWD, "main"),
+    _tool_write(_S5, "2026-02-18T09:01:00.000Z",
+                f"{_ML_CWD}/train.py",
+                "\"\"\"Text classification training script.\"\"\"\nfrom sklearn.feature_extraction.text import TfidfVectorizer\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import classification_report\nimport joblib\n\ndef train(texts: list[str], labels: list[str], output_path: str = 'model.pkl') -> None:\n    X_train, X_test, y_train, y_test = train_test_split(texts, labels, test_size=0.2)\n    vec = TfidfVectorizer(max_features=10000, ngram_range=(1, 2))\n    X_train_vec = vec.fit_transform(X_train)\n    X_test_vec = vec.transform(X_test)\n    clf = LogisticRegression(max_iter=1000)\n    clf.fit(X_train_vec, y_train)\n    y_pred = clf.predict(X_test_vec)\n    print(classification_report(y_test, y_pred))\n    joblib.dump({'vectorizer': vec, 'classifier': clf}, output_path)\n    print(f'Saved model to {output_path}')\n",
+                _ML_CWD),
+    _tool_write(_S5, "2026-02-18T09:02:00.000Z",
+                f"{_ML_CWD}/predict.py",
+                "\"\"\"Prediction script for text classifier.\"\"\"\nimport joblib\n\ndef load_model(path: str = 'model.pkl') -> dict:\n    return joblib.load(path)\n\ndef predict(model: dict, texts: list[str]) -> list[str]:\n    X = model['vectorizer'].transform(texts)\n    return model['classifier'].predict(X).tolist()\n",
+                _ML_CWD),
+    _msg(_S5, "user",
+         "Add experiment tracking with MLflow.",
+         "2026-02-18T09:15:00.000Z", _ML_CWD, "main"),
+    _tool_edit(_S5, "2026-02-18T09:16:00.000Z",
+               f"{_ML_CWD}/train.py",
+               "import joblib",
+               "import joblib\nimport mlflow",
+               _ML_CWD),
+    _tool_edit(_S5, "2026-02-18T09:16:30.000Z",
+               f"{_ML_CWD}/train.py",
+               "def train(texts: list[str], labels: list[str], output_path: str = 'model.pkl') -> None:",
+               "def train(texts: list[str], labels: list[str], output_path: str = 'model.pkl') -> None:\n    mlflow.start_run()",
+               _ML_CWD),
+]
+
+_ML_SESSION_6 = [
+    _msg(_S6, "user",
+         "I want to add cross-validation to get more reliable accuracy estimates. "
+         "Also add authentication to the model API endpoint.",
+         "2026-03-01T10:00:00.000Z", _ML_CWD, "feature/cv"),
+    _tool_write(_S6, "2026-03-01T10:01:00.000Z",
+                f"{_ML_CWD}/evaluate.py",
+                "\"\"\"Model evaluation with cross-validation.\"\"\"\nfrom sklearn.model_selection import cross_val_score\nfrom sklearn.feature_extraction.text import TfidfVectorizer\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.pipeline import Pipeline\n\ndef cross_validate(texts: list[str], labels: list[str], cv: int = 5) -> dict:\n    pipeline = Pipeline([\n        ('tfidf', TfidfVectorizer(max_features=10000, ngram_range=(1, 2))),\n        ('clf', LogisticRegression(max_iter=1000)),\n    ])\n    scores = cross_val_score(pipeline, texts, labels, cv=cv, scoring='f1_macro')\n    return {'mean_f1': scores.mean(), 'std_f1': scores.std(), 'cv_scores': scores.tolist()}\n",
+                _ML_CWD),
+    _tool_write(_S6, "2026-03-01T10:05:00.000Z",
+                f"{_ML_CWD}/api/auth.py",
+                "\"\"\"API key authentication for model endpoint.\"\"\"\nfrom functools import wraps\nfrom flask import request, jsonify\nimport hmac\nimport os\n\nAPI_KEY = os.environ.get('MODEL_API_KEY', 'dev-key-change-in-prod')\n\ndef require_api_key(f):\n    @wraps(f)\n    def decorated(*args, **kwargs):\n        key = request.headers.get('X-API-Key')\n        if not key or not hmac.compare_digest(key, API_KEY):\n            return jsonify({'error': 'Unauthorized'}), 401\n        return f(*args, **kwargs)\n    return decorated\n",
+                _ML_CWD),
+    _msg(_S6, "assistant",
+         "Added cross-validation evaluation and API key authentication for the model endpoint.",
+         "2026-03-01T10:06:00.000Z", _ML_CWD),
+]
+
+# ── Data generator ─────────────────────────────────────────────────────────────
+
+def create_synthetic_data() -> None:
+    """Create synthetic session data in DEMO_DIR. Idempotent."""
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    sessions = [
+        (_WEB_PROJ,  _S1, _WEB_SESSION_1),
+        (_WEB_PROJ,  _S2, _WEB_SESSION_2),
+        (_DATA_PROJ, _S3, _DATA_SESSION_3),
+        (_DATA_PROJ, _S4, _DATA_SESSION_4),
+        (_ML_PROJ,   _S5, _ML_SESSION_5),
+        (_ML_PROJ,   _S6, _ML_SESSION_6),
+    ]
+
+    for proj_dir, session_id, messages in sessions:
+        proj_path = PROJECTS_DIR / proj_dir
+        proj_path.mkdir(parents=True, exist_ok=True)
+        session_file = proj_path / f"{session_id}.jsonl"
+        session_file.write_text("\n".join(messages) + "\n")
+
+
+def cleanup_synthetic_data() -> None:
+    """Remove synthetic data directory."""
+    if DEMO_DIR.exists():
+        shutil.rmtree(DEMO_DIR)
+
+
+# ── Demo recording ─────────────────────────────────────────────────────────────
+
+BANNER = r'''
+  ╔══════════════════════════════════════════════════════════════════════╗
+  ║  ai_session_tools (aise) — search & analyze AI coding sessions      ║
+  ╠══════════════════════════════════════════════════════════════════════╣
+  ║  Works with Claude Code, AI Studio, and Gemini CLI sessions.        ║
+  ║                                                                      ║
+  ║  Demo shows:                                                         ║
+  ║    1. aise stats        — session statistics overview               ║
+  ║    2. aise list         — recent sessions across projects           ║
+  ║    3. messages search   — find conversations by topic               ║
+  ║    4. files search      — find frequently edited files              ║
+  ║    5. messages inspect  — deep-dive into a session                  ║
+  ║    6. stats --format json  — programmatic JSON output               ║
+  ╚══════════════════════════════════════════════════════════════════════╝
+'''
+
+
+def _type(text: str, delay: float = 0.04) -> None:
+    """Write text to stdout character by character with typing effect."""
+    if _TIMED:
+        for ch in text:
+            sys.stdout.write(ch)
+            sys.stdout.flush()
+            time.sleep(delay)
+    else:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+def _run(cmd: str, show_prompt: bool = True) -> subprocess.CompletedProcess:
+    """Print a shell prompt + command (with typing effect), then run it via shell."""
+    if show_prompt:
+        _type("\n\033[1;32m$\033[0m ", delay=0)
+        _type(cmd + "\n", delay=0.045)
+        pause(0.3)
+    # Use shell=True so glob patterns like *.py and quotes work naturally
+    result = subprocess.run(
+        cmd,
+        env=DEMO_ENV,
+        shell=True,
+        capture_output=False,   # let output flow to terminal (captured by asciinema)
+        text=True,
+    )
+    return result
+
+
+def get_first_session_id() -> str:
+    """Return the session ID of the most recent session in synthetic data."""
+    # Session 6 (ml-experiments) has the most recent timestamp (2026-03-01)
+    return _S6
+
+
+def run_demo_acts() -> None:
+    """Execute all demo acts in order. Call this inside the asciinema recording."""
+    # ── Act 0: Intro banner ────────────────────────────────────────────────────
+    sys.stdout.write("\033[H\033[2J")   # clear screen
+    sys.stdout.flush()
+    pause(0.2)
+    for line in BANNER.splitlines():
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+        pause(0.05)
+    pause(8.0)   # let viewers read all items
+
+    # All commands use --provider claude to show only synthetic demo sessions,
+    # preventing any real session data from the user's system from appearing.
+    PROV = "--provider claude"
+
+    # ── Act 1: aise stats ─────────────────────────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 1: Overall statistics\033[0m\n")
+    sys.stdout.flush()
+    pause(1.5)
+    _run(f"aise stats {PROV}")
+    pause(5.0)
+
+    # ── Act 2: aise list --since 30d ──────────────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 2: Recent sessions\033[0m\n")
+    sys.stdout.flush()
+    pause(1.5)
+    _run(f"aise list --since 30d {PROV}")
+    pause(5.0)
+
+    # ── Act 3: messages search ────────────────────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 3: Search conversations\033[0m\n")
+    sys.stdout.flush()
+    pause(1.5)
+    _run(f"aise messages search authentication {PROV}")
+    pause(5.0)
+
+    # ── Act 4: files search ────────────────────────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 4: Find frequently edited files\033[0m\n")
+    sys.stdout.flush()
+    pause(1.5)
+    _run(f"aise files search --pattern '*.py' --min-edits 2 {PROV}")
+    pause(5.0)
+
+    # ── Act 5: messages inspect ───────────────────────────────────────────────
+    session_id = get_first_session_id()
+    sys.stdout.write("\n\033[1;33m## Act 5: Inspect a session\033[0m\n")
+    sys.stdout.flush()
+    pause(1.5)
+    _run(f"aise messages inspect {session_id} {PROV}")
+    pause(6.0)
+
+    # ── Act 6: stats --format json ────────────────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 6: JSON output for scripting\033[0m\n")
+    sys.stdout.flush()
+    pause(1.5)
+    _run(f"aise stats --format json {PROV}")
+    pause(4.0)
+
+    sys.stdout.write("\n\033[1;32m  Done! Install: pip install ai-session-tools\033[0m\n\n")
+    sys.stdout.flush()
+    pause(4.0)
+
+
+# ── Recording pipeline ─────────────────────────────────────────────────────────
+
+def record(cast_file: Path = CAST_FILE) -> None:
+    """Record the demo with asciinema."""
+    asciinema = shutil.which("asciinema")
+    if not asciinema:
+        sys.exit("asciinema not found. Install: brew install asciinema")
+
+    create_synthetic_data()
+    print(f"Synthetic data created in {DEMO_DIR}")
+
+    # Remove existing cast so we always get a fresh recording
+    if cast_file.exists():
+        cast_file.unlink()
+    cast_file.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Recording to {cast_file} ...")
+
+    # asciinema v3 API: --command, --window-size COLSxROWS, --capture-env
+    # Use asciicast-v2 format for compatibility with agg 1.7.0
+    cmd = f"{sys.executable} {__file__} --run-acts"
+    subprocess.run([
+        asciinema, "rec", str(cast_file),
+        "--command", cmd,
+        "--window-size", "100x35",
+        "--capture-env", "TERM,COLORTERM,CLAUDE_CONFIG_DIR",
+        "--output-format", "asciicast-v2",
+        "--quiet",
+    ], env=DEMO_ENV, check=True)
+    print(f"Recording saved to {cast_file}")
+
+
+def convert_to_gif(cast_file: Path = CAST_FILE, gif_file: Path = GIF_FILE) -> None:
+    """Convert .cast → .gif using agg."""
+    agg = shutil.which("agg")
+    if not agg:
+        print("[demo] agg not found — GIF skipped")
+        print("[demo] Install: brew install agg")
+        return
+    print(f"Converting to GIF: {gif_file} ...")
+    subprocess.run([
+        agg, str(cast_file), str(gif_file),
+        "--theme", "dracula",
+        "--font-size", "14",
+        "--renderer", "fontdue",
+        "--cols", "100",
+        "--rows", "35",
+        "--speed", "0.8",
+        "--idle-time-limit", "12",
+        "--last-frame-duration", "5",
+    ], check=True)
+    print(f"GIF saved to {gif_file}")
+
+
+def convert_to_mp4(gif_file: Path = GIF_FILE, mp4_file: Path = MP4_FILE) -> None:
+    """Convert .gif → .mp4 using ffmpeg. Tries hardware accel first, then software."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        print("[demo] ffmpeg not found — MP4 skipped")
+        return
+    print(f"Converting to MP4: {mp4_file} ...")
+
+    vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    # Try hardware acceleration (Apple Silicon), then libx264, then bare default
+    encoders = [
+        ["-c:v", "h264_videotoolbox", "-b:v", "8M", "-color_range", "tv"],
+        ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p"],
+        ["-pix_fmt", "yuv420p"],
+    ]
+    for enc_flags in encoders:
+        result = subprocess.run(
+            [ffmpeg, "-y", "-i", str(gif_file), "-movflags", "faststart",
+             "-vf", vf, *enc_flags, str(mp4_file)],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            print(f"MP4 saved to {mp4_file}")
+            return
+    print("[demo] All ffmpeg encoders failed — MP4 skipped")
+
+
+# ── Verification ───────────────────────────────────────────────────────────────
+
+def verify_recording(cast_file: Path = CAST_FILE) -> bool:
+    """Parse the asciinema cast to verify expected content appeared."""
+    if not cast_file.exists():
+        print(f"Cast file not found: {cast_file}")
+        return False
+
+    content = cast_file.read_text()
+    # Check for text that appears in command OUTPUT (not typed chars, which are split across events)
+    checks = [
+        ("total_sessions",     "Act 1: stats command output"),
+        ("cafe0001",           "Act 2: list shows synthetic session UUIDs"),
+        ("authentication",     "Act 3: message search output"),
+        (".py",                "Act 4: files search shows Python files"),
+        ("messages",           "Act 5: session inspect"),
+        ("total_sessions",     "Act 6: JSON output"),
+    ]
+    passed = 0
+    for fragment, description in checks:
+        if fragment in content:
+            print(f"  ✓ {description}")
+            passed += 1
+        else:
+            print(f"  ✗ {description} — '{fragment}' not found in cast")
+    print(f"\nVerification: {passed}/{len(checks)} checks passed")
+    return passed == len(checks)
+
+
+# ── pytest-compatible free tests ──────────────────────────────────────────────
+
+class TestDemoFree:
+    """No-cost tests — verify committed fixture data and aise commands work correctly.
+
+    Fixtures live in tests/aise-demo/ (committed to the repo, ~32 KB).
+    No per-test setup/teardown needed — create_synthetic_data() is idempotent
+    and can regenerate fixtures with: python tests/test_demo.py --setup
+    """
+
+    def test_synthetic_data_created(self) -> None:
+        """Verify synthetic data directory structure is correct."""
+        assert PROJECTS_DIR.exists()
+        proj_dirs = list(PROJECTS_DIR.iterdir())
+        assert len(proj_dirs) == 3, f"Expected 3 projects, got {len(proj_dirs)}"
+        for proj in [_WEB_PROJ, _DATA_PROJ, _ML_PROJ]:
+            assert (PROJECTS_DIR / proj).exists(), f"Missing project dir: {proj}"
+
+    def test_synthetic_sessions_valid_jsonl(self) -> None:
+        """All synthetic session files contain valid JSONL with required fields."""
+        for jsonl_file in PROJECTS_DIR.rglob("*.jsonl"):
+            for i, line in enumerate(jsonl_file.read_text().splitlines()):
+                if not line.strip():
+                    continue
+                obj = json.loads(line)
+                assert "sessionId" in obj, f"{jsonl_file}:{i}: missing sessionId"
+                assert "type" in obj, f"{jsonl_file}:{i}: missing type"
+                assert "timestamp" in obj, f"{jsonl_file}:{i}: missing timestamp"
+                assert "message" in obj, f"{jsonl_file}:{i}: missing message"
+
+    def test_aise_stats_runs(self) -> None:
+        """aise stats returns exit code 0 with synthetic data."""
+        result = subprocess.run(
+            ["aise", "stats", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"aise stats failed: {result.stderr}"
+
+    def test_aise_list_runs(self) -> None:
+        """aise list returns exit code 0 and shows synthetic session IDs."""
+        result = subprocess.run(
+            ["aise", "list", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"aise list failed: {result.stderr}"
+        assert _S1 in result.stdout or _S6 in result.stdout, \
+            "Expected synthetic session ID in list output"
+
+    def test_aise_messages_search_authentication(self) -> None:
+        """aise messages search finds 'authentication' in synthetic sessions."""
+        result = subprocess.run(
+            ["aise", "messages", "search", "authentication", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"search failed: {result.stderr}"
+        # The word "authentication" appears in sessions S1, S2, S6
+        assert "authentication" in result.stdout.lower(), \
+            "Expected 'authentication' in search results"
+
+    def test_aise_files_search_python(self) -> None:
+        """aise files search finds Python files in synthetic sessions."""
+        result = subprocess.run(
+            ["aise", "files", "search", "--pattern", "*.py", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"files search failed: {result.stderr}"
+
+    def test_aise_messages_inspect_runs(self) -> None:
+        """aise messages inspect runs for a known session ID."""
+        result = subprocess.run(
+            ["aise", "messages", "inspect", _S1, "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"messages inspect failed: {result.stderr}"
+
+    def test_aise_stats_json_format(self) -> None:
+        """aise stats --format json produces valid JSON."""
+        result = subprocess.run(
+            ["aise", "stats", "--format", "json", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"stats json failed: {result.stderr}"
+        obj = json.loads(result.stdout)
+        assert "total_sessions" in obj, f"Missing total_sessions in: {obj}"
+
+    def test_no_real_user_data_in_synthetic_sessions(self) -> None:
+        """Verify synthetic data contains no real usernames or personal paths."""
+        for jsonl_file in PROJECTS_DIR.rglob("*.jsonl"):
+            content = jsonl_file.read_text()
+            # The demo uses "demo" as the username, not any real name
+            # Real home dirs would be /Users/<realname> — we check the project dirs
+            # only contain "demo" as the user
+            assert "/Users/demo/" in content or _WEB_CWD in content or \
+                   _DATA_CWD in content or _ML_CWD in content, \
+                f"Unexpected path in {jsonl_file}"
+            # No actual home directory of the running user should appear
+            real_home = str(Path.home())
+            assert real_home not in content, \
+                f"Real home directory {real_home} found in synthetic data: {jsonl_file}"
+
+
+# ── Main entrypoint ────────────────────────────────────────────────────────────
+
+def main() -> None:
+    global _TIMED
+
+    parser = argparse.ArgumentParser(
+        description="ai_session_tools demo recorder",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("--record",    action="store_true", help="Record cast + convert to GIF/MP4")
+    parser.add_argument("--gif-only",  action="store_true", help="Convert existing cast to GIF/MP4 only")
+    parser.add_argument("--verify",    action="store_true", help="Verify recording contains expected commands")
+    parser.add_argument("--run-acts",  action="store_true", help="[internal] Run demo acts inside asciinema")
+    parser.add_argument("--setup",     action="store_true", help="Create synthetic data only")
+    parser.add_argument("--cleanup",   action="store_true", help="Remove synthetic data")
+    args = parser.parse_args()
+
+    if args.run_acts:
+        # Called by asciinema — run acts with timing delays
+        _TIMED = True
+        create_synthetic_data()  # regenerate fixtures if missing (idempotent)
+        run_demo_acts()
+
+    elif args.record:
+        create_synthetic_data()
+        record()
+        convert_to_gif()
+        convert_to_mp4()
+        verify_recording()
+        print("\nDone! Files:")
+        for f in [CAST_FILE, GIF_FILE, MP4_FILE]:
+            if f.exists():
+                size_kb = f.stat().st_size // 1024
+                print(f"  {f}  ({size_kb} KB)")
+
+    elif args.gif_only:
+        convert_to_gif()
+        convert_to_mp4()
+
+    elif args.verify:
+        ok = verify_recording()
+        sys.exit(0 if ok else 1)
+
+    elif args.setup:
+        create_synthetic_data()
+        print(f"Synthetic data created in {DEMO_DIR}")
+        for proj_dir in PROJECTS_DIR.iterdir():
+            sessions = list(proj_dir.glob("*.jsonl"))
+            print(f"  {proj_dir.name}: {len(sessions)} session(s)")
+
+    elif args.cleanup:
+        cleanup_synthetic_data()
+        print(f"Removed {DEMO_DIR}")
+        print("Note: re-commit tests/aise-demo/ if you removed the fixture directory.")
+
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

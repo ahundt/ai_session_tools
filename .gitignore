@@ -57,5 +57,14 @@ uv.lock
 # Local planning notes (not for distribution)
 notes/
 
+# Demo recording outputs (regenerate with: python tests/test_demo.py --record)
+demo.cast
+demo.gif
+demo.mp4
+*.cast
+*.gif
+*.mp4
+*.webm
+
 # pyuvstarter audit log (https://github.com/ahundt/pyuvstarter)
 pyuvstarter_setup_log.json
