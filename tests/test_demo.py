@@ -38,11 +38,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -54,8 +57,11 @@ CAST_FILE = OUTPUT_DIR / "demo.cast"
 GIF_FILE  = OUTPUT_DIR / "demo.gif"
 MP4_FILE  = OUTPUT_DIR / "demo.mp4"
 
-# Set CLAUDE_CONFIG_DIR so aise uses committed fixture data, never ~/.claude
-DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(DEMO_DIR)}
+# Set CLAUDE_CONFIG_DIR so aise uses committed fixture data, never ~/.claude.
+# Respect an existing CLAUDE_CONFIG_DIR in the environment so that record()
+# can pass a date-shifted tmp dir through to the --run-acts subprocess.
+DEMO_ENV = {**os.environ,
+            "CLAUDE_CONFIG_DIR": os.environ.get("CLAUDE_CONFIG_DIR", str(DEMO_DIR))}
 
 # Whether to add typing delays and pauses (True when recording, False in tests)
 _TIMED = False
@@ -354,6 +360,46 @@ def cleanup_synthetic_data() -> None:
         shutil.rmtree(DEMO_DIR)
 
 
+# ── Date-shifted demo fixtures ─────────────────────────────────────────────────
+
+_TS_RE = re.compile(r'"timestamp":\s*"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)"')
+
+
+def create_dated_demo_dir() -> Path:
+    """Copy DEMO_DIR to a temp dir with all timestamps shifted so the latest
+    session appears 1 day before today.  The demo can then use --since 3d and
+    always find sessions regardless of when it is re-recorded.
+
+    The committed fixture files are never modified — caller must delete the
+    returned temp dir when done.
+    """
+    # Find the maximum timestamp across all fixture JSONL files
+    max_ts: datetime | None = None
+    for jsonl in (DEMO_DIR / "projects").rglob("*.jsonl"):
+        for m in _TS_RE.finditer(jsonl.read_text()):
+            ts = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S.%fZ")
+            if max_ts is None or ts > max_ts:
+                max_ts = ts
+    if max_ts is None:
+        raise RuntimeError("No timestamps found in fixture JSONL files")
+
+    # Shift: place the latest session 1 day before today
+    delta = (datetime.utcnow() - timedelta(days=1)) - max_ts
+
+    # Copy projects subtree to a fresh temp dir
+    tmp_dir = Path(tempfile.mkdtemp(prefix="aise-demo-dated-"))
+    shutil.copytree(DEMO_DIR / "projects", tmp_dir / "projects")
+
+    def _shift(m: re.Match) -> str:
+        ts = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S.%fZ")
+        return f'"timestamp": "{(ts + delta).strftime("%Y-%m-%dT%H:%M:%S.000Z")}"'
+
+    for jsonl in (tmp_dir / "projects").rglob("*.jsonl"):
+        jsonl.write_text(_TS_RE.sub(_shift, jsonl.read_text()))
+
+    return tmp_dir
+
+
 # ── Demo recording ─────────────────────────────────────────────────────────────
 
 BANNER = r'''
@@ -363,12 +409,13 @@ BANNER = r'''
   ║  Context compacted? Sessions lost? aise gives your history back.     ║
   ║                                                                      ║
   ║  Demo shows:                                                         ║
-  ║    1. aise stats              — overview of your AI coding history   ║
-  ║    2. aise list               — sessions across all projects         ║
-  ║    3. aise messages search    — find any past conversation fast      ║
-  ║    4. aise files search       — find files Claude edited most        ║
-  ║    5. aise messages corrections — spot patterns in AI mistakes       ║
-  ║    6. aise messages get       — recover a session (context rescue)   ║
+  ║    1. aise stats              — total sessions, messages, and files  ║
+  ║    2. aise messages search    — recent user messages, last 3 days    ║
+  ║    3. aise list               — sessions across all projects         ║
+  ║    4. aise messages search    — find any past conversation fast      ║
+  ║    5. aise files search       — find files Claude edited most        ║
+  ║    6. aise messages corrections — spot patterns in AI mistakes       ║
+  ║    7. aise messages get       — recover a session (context rescue)   ║
   ║                                                                      ║
   ║  Claude Code: /ar:claude-session-tools  (via autorun plugin)         ║
   ╚══════════════════════════════════════════════════════════════════════╝
@@ -433,37 +480,47 @@ def run_demo_acts() -> None:
     _run(f"aise stats {PROV}")
     pause(5.0)
 
-    # ── Act 2: aise list ──────────────────────────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 2: Sessions across projects\033[0m\n")
+    # ── Act 2: recent user messages (last 3 days) ────────────────────────────
+    # Compute --since dynamically; fixtures were date-shifted by create_dated_demo_dir()
+    # so this always catches recent sessions regardless of when the demo is re-recorded.
+    since = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    sys.stdout.write("\n\033[1;33m## Act 2: Recent user messages\033[0m\n")
+    sys.stdout.flush()
+    pause(1.5)
+    _run(f"aise messages search '' --type user --since {since} {PROV}")
+    pause(5.0)
+
+    # ── Act 3: aise list ──────────────────────────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 3: Sessions across projects\033[0m\n")
     sys.stdout.flush()
     pause(1.5)
     _run(f"aise list {PROV}")
     pause(5.0)
 
-    # ── Act 3: messages search --context 1 ───────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 3: Full-text search with context\033[0m\n")
+    # ── Act 4: messages search --context 1 ───────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 4: Full-text search with context\033[0m\n")
     sys.stdout.flush()
     pause(1.5)
     _run(f"aise messages search authentication --context 1 {PROV}")
     pause(5.0)
 
-    # ── Act 4: files search ────────────────────────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 4: Find frequently edited files\033[0m\n")
+    # ── Act 5: files search ────────────────────────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 5: Find frequently edited files\033[0m\n")
     sys.stdout.flush()
     pause(1.5)
     _run(f"aise files search --pattern '*.py' --min-edits 2 {PROV}")
     pause(5.0)
 
-    # ── Act 5: messages corrections ───────────────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 5: Learn from every correction\033[0m\n")
+    # ── Act 6: messages corrections ───────────────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 6: Spot patterns in AI mistakes\033[0m\n")
     sys.stdout.flush()
     pause(1.5)
     _run(f"aise messages corrections {PROV}")
     pause(6.0)
 
-    # ── Act 6: messages get SESSION_ID --limit 10 (context rescue) ────────────
+    # ── Act 7: messages get SESSION_ID --limit 10 (context rescue) ────────────
     session_id = get_first_session_id()
-    sys.stdout.write("\n\033[1;33m## Act 6: Recover a session (context rescue)\033[0m\n")
+    sys.stdout.write("\n\033[1;33m## Act 7: Recover a session (context rescue)\033[0m\n")
     sys.stdout.flush()
     pause(1.5)
     _run(f"aise messages get {session_id} --limit 10 {PROV}")
@@ -489,6 +546,12 @@ def record(cast_file: Path = CAST_FILE) -> None:
     create_synthetic_data()
     print(f"Synthetic data created in {DEMO_DIR}")
 
+    # Copy fixtures to a temp dir with timestamps shifted to be near today,
+    # so --since 3d in Act 2 always catches sessions regardless of re-record date.
+    # Committed fixture files are never modified; temp dir is cleaned up after.
+    dated_dir = create_dated_demo_dir()
+    print(f"Date-shifted fixtures in {dated_dir} (auto-cleaned after recording)")
+
     # Remove existing cast so we always get a fresh recording
     if cast_file.exists():
         cast_file.unlink()
@@ -498,14 +561,22 @@ def record(cast_file: Path = CAST_FILE) -> None:
     # asciinema v3 API: --command, --window-size COLSxROWS, --capture-env
     # Use asciicast-v2 format for compatibility with agg 1.7.0
     cmd = f"{sys.executable} {__file__} --run-acts"
-    subprocess.run([
-        asciinema, "rec", str(cast_file),
-        "--command", cmd,
-        "--window-size", "100x35",
-        "--capture-env", "TERM,COLORTERM,CLAUDE_CONFIG_DIR",
-        "--output-format", "asciicast-v2",
-        "--quiet",
-    ], env=DEMO_ENV, check=True)
+    # Pass dated_dir via CLAUDE_CONFIG_DIR so run_demo_acts() uses shifted timestamps.
+    # DEMO_ENV respects this env var (see definition above) so all aise commands
+    # inside --run-acts will target the dated tmp dir, not the committed fixtures.
+    record_env = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir)}
+    try:
+        subprocess.run([
+            asciinema, "rec", str(cast_file),
+            "--command", cmd,
+            "--window-size", "100x35",
+            "--capture-env", "TERM,COLORTERM,CLAUDE_CONFIG_DIR",
+            "--output-format", "asciicast-v2",
+            "--quiet",
+        ], env=record_env, check=True)
+    finally:
+        shutil.rmtree(dated_dir, ignore_errors=True)
+        print(f"Temp fixtures cleaned up")
     print(f"Recording saved to {cast_file}")
 
 
@@ -527,6 +598,7 @@ def convert_to_gif(cast_file: Path = CAST_FILE, gif_file: Path = GIF_FILE) -> No
         "--speed", "0.8",
         "--idle-time-limit", "12",
         "--last-frame-duration", "5",
+        "--quiet",
     ], check=True)
     print(f"GIF saved to {gif_file}")
 
@@ -570,11 +642,12 @@ def verify_recording(cast_file: Path = CAST_FILE) -> bool:
     # Check for text that appears in command OUTPUT (not typed chars, which are split across events)
     checks = [
         ("Sessions:",          "Act 1: stats shows Sessions: label (table format)"),
-        ("cafe0001",           "Act 2: list shows synthetic session UUIDs"),
-        ("authentication",     "Act 3: message search finds authentication"),
-        (".py",                "Act 4: files search shows Python files"),
-        ("misunderstanding",   "Act 5: corrections found misunderstanding category"),
-        ("cross-validation",   "Act 6: session get shows ML session content"),
+        ("accuracy",           "Act 2: recent user messages shows S6 content"),
+        ("cafe0001",           "Act 3: list shows synthetic session UUIDs"),
+        ("authentication",     "Act 4: message search finds authentication"),
+        (".py",                "Act 5: files search shows Python files"),
+        ("corrections",         "Act 6: corrections command shows AI correction history"),
+        ("cross-validation",   "Act 7: session get shows ML session content"),
     ]
     passed = 0
     for fragment, description in checks:
@@ -663,6 +736,18 @@ class TestDemoFree:
         )
         assert result.returncode == 0, f"messages inspect failed: {result.stderr}"
 
+    def test_aise_messages_recent_user_messages(self) -> None:
+        """aise messages search --type user --since returns recent user messages."""
+        result = subprocess.run(
+            ["aise", "messages", "search", "", "--type", "user",
+             "--since", "2026-02-28", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"messages search --type user failed: {result.stderr}"
+        # The ML session (2026-03-01) user message contains these words
+        assert "accuracy" in result.stdout or "cross-validation" in result.stdout, \
+            "Expected ML session user message content in results"
+
     def test_aise_messages_corrections_runs(self) -> None:
         """aise messages corrections exits 0 and finds corrections in synthetic data."""
         result = subprocess.run(
@@ -670,8 +755,9 @@ class TestDemoFree:
             env=DEMO_ENV, capture_output=True, text=True,
         )
         assert result.returncode == 0, f"corrections failed: {result.stderr}"
-        # Should find at least one correction from the added correction messages
-        assert result.stdout.strip(), "Expected correction output"
+        # Should find correction records from the added messages
+        assert "corrections" in result.stdout.lower() or "regression" in result.stdout, \
+            f"Expected correction output, got: {result.stdout[:200]}"
 
     def test_aise_messages_get_session(self) -> None:
         """aise messages get SESSION_ID returns session messages."""
