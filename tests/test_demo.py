@@ -358,19 +358,19 @@ def cleanup_synthetic_data() -> None:
 
 BANNER = r'''
   ╔══════════════════════════════════════════════════════════════════════╗
-  ║  aise — search & recover Claude Code, AI Studio, Gemini sessions   ║
+  ║  aise — search & recover Claude Code, AI Studio, Gemini sessions     ║
   ╠══════════════════════════════════════════════════════════════════════╣
-  ║  Context window full? Sessions lost? aise gives your history back.  ║
+  ║  Context compacted? Sessions lost? aise gives your history back.     ║
   ║                                                                      ║
   ║  Demo shows:                                                         ║
-  ║    1. aise stats              — scope of your AI coding history     ║
-  ║    2. aise list               — sessions across projects            ║
-  ║    3. aise messages search    — full-text search with context       ║
-  ║    4. aise files search       — find frequently edited files        ║
-  ║    5. aise messages corrections — learn from every correction       ║
-  ║    6. aise messages get       — recover a session (context rescue)  ║
+  ║    1. aise stats              — overview of your AI coding history   ║
+  ║    2. aise list               — sessions across all projects         ║
+  ║    3. aise messages search    — find any past conversation fast      ║
+  ║    4. aise files search       — find files Claude edited most        ║
+  ║    5. aise messages corrections — spot patterns in AI mistakes       ║
+  ║    6. aise messages get       — recover a session (context rescue)   ║
   ║                                                                      ║
-  ║  Claude Code: /ar:claude-session-tools  (via autorun plugin)        ║
+  ║  Claude Code: /ar:claude-session-tools  (via autorun plugin)         ║
   ╚══════════════════════════════════════════════════════════════════════╝
 '''
 
