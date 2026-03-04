@@ -411,27 +411,43 @@ def create_dated_demo_dir() -> Path:
 # ── Demo recording ─────────────────────────────────────────────────────────────
 
 def _build_banner() -> str:
-    """Build the intro banner with ANSI colors and programmatic alignment.
+    """Build the intro banner with ASCII art title, ANSI colors, and GitHub link.
 
-    ANSI codes are applied OUTSIDE ljust() calls so visible-char padding is correct.
-    Colors: cyan borders, bold title, green tagline, bold-cyan commands, gray descriptions.
-    Inner width W=90 fits comfortably at 160-column terminal width.
+    Design principles:
+    - ANSI codes applied OUTSIDE center()/ljust() so visible-char alignment is correct
+    - ASCII art uses ansi_shadow figlet font (box-drawing chars match banner borders)
+    - Hardcoded art avoids runtime dependency on pyfiglet
+    - Two ╠═╣ separators give the tagline its own visual band
 
-    Fact-checked against actual command output:
-    - aise stats:   shows Sessions/Files/Versions counts (no message count)
-    - aise list:    shows sessions with project and date columns
-    - aise files:   tracks files by edit count across sessions
-    - aise corrections: engine.py DEFAULT_CORRECTION_PATTERNS auto-classification
+    Fact-checked (run aise commands to verify):
+    - aise stats:   Sessions/Files/Versions counts — NOT message count
+    - aise list:    session table with project and date columns
+    - aise files:   edit counts per file across sessions (--min-edits filter)
+    - aise corrections: auto-classifies via engine.py DEFAULT_CORRECTION_PATTERNS
     - Sources:      Claude Code (SessionRecoveryEngine), AI Studio (AiStudioSource),
-                    Gemini CLI (GeminiCliSource) — per __init__.py docstring
+                    Gemini CLI (GeminiCliSource) — per __init__.py + pyproject.toml
+    - GitHub URL:   github.com/anthropics/ai_session_tools — from pyproject.toml
     """
-    W = 90  # visible chars inside box (between the ║ borders)
+    W = 90  # visible chars inside box (between ║ borders)
 
     CYAN  = "\033[96m"
     BOLD  = "\033[1m"
     GREEN = "\033[92m"
     GRAY  = "\033[90m"
     RST   = "\033[0m"
+
+    # ASCII art for "aise" — ansi_shadow figlet font, 6 rows × 27 cols (rstripped).
+    # Generated via: pyfiglet.figlet_format("aise", font="ansi_shadow")
+    # Hardcoded to avoid a runtime pyfiglet dependency.
+    # Uses ║ ═ ╗ ╚ ╔ █ box-drawing chars that visually match the banner borders.
+    _ART = [
+        " █████╗ ██╗███████╗███████╗",
+        "██╔══██╗██║██╔════╝██╔════╝",
+        "███████║██║███████╗█████╗  ",
+        "██╔══██║██║╚════██║██╔══╝  ",
+        "██║  ██║██║███████║███████╗",
+        "╚═╝  ╚═╝╚═╝╚══════╝╚══════╝",
+    ]
 
     def top() -> str:
         return f"{CYAN}  ╔{'═' * W}╗{RST}"
@@ -443,19 +459,24 @@ def _build_banner() -> str:
         return f"{CYAN}  ╚{'═' * W}╝{RST}"
 
     def row(text: str = "", style: str = "") -> str:
-        """Plain-content row. style is applied outside ljust so alignment is correct."""
+        """Plain-content row. style codes wrap the already-justified content."""
         content = (" " + text).ljust(W)
         return f"{CYAN}  ║{RST}{style}{content}{RST}{CYAN}║{RST}"
 
-    def cmd_row(cmd: str, desc: str, cmd_width: int = 26) -> str:
-        """Two-tone row: bold-cyan command name + gray description, padded to W.
+    def art_row(text: str) -> str:
+        """ASCII art row — rstrip then center(W) gives exactly W visible chars."""
+        content = text.rstrip().center(W)
+        return f"{CYAN}  ║{RST}{BOLD}{CYAN}{content}{RST}{CYAN}║{RST}"
 
-        Padding is computed on visible chars only (no ANSI codes involved in the math).
+    def cmd_row(cmd: str, desc: str, cmd_width: int = 26) -> str:
+        """Two-tone row: bold-cyan command + gray description, padded to W.
+
+        Padding computed on visible chars only — no ANSI codes in the math.
         """
-        indent = "    "   # 4 spaces
+        indent = "    "   # 4 visible chars
         arrow  = "  →  "  # 5 visible chars
         cmd_padded = cmd.ljust(cmd_width)
-        # visible chars between ║ borders: 1 (leading sp) + 4 + cmd_width + 5 + desc
+        # visible between ║: 1 (leading sp) + indent + cmd_width + arrow + desc + padding
         padding = " " * max(0, W - 1 - len(indent) - cmd_width - len(arrow) - len(desc))
         return (
             f"{CYAN}  ║{RST}"
@@ -469,8 +490,11 @@ def _build_banner() -> str:
     lines = [
         "",
         top(),
-        row("  ai_session_tools (aise)", style=BOLD),
-        row("  Search, recover, and analyze Claude Code, AI Studio, and Gemini CLI sessions"),
+        row(),
+        *[art_row(line) for line in _ART],    # 6-row ASCII art title "aise" (ansi_shadow font)
+        row(),
+        row("  ai_session_tools — search, recover, and analyze AI sessions", style=BOLD),
+        row("  github.com/anthropics/ai_session_tools"),
         sep(),
         row("  Context compacted? Sessions lost? aise gives your history back.", style=GREEN),
         sep(),
@@ -478,10 +502,15 @@ def _build_banner() -> str:
         row("  Commands shown in this demo:"),
         row(),
         cmd_row("aise stats",                "session, file, and version statistics"),
+        row(),
         cmd_row("aise messages search",       "find recent prompts or any past conversation"),
+        row(),
         cmd_row("aise list",                  "all sessions across every project"),
+        row(),
         cmd_row("aise files search",          "files Claude edited most, sorted by edit count"),
+        row(),
         cmd_row("aise messages corrections",  "AI correction patterns, auto-detected"),
+        row(),
         cmd_row("aise messages get",          "recover the full content of any session"),
         row(),
         row("  Claude Code: /ar:claude-session-tools  (via autorun: github.com/ahundt/autorun)",
@@ -533,14 +562,13 @@ def get_first_session_id() -> str:
 def run_demo_acts() -> None:
     """Execute all demo acts in order. Call this inside the asciinema recording."""
     # ── Act 0: Intro banner ────────────────────────────────────────────────────
+    # Print the full banner instantly so the very first recording frame shows
+    # the complete banner — no per-line animation delay.
     sys.stdout.write("\033[H\033[2J")   # clear screen
     sys.stdout.flush()
-    pause(0.2)
-    for line in BANNER.splitlines():
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
-        pause(0.05)
-    pause(8.0)   # let viewers read all items
+    sys.stdout.write(BANNER + "\n")
+    sys.stdout.flush()
+    pause(12.0)  # hold for viewers to read the richer banner
 
     # All commands use --provider claude to show only synthetic demo sessions,
     # preventing any real session data from the user's system from appearing.
