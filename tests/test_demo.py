@@ -361,6 +361,143 @@ def create_synthetic_data() -> None:
         session_file = proj_path / f"{session_id}.jsonl"
         session_file.write_text("\n".join(messages) + "\n")
 
+    _setup_recovery_files(DEMO_DIR)
+
+
+def _setup_recovery_files(demo_dir: Path) -> None:
+    """Create recovery directory structure so 'aise files search' returns results.
+
+    SessionRecoveryEngine.search() reads session_*/ dirs for files.
+    SessionRecoveryEngine.get_versions() reads session_all_versions_*/ for edit count.
+
+    Files with 2+ versions (edits) will pass --min-edits 2:
+      jwt.py:         S1 (Write) + S2 (Edit) → 2 versions ✓
+      test_auth.py:   S1 (Write) + S2 (Edit) → 2 versions ✓
+      transformer.py: S3 (Write) + S4 (Edit) → 2 versions ✓
+    """
+    recovery = demo_dir / "recovery"
+
+    JWT_V1 = (
+        '"""JWT authentication utilities."""\n'
+        "import jwt\nimport time\n\n"
+        "SECRET = 'change-in-production'\nALGORITHM = 'HS256'\n\n"
+        "def create_token(user_id: str, expires_in: int = 3600) -> str:\n"
+        "    payload = {'sub': user_id, 'exp': time.time() + expires_in}\n"
+        "    return jwt.encode(payload, SECRET, algorithm=ALGORITHM)\n\n"
+        "def verify_token(token: str) -> dict | None:\n"
+        "    try:\n"
+        "        return jwt.decode(token, SECRET, algorithms=[ALGORITHM])\n"
+        "    except jwt.ExpiredSignatureError:\n"
+        "        return None\n"
+        "    except jwt.InvalidTokenError:\n"
+        "        return None\n"
+    )
+    JWT_V2 = JWT_V1.replace(
+        "exp': time.time() + expires_in}",
+        "exp': time.time() + expires_in}  # UTC timestamp",
+    )
+    ROUTES_V1 = (
+        '"""Authentication route handlers."""\n'
+        "from flask import Blueprint, request, jsonify\n"
+        "from .jwt import create_token, verify_token\n"
+        "from .models import User\n\n"
+        "auth_bp = Blueprint('auth', __name__, url_prefix='/auth')\n\n"
+        "@auth_bp.route('/login', methods=['POST'])\n"
+        "def login():\n"
+        "    data = request.get_json()\n"
+        "    user = User.query.filter_by(email=data.get('email')).first()\n"
+        "    if user and user.check_password(data.get('password')):\n"
+        "        token = create_token(str(user.id))\n"
+        "        return jsonify({'token': token, 'expires_in': 3600})\n"
+        "    return jsonify({'error': 'Invalid credentials'}), 401\n\n"
+        "@auth_bp.route('/logout', methods=['POST'])\n"
+        "def logout():\n"
+        "    return jsonify({'message': 'Logged out successfully'})\n"
+    )
+    TEST_AUTH_V1 = (
+        '"""Tests for JWT authentication module."""\n'
+        "import pytest\nfrom auth.jwt import create_token, verify_token\n\n"
+        "def test_create_token_returns_string():\n"
+        "    token = create_token('user-123')\n"
+        "    assert isinstance(token, str)\n"
+        "    assert len(token) > 0\n\n"
+        "def test_verify_valid_token():\n"
+        "    token = create_token('user-42')\n"
+        "    payload = verify_token(token)\n"
+        "    assert payload is not None\n"
+        "    assert payload['sub'] == 'user-42'\n\n"
+        "def test_verify_invalid_token_returns_none():\n"
+        "    result = verify_token('not-a-real-token')\n"
+        "    assert result is None\n"
+    )
+    TEST_AUTH_V2 = TEST_AUTH_V1.replace(
+        "def test_verify_invalid_token_returns_none():",
+        "def test_expired_token_returns_none():\n"
+        "    token = create_token('user-1', expires_in=-1)\n"
+        "    assert verify_token(token) is None\n\n"
+        "def test_verify_invalid_token_returns_none():",
+    )
+    TRANSFORMER_V1 = (
+        '"""Data transformation functions."""\n'
+        "import pandas as pd\n\n"
+        "def normalize_timestamps(df: pd.DataFrame) -> pd.DataFrame:\n"
+        "    df = df.copy()\n"
+        "    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)\n"
+        "    return df\n\n"
+        "def filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:\n"
+        "    return df[df['value'].notna() & (df['value'] > 0)]\n\n"
+        "def transform(df: pd.DataFrame) -> pd.DataFrame:\n"
+        "    df = normalize_timestamps(df)\n"
+        "    df = filter_valid_records(df)\n"
+        "    df['year'] = df['timestamp'].dt.year\n"
+        "    df['month'] = df['timestamp'].dt.month\n"
+        "    return df\n"
+    )
+    TRANSFORMER_V2 = (
+        '"""Data transformation functions."""\n'
+        "import pandas as pd\nfrom typing import Optional\n\n"
+        "def normalize_timestamps(df: pd.DataFrame) -> pd.DataFrame:\n"
+        "    df = df.copy()\n"
+        "    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)\n"
+        "    return df\n\n"
+        "def filter_valid_records(df: pd.DataFrame, min_value: Optional[float] = None) -> pd.DataFrame:\n"
+        "    mask = df['value'].notna()\n"
+        "    if min_value is not None:\n"
+        "        mask &= df['value'] >= min_value\n"
+        "    else:\n"
+        "        mask &= df['value'] > 0\n"
+        "    return df[mask]\n\n"
+        "def transform(df: pd.DataFrame) -> pd.DataFrame:\n"
+        "    df = normalize_timestamps(df)\n"
+        "    df = filter_valid_records(df)\n"
+        "    df['year'] = df['timestamp'].dt.year\n"
+        "    df['month'] = df['timestamp'].dt.month\n"
+        "    return df\n"
+    )
+
+    # (session_id, {filename: content}, version_number)
+    # version_number must be unique per filename across sessions to count as separate edits
+    _sessions: list[tuple] = [
+        (_S1, {"jwt.py": JWT_V1, "routes.py": ROUTES_V1, "test_auth.py": TEST_AUTH_V1}, 1),
+        (_S2, {"jwt.py": JWT_V2, "test_auth.py": TEST_AUTH_V2},                         2),
+        (_S3, {"transformer.py": TRANSFORMER_V1},                                        1),
+        (_S4, {"transformer.py": TRANSFORMER_V2},                                        2),
+    ]
+
+    for sid, files, vnum in _sessions:
+        # session_*/ dir: final-version files (iterated by search())
+        final_dir = recovery / f"session_{sid}"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in files.items():
+            (final_dir / name).write_text(content)
+
+        # session_all_versions_*/ dir: versioned files (counted by get_versions())
+        av_dir = recovery / f"session_all_versions_{sid}"
+        av_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in files.items():
+            lines = len(content.splitlines())
+            (av_dir / f"{name}_v{vnum:06d}_line_{lines}.txt").write_text(content)
+
 
 def cleanup_synthetic_data() -> None:
     """Remove synthetic data directory."""
@@ -394,9 +531,10 @@ def create_dated_demo_dir() -> Path:
     # Shift: place the latest session 1 day before today
     delta = (datetime.utcnow() - timedelta(days=1)) - max_ts
 
-    # Copy projects subtree to a fresh temp dir
+    # Copy projects and recovery subtrees to a fresh temp dir
     tmp_dir = Path(tempfile.mkdtemp(prefix="aise-demo-dated-"))
     shutil.copytree(DEMO_DIR / "projects", tmp_dir / "projects")
+    shutil.copytree(DEMO_DIR / "recovery",  tmp_dir / "recovery")
 
     def _shift(m: re.Match) -> str:
         ts = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S.%fZ")
@@ -426,47 +564,52 @@ def _build_banner() -> str:
     - aise corrections: auto-classifies via engine.py DEFAULT_CORRECTION_PATTERNS
     - Sources:      Claude Code (SessionRecoveryEngine), AI Studio (AiStudioSource),
                     Gemini CLI (GeminiCliSource) — per __init__.py + pyproject.toml
-    - GitHub URL:   github.com/anthropics/ai_session_tools — from pyproject.toml
+    - GitHub URL:   github.com/ahundt/ai_session_tools — from pyproject.toml
     """
     W = 90  # visible chars inside box (between ║ borders)
 
-    CYAN  = "\033[96m"
+    BOX   = "\033[36m"   # dim cyan — box outline (╔ ═ ║ ╣ ╚ etc.)
+    CYAN  = "\033[96m"   # bright cyan — text, art, commands
     BOLD  = "\033[1m"
     GREEN = "\033[92m"
     GRAY  = "\033[90m"
     RST   = "\033[0m"
 
-    # ASCII art for "aise" — ansi_shadow figlet font, 6 rows × 27 cols (rstripped).
-    # Generated via: pyfiglet.figlet_format("aise", font="ansi_shadow")
-    # Hardcoded to avoid a runtime pyfiglet dependency.
-    # Uses ║ ═ ╗ ╚ ╔ █ box-drawing chars that visually match the banner borders.
-    _ART = [
-        " █████╗ ██╗███████╗███████╗",
-        "██╔══██╗██║██╔════╝██╔════╝",
-        "███████║██║███████╗█████╗  ",
-        "██╔══██║██║╚════██║██╔══╝  ",
-        "██║  ██║██║███████║███████╗",
-        "╚═╝  ╚═╝╚═╝╚══════╝╚══════╝",
-    ]
+    # ASCII art for "aise" — ansi_shadow figlet font, letters defined separately so
+    # a 3-space gap can be inserted between each one for legibility.
+    # Each letter is exactly its natural width (a=8, i=3, s=8, e=8 chars per row).
+    # Box-drawing chars (║ ═ ╗ ╚ ╔ █) visually match the banner borders.
+    _a = [" █████╗ ", "██╔══██╗", "███████║", "██╔══██║", "██║  ██║", "╚═╝  ╚═╝"]
+    _i = ["██╗",      "██║",      "██║",      "██║",      "██║",      "╚═╝"     ]
+    _s = ["███████╗", "██╔════╝", "███████╗", "╚════██║", "███████║", "╚══════╝"]
+    _e = ["███████╗", "██╔════╝", "█████╗  ", "██╔══╝  ", "███████╗", "╚══════╝"]
+    _SP = "   "  # 3-space gap between letters for readability
+    # Each row: 8 + 3 + 3 + 3 + 8 + 3 + 8 = 36 visible chars — all identical width
+    _ART = [a + _SP + i + _SP + s + _SP + e for a, i, s, e in zip(_a, _i, _s, _e)]
 
     def top() -> str:
-        return f"{CYAN}  ╔{'═' * W}╗{RST}"
+        return f"{BOX}  ╔{'═' * W}╗{RST}"
 
     def sep() -> str:
-        return f"{CYAN}  ╠{'═' * W}╣{RST}"
+        return f"{BOX}  ╠{'═' * W}╣{RST}"
 
     def bot() -> str:
-        return f"{CYAN}  ╚{'═' * W}╝{RST}"
+        return f"{BOX}  ╚{'═' * W}╝{RST}"
 
     def row(text: str = "", style: str = "") -> str:
-        """Plain-content row. style codes wrap the already-justified content."""
+        """Left-justified content row."""
         content = (" " + text).ljust(W)
-        return f"{CYAN}  ║{RST}{style}{content}{RST}{CYAN}║{RST}"
+        return f"{BOX}  ║{RST}{style}{content}{RST}{BOX}║{RST}"
+
+    def crow(text: str = "", style: str = "") -> str:
+        """Centered content row. Padding computed on plain text width."""
+        content = text.center(W)
+        return f"{BOX}  ║{RST}{style}{content}{RST}{BOX}║{RST}"
 
     def art_row(text: str) -> str:
-        """ASCII art row — rstrip then center(W) gives exactly W visible chars."""
-        content = text.rstrip().center(W)
-        return f"{CYAN}  ║{RST}{BOLD}{CYAN}{content}{RST}{CYAN}║{RST}"
+        """ASCII art row — center(W) without rstrip so all rows stay the same width."""
+        content = text.center(W)
+        return f"{BOX}  ║{RST}{BOLD}{CYAN}{content}{RST}{BOX}║{RST}"
 
     def cmd_row(cmd: str, desc: str, cmd_width: int = 26) -> str:
         """Two-tone row: bold-cyan command + gray description, padded to W.
@@ -479,12 +622,12 @@ def _build_banner() -> str:
         # visible between ║: 1 (leading sp) + indent + cmd_width + arrow + desc + padding
         padding = " " * max(0, W - 1 - len(indent) - cmd_width - len(arrow) - len(desc))
         return (
-            f"{CYAN}  ║{RST}"
+            f"{BOX}  ║{RST}"
             f" {indent}"
             f"{BOLD}{CYAN}{cmd_padded}{RST}"
             f"{GRAY}{arrow}{desc}{RST}"
             f"{padding}"
-            f"{CYAN}║{RST}"
+            f"{BOX}║{RST}"
         )
 
     lines = [
@@ -493,10 +636,13 @@ def _build_banner() -> str:
         row(),
         *[art_row(line) for line in _ART],    # 6-row ASCII art title "aise" (ansi_shadow font)
         row(),
-        row("  ai_session_tools — search, recover, and analyze AI sessions", style=BOLD),
-        row("  github.com/anthropics/ai_session_tools"),
+        crow("ai_session_tools — search, recover, and analyze AI sessions", style=BOLD),
+        row(),
+        crow("github.com/ahundt/ai_session_tools"),
         sep(),
-        row("  Context compacted? Sessions lost? aise gives your history back.", style=GREEN),
+        row(),
+        crow("Context compacted? Sessions lost? aise gives your history back.", style=GREEN),
+        row(),
         sep(),
         row(),
         row("  Commands shown in this demo:"),
@@ -513,8 +659,8 @@ def _build_banner() -> str:
         row(),
         cmd_row("aise messages get",          "recover the full content of any session"),
         row(),
-        row("  Claude Code: /ar:claude-session-tools  (via autorun: github.com/ahundt/autorun)",
-            style=GRAY),
+        crow("Claude Code: /ar:claude-session-tools  (via autorun: github.com/ahundt/autorun)",
+             style=GRAY),
         bot(),
         "",
     ]

@@ -62,7 +62,7 @@ git clone https://github.com/ahundt/autorun ~/.claude/plugins/autorun
 # Follow autorun's README for Claude Code plugin activation
 
 # 2. Install ai-session-tools (already done if you followed Install above)
-uv tool install ai-session-tools
+uv tool install git+https://github.com/ahundt/ai_session_tools
 
 # 3. Use inside Claude Code
 # /ar:claude-session-tools find files I edited yesterday
@@ -74,12 +74,7 @@ the complete list of available slash commands.
 ## Install
 
 ```bash
-# Install as a global CLI tool
-uv tool install ai-session-tools
-
-# Or install from a local clone
-git clone https://github.com/anthropics/ai_session_tools.git
-uv tool install ./ai_session_tools
+uv tool install git+https://github.com/ahundt/ai_session_tools
 ```
 
 This gives two equivalent commands: `aise` (short) and `ai_session_tools` (long).
@@ -87,7 +82,7 @@ This gives two equivalent commands: `aise` (short) and `ai_session_tools` (long)
 To use as a library instead:
 
 ```bash
-uv add ai-session-tools
+uv add git+https://github.com/ahundt/ai_session_tools
 ```
 
 ## Quick start
@@ -868,7 +863,7 @@ ai_session_tools/
 ## Development
 
 ```bash
-git clone https://github.com/anthropics/ai_session_tools.git
+git clone https://github.com/ahundt/ai_session_tools.git
 cd ai_session_tools
 
 # Install with dev dependencies

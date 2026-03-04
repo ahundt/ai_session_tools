@@ -1307,6 +1307,7 @@ def _do_files_search(
     fmt: str = "table",
 ) -> None:
     """Search recovered files with filtering."""
+    fmt = fmt or "table"
     inc_ext = {e.strip() for e in include_extensions.split(",") if e.strip()} if include_extensions else set()
     exc_ext = {e.strip() for e in exclude_extensions.split(",") if e.strip()} if exclude_extensions else set()
     inc_sessions = {s.strip() for s in include_sessions.split(",") if s.strip()} if include_sessions else set()
