@@ -59,8 +59,15 @@ class TableFormatter(ResultFormatter):
         ]
         return "\n".join(lines)
 
-    def format_many(self, items: Iterable[Any]) -> str:
-        """Format multiple items as table. Accepts any iterable."""
+    def format_many(self, items: Iterable[Any]) -> Any:
+        """Format multiple items as a Rich Table renderable.
+
+        Returns a ``rich.table.Table`` object (not a pre-rendered string) so
+        the caller's console can render it directly with correct terminal
+        capabilities.  Returning a pre-rendered string via Console.capture()
+        embeds ANSI escape codes that Rich's markup parser then misinterprets
+        as markup tags when the string is passed back to console.print().
+        """
         table = Table(title=self.title)
         table.add_column("File", style="cyan")
         table.add_column("Edits", justify="right", style="magenta")
@@ -75,10 +82,7 @@ class TableFormatter(ResultFormatter):
                 session_str += f" (+{len(item.sessions) - 3})"
             table.add_row(item.name, str(item.edits), item.file_type, item.last_modified or "", item.location, session_str)
 
-        console = Console()
-        with console.capture() as capture:
-            console.print(table)
-        return capture.get()
+        return table
 
 
 class JsonFormatter(ResultFormatter):

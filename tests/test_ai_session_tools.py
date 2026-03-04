@@ -3063,6 +3063,14 @@ class TestPositionalArgHistory:
 class TestSearchTableShowsSessions:
     """TableFormatter.format_many() shows sessions column."""
 
+    @staticmethod
+    def _render(table) -> str:
+        from rich.console import Console
+        console = Console(highlight=False, markup=False)
+        with console.capture() as cap:
+            console.print(table)
+        return cap.get()
+
     def test_sessions_column_in_table(self):
         from ai_session_tools import SessionFile
         from ai_session_tools.formatters import TableFormatter
@@ -3074,7 +3082,7 @@ class TestSearchTableShowsSessions:
             )
         ]
         formatter = TableFormatter("Test")
-        output = formatter.format_many(files)
+        output = self._render(formatter.format_many(files))
         # Session IDs should appear (abbreviated to 8 chars + ellipsis)
         assert "abc123de" in output
 
@@ -3088,7 +3096,7 @@ class TestSearchTableShowsSessions:
             )
         ]
         formatter = TableFormatter("Test")
-        output = formatter.format_many(files)
+        output = self._render(formatter.format_many(files))
         # More than 3 sessions should show (+1) indicator
         assert "+1" in output
 
@@ -4743,6 +4751,14 @@ class TestSearchMessagesWithContextBuffer:
 class TestFormatterSessionIdEllipsis:
     """Bug fix: session ID ellipsis should only be added when ID is longer than 8 chars."""
 
+    @staticmethod
+    def _render(table) -> str:
+        from rich.console import Console
+        console = Console(highlight=False, markup=False)
+        with console.capture() as cap:
+            console.print(table)
+        return cap.get()
+
     def test_short_session_id_no_ellipsis(self):
         """A session ID shorter than 8 chars should not get an ellipsis appended."""
         from ai_session_tools.formatters import TableFormatter
@@ -4757,7 +4773,7 @@ class TestFormatterSessionIdEllipsis:
         )
 
         fmt = TableFormatter()
-        output = fmt.format_many([file])
+        output = self._render(fmt.format_many([file]))
         # The session string for a 3-char ID should not have "…" appended
         assert "abc…" not in output, (
             f"Short session ID 'abc' should not have ellipsis; got output containing 'abc…'"
@@ -4776,7 +4792,7 @@ class TestFormatterSessionIdEllipsis:
         )
 
         fmt = TableFormatter()
-        output = fmt.format_many([file])
+        output = self._render(fmt.format_many([file]))
         assert "abcdef01…" in output, (
             f"Long session ID should be truncated to 8 chars + ellipsis. Output: {output!r}"
         )

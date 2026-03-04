@@ -1377,13 +1377,7 @@ def _do_files_search(
         return
 
     formatter = get_formatter(fmt, f"Recovered Files: {pattern}")
-    # Write pre-formatted output directly to stdout — bypasses Rich's markup
-    # parser which mistakes ANSI escape codes (e.g. \x1b[96m) for markup tags.
-    output = formatter.format_many(results)
-    sys.stdout.write(output)
-    if not output.endswith("\n"):
-        sys.stdout.write("\n")
-    sys.stdout.flush()
+    console.print(formatter.format_many(results))
     console.print(f"\n[bold]Found {len(results)} files[/bold]")
 
 
