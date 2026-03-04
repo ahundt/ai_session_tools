@@ -411,38 +411,81 @@ def create_dated_demo_dir() -> Path:
 # ── Demo recording ─────────────────────────────────────────────────────────────
 
 def _build_banner() -> str:
-    """Build the intro banner with programmatically padded lines to prevent misalignment.
+    """Build the intro banner with ANSI colors and programmatic alignment.
 
-    Uses ljust(W) so adding/editing text never silently breaks the box borders.
-    Inner width W=90 fits well at 160-column terminal width.
+    ANSI codes are applied OUTSIDE ljust() calls so visible-char padding is correct.
+    Colors: cyan borders, bold title, green tagline, bold-cyan commands, gray descriptions.
+    Inner width W=90 fits comfortably at 160-column terminal width.
+
+    Fact-checked against actual command output:
+    - aise stats:   shows Sessions/Files/Versions counts (no message count)
+    - aise list:    shows sessions with project and date columns
+    - aise files:   tracks files by edit count across sessions
+    - aise corrections: engine.py DEFAULT_CORRECTION_PATTERNS auto-classification
+    - Sources:      Claude Code (SessionRecoveryEngine), AI Studio (AiStudioSource),
+                    Gemini CLI (GeminiCliSource) — per __init__.py docstring
     """
     W = 90  # visible chars inside box (between the ║ borders)
 
-    def row(text: str = "") -> str:
-        content = " " + text
-        return "  ║" + content.ljust(W) + "║"
+    CYAN  = "\033[96m"
+    BOLD  = "\033[1m"
+    GREEN = "\033[92m"
+    GRAY  = "\033[90m"
+    RST   = "\033[0m"
 
-    def top() -> str: return "  ╔" + "═" * W + "╗"
-    def sep() -> str: return "  ╠" + "═" * W + "╣"
-    def bot() -> str: return "  ╚" + "═" * W + "╝"
+    def top() -> str:
+        return f"{CYAN}  ╔{'═' * W}╗{RST}"
+
+    def sep() -> str:
+        return f"{CYAN}  ╠{'═' * W}╣{RST}"
+
+    def bot() -> str:
+        return f"{CYAN}  ╚{'═' * W}╝{RST}"
+
+    def row(text: str = "", style: str = "") -> str:
+        """Plain-content row. style is applied outside ljust so alignment is correct."""
+        content = (" " + text).ljust(W)
+        return f"{CYAN}  ║{RST}{style}{content}{RST}{CYAN}║{RST}"
+
+    def cmd_row(cmd: str, desc: str, cmd_width: int = 26) -> str:
+        """Two-tone row: bold-cyan command name + gray description, padded to W.
+
+        Padding is computed on visible chars only (no ANSI codes involved in the math).
+        """
+        indent = "    "   # 4 spaces
+        arrow  = "  →  "  # 5 visible chars
+        cmd_padded = cmd.ljust(cmd_width)
+        # visible chars between ║ borders: 1 (leading sp) + 4 + cmd_width + 5 + desc
+        padding = " " * max(0, W - 1 - len(indent) - cmd_width - len(arrow) - len(desc))
+        return (
+            f"{CYAN}  ║{RST}"
+            f" {indent}"
+            f"{BOLD}{CYAN}{cmd_padded}{RST}"
+            f"{GRAY}{arrow}{desc}{RST}"
+            f"{padding}"
+            f"{CYAN}║{RST}"
+        )
 
     lines = [
         "",
         top(),
-        row("ai_session_tools (aise) — search & recover Claude Code, AI Studio, and Gemini sessions"),
+        row("  ai_session_tools (aise)", style=BOLD),
+        row("  Search, recover, and analyze Claude Code, AI Studio, and Gemini CLI sessions"),
         sep(),
-        row("Context compacted? Sessions lost? aise gives your history back."),
+        row("  Context compacted? Sessions lost? aise gives your history back.", style=GREEN),
+        sep(),
         row(),
-        row("Commands shown in this demo:"),
+        row("  Commands shown in this demo:"),
         row(),
-        row("    aise stats                — sessions, messages, and files at a glance"),
-        row("    aise messages search      — find recent user prompts or any past conversation"),
-        row("    aise list                 — all sessions across every project"),
-        row("    aise files search         — files Claude edited most, by edit count"),
-        row("    aise messages corrections — AI correction patterns, detected automatically"),
-        row("    aise messages get         — recover the full content of any session"),
+        cmd_row("aise stats",                "session, file, and version statistics"),
+        cmd_row("aise messages search",       "find recent prompts or any past conversation"),
+        cmd_row("aise list",                  "all sessions across every project"),
+        cmd_row("aise files search",          "files Claude edited most, sorted by edit count"),
+        cmd_row("aise messages corrections",  "AI correction patterns, auto-detected"),
+        cmd_row("aise messages get",          "recover the full content of any session"),
         row(),
-        row("  Claude Code: /ar:claude-session-tools  (via autorun: github.com/ahundt/autorun)"),
+        row("  Claude Code: /ar:claude-session-tools  (via autorun: github.com/ahundt/autorun)",
+            style=GRAY),
         bot(),
         "",
     ]
