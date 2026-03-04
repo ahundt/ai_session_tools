@@ -181,6 +181,11 @@ _WEB_SESSION_2 = [
     _tool_bash(_S2, "2026-02-20T14:00:15.000Z",
                "grep -n 'verify_token\\|check_auth' /Users/demo/webauth/middleware.py",
                _WEB_CWD),
+    _msg(_S2, "user",
+         "Actually wait, that's wrong — you missed the real bug entirely. "
+         "The issue is in token expiry, not the route handler. "
+         "Also need to fix the middleware comparison logic.",
+         "2026-02-20T14:00:25.000Z", _WEB_CWD, "fix/auth-middleware"),
     _msg(_S2, "assistant",
          "Found the issue — the middleware is checking token expiry with the wrong timezone. "
          "The verify_token function uses UTC but the middleware compares against local time.",
@@ -249,6 +254,11 @@ _DATA_SESSION_4 = [
          "The pipeline is failing on records with null category values. "
          "Can you add better null handling to the transformer?",
          "2026-02-25T11:00:00.000Z", _DATA_CWD, "fix/null-handling"),
+    _msg(_S4, "user",
+         "You forgot to handle None at all — you missed that step. "
+         "The filter_valid_records function still has the original logic, "
+         "it regressed from what we had before.",
+         "2026-02-25T11:00:05.000Z", _DATA_CWD, "fix/null-handling"),
     _msg(_S4, "assistant",
          "I'll add null handling to the transformer to handle missing category values gracefully.",
          "2026-02-25T11:00:10.000Z", _DATA_CWD),
@@ -348,17 +358,19 @@ def cleanup_synthetic_data() -> None:
 
 BANNER = r'''
   ╔══════════════════════════════════════════════════════════════════════╗
-  ║  ai_session_tools (aise) — search & analyze AI coding sessions      ║
+  ║  aise — search & recover Claude Code, AI Studio, Gemini sessions   ║
   ╠══════════════════════════════════════════════════════════════════════╣
-  ║  Works with Claude Code, AI Studio, and Gemini CLI sessions.        ║
+  ║  Context window full? Sessions lost? aise gives your history back.  ║
   ║                                                                      ║
   ║  Demo shows:                                                         ║
-  ║    1. aise stats        — session statistics overview               ║
-  ║    2. aise list         — recent sessions across projects           ║
-  ║    3. messages search   — find conversations by topic               ║
-  ║    4. files search      — find frequently edited files              ║
-  ║    5. messages inspect  — deep-dive into a session                  ║
-  ║    6. stats --format json  — programmatic JSON output               ║
+  ║    1. aise stats              — scope of your AI coding history     ║
+  ║    2. aise list               — sessions across projects            ║
+  ║    3. aise messages search    — full-text search with context       ║
+  ║    4. aise files search       — find frequently edited files        ║
+  ║    5. aise messages corrections — learn from every correction       ║
+  ║    6. aise messages get       — recover a session (context rescue)  ║
+  ║                                                                      ║
+  ║  Claude Code: /ar:claude-session-tools  (via autorun plugin)        ║
   ╚══════════════════════════════════════════════════════════════════════╝
 '''
 
@@ -421,18 +433,18 @@ def run_demo_acts() -> None:
     _run(f"aise stats {PROV}")
     pause(5.0)
 
-    # ── Act 2: aise list --since 30d ──────────────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 2: Recent sessions\033[0m\n")
+    # ── Act 2: aise list ──────────────────────────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 2: Sessions across projects\033[0m\n")
     sys.stdout.flush()
     pause(1.5)
-    _run(f"aise list --since 30d {PROV}")
+    _run(f"aise list {PROV}")
     pause(5.0)
 
-    # ── Act 3: messages search ────────────────────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 3: Search conversations\033[0m\n")
+    # ── Act 3: messages search --context 1 ───────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 3: Full-text search with context\033[0m\n")
     sys.stdout.flush()
     pause(1.5)
-    _run(f"aise messages search authentication {PROV}")
+    _run(f"aise messages search authentication --context 1 {PROV}")
     pause(5.0)
 
     # ── Act 4: files search ────────────────────────────────────────────────────
@@ -442,22 +454,26 @@ def run_demo_acts() -> None:
     _run(f"aise files search --pattern '*.py' --min-edits 2 {PROV}")
     pause(5.0)
 
-    # ── Act 5: messages inspect ───────────────────────────────────────────────
-    session_id = get_first_session_id()
-    sys.stdout.write("\n\033[1;33m## Act 5: Inspect a session\033[0m\n")
+    # ── Act 5: messages corrections ───────────────────────────────────────────
+    sys.stdout.write("\n\033[1;33m## Act 5: Learn from every correction\033[0m\n")
     sys.stdout.flush()
     pause(1.5)
-    _run(f"aise messages inspect {session_id} {PROV}")
+    _run(f"aise messages corrections {PROV}")
     pause(6.0)
 
-    # ── Act 6: stats --format json ────────────────────────────────────────────
-    sys.stdout.write("\n\033[1;33m## Act 6: JSON output for scripting\033[0m\n")
+    # ── Act 6: messages get SESSION_ID --limit 10 (context rescue) ────────────
+    session_id = get_first_session_id()
+    sys.stdout.write("\n\033[1;33m## Act 6: Recover a session (context rescue)\033[0m\n")
     sys.stdout.flush()
     pause(1.5)
-    _run(f"aise stats --format json {PROV}")
-    pause(4.0)
+    _run(f"aise messages get {session_id} --limit 10 {PROV}")
+    pause(6.0)
 
-    sys.stdout.write("\n\033[1;32m  Done! Install: pip install ai-session-tools\033[0m\n\n")
+    sys.stdout.write(
+        "\n\033[1;32m  Done!\033[0m\n"
+        "  Install:  pip install ai-session-tools\n"
+        "  Claude Code: /ar:claude-session-tools  (via autorun: https://github.com/ahundt/autorun)\n\n"
+    )
     sys.stdout.flush()
     pause(4.0)
 
@@ -553,12 +569,12 @@ def verify_recording(cast_file: Path = CAST_FILE) -> bool:
     content = cast_file.read_text()
     # Check for text that appears in command OUTPUT (not typed chars, which are split across events)
     checks = [
-        ("total_sessions",     "Act 1: stats command output"),
+        ("Sessions:",          "Act 1: stats shows Sessions: label (table format)"),
         ("cafe0001",           "Act 2: list shows synthetic session UUIDs"),
-        ("authentication",     "Act 3: message search output"),
+        ("authentication",     "Act 3: message search finds authentication"),
         (".py",                "Act 4: files search shows Python files"),
-        ("messages",           "Act 5: session inspect"),
-        ("total_sessions",     "Act 6: JSON output"),
+        ("misunderstanding",   "Act 5: corrections found misunderstanding category"),
+        ("cross-validation",   "Act 6: session get shows ML session content"),
     ]
     passed = 0
     for fragment, description in checks:
@@ -622,7 +638,8 @@ class TestDemoFree:
     def test_aise_messages_search_authentication(self) -> None:
         """aise messages search finds 'authentication' in synthetic sessions."""
         result = subprocess.run(
-            ["aise", "messages", "search", "authentication", "--provider", "claude"],
+            ["aise", "messages", "search", "authentication", "--context", "1",
+             "--provider", "claude"],
             env=DEMO_ENV, capture_output=True, text=True,
         )
         assert result.returncode == 0, f"search failed: {result.stderr}"
@@ -645,6 +662,25 @@ class TestDemoFree:
             env=DEMO_ENV, capture_output=True, text=True,
         )
         assert result.returncode == 0, f"messages inspect failed: {result.stderr}"
+
+    def test_aise_messages_corrections_runs(self) -> None:
+        """aise messages corrections exits 0 and finds corrections in synthetic data."""
+        result = subprocess.run(
+            ["aise", "messages", "corrections", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"corrections failed: {result.stderr}"
+        # Should find at least one correction from the added correction messages
+        assert result.stdout.strip(), "Expected correction output"
+
+    def test_aise_messages_get_session(self) -> None:
+        """aise messages get SESSION_ID returns session messages."""
+        result = subprocess.run(
+            ["aise", "messages", "get", _S6, "--limit", "5", "--provider", "claude"],
+            env=DEMO_ENV, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"messages get failed: {result.stderr}"
+        assert result.stdout.strip(), "Expected message output"
 
     def test_aise_stats_json_format(self) -> None:
         """aise stats --format json produces valid JSON."""
