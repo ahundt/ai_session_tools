@@ -744,7 +744,7 @@ def run_demo_acts() -> None:
     # ── Act 4: messages search --context 1 ───────────────────────────────────
     section("Message search — find any past conversation instantly")
     pause(1.5)
-    _run(f"aise messages search authentication --context 1 {PROV}")
+    _run(f"aise messages search authentication --context 1 --limit 3 {PROV}")
     pause(5.0)
 
     # ── Act 5: files search ────────────────────────────────────────────────────
