@@ -2817,7 +2817,7 @@ def _root_search_cmd(
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="[messages] Show only 'user' or 'assistant' messages. Default: both"),
-    limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited for files, 10 for messages"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Max results to return. Default: unlimited (None)"),
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
     tool: Optional[str] = typer.Option(None, "--tool",

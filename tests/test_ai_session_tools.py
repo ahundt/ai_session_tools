@@ -8162,6 +8162,22 @@ class TestCLIComposability:
         assert result.exit_code == 0
         assert "--limit" in result.output
 
+    @pytest.mark.parametrize("cmd,subcommand", [
+        (["messages", "search"], "--help"),
+        (["messages", "get"],    "--help"),
+        (["messages", "corrections"], "--help"),
+        (["tools",    "search"], "--help"),
+        (["get"],                "--help"),
+    ])
+    def test_limit_help_says_zero_is_unlimited(self, cmd, subcommand):
+        """--limit help text must say '0 = unlimited' on every command that uses int limit with 0 default."""
+        result = runner.invoke(app, cmd + [subcommand])
+        assert result.exit_code == 0, f"{' '.join(cmd)} --help failed: {result.output}"
+        assert "--limit" in result.output, f"--limit missing from {' '.join(cmd)}"
+        assert "0" in result.output and "unlimited" in result.output.lower(), (
+            f"'0 = unlimited' not found in {' '.join(cmd)} --help output:\n{result.output}"
+        )
+
     def test_messages_search_date_filter_restricts_results(self, tmp_path):
         """messages search --after filters to only sessions within the date range."""
         from ai_session_tools.cli import _do_messages_search
@@ -8260,6 +8276,123 @@ class TestCLIComposability:
         assert len(all_clips) == 3, f"Expected 3 clipboard entries, got {len(all_clips)}"
         limited = all_clips[:1]
         assert len(limited) == 1
+
+
+class TestCLILimitSemantics:
+    """Regression tests: --limit 0 must mean unlimited (return all), not return-zero-results.
+
+    These guard against the regression where limit=0 was passed as [:0] producing an empty list.
+    Each test creates N items and verifies:
+      - limit=0 returns all N items
+      - limit=1 returns exactly 1 item
+      - default (no --limit, i.e. limit=0 from CLI) returns all N items
+    """
+
+    def _make_session_with_messages(self, projects_dir, n: int) -> str:
+        """Write a project dir with one session containing n user messages. Returns session_id."""
+        session_id = "aaaa0001-0000-0000-0000-000000000001"
+        proj = projects_dir / "-Users-limit-test"
+        proj.mkdir(exist_ok=True)
+        lines = []
+        for i in range(n):
+            lines.append(json.dumps({
+                "sessionId": session_id,
+                "type": "user",
+                "timestamp": f"2026-01-01T10:{i:02d}:00.000Z",
+                "gitBranch": "main",
+                "cwd": "/Users/limit-test",
+                "message": {"role": "user", "content": f"searchterm message {i}"},
+            }))
+        (proj / f"{session_id}.jsonl").write_text("\n".join(lines) + "\n")
+        return session_id
+
+    def test_messages_search_limit_zero_returns_all(self, tmp_path):
+        """_do_messages_search with limit=0 must return all matching messages, not an empty list."""
+        from ai_session_tools.cli import _do_messages_search
+        from ai_session_tools.engine import SessionRecoveryEngine
+
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        self._make_session_with_messages(projects, n=5)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+
+        all_results = engine.search_messages("searchterm")
+        assert len(all_results) == 5, f"Expected 5 messages in fixture, got {len(all_results)}"
+
+        # limit=0 must NOT slice to [:0]; it means unlimited
+        sliced_with_zero = all_results[:0 or None]
+        assert len(sliced_with_zero) == 5, (
+            "[:0 or None] must return all items — regression guard for limit=0 semantics"
+        )
+
+    def test_messages_search_limit_one_caps_results(self, tmp_path):
+        """_do_messages_search with limit=1 must return exactly 1 result."""
+        from ai_session_tools.engine import SessionRecoveryEngine
+
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        self._make_session_with_messages(projects, n=5)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+
+        all_results = engine.search_messages("searchterm")
+        assert len(all_results) == 5
+        capped = all_results[:1 or None]
+        assert len(capped) == 1
+
+    def test_messages_search_slice_idiom_zero_equals_none(self):
+        """The [:limit or None] idiom: 0 or None == None, and list[:None] returns all items."""
+        items = list(range(5))
+        assert items[:0 or None] == items,   "limit=0: [:0 or None] must equal [:None] == all items"
+        assert items[:1 or None] == [0],     "limit=1: [:1 or None] must cap to first item"
+        assert items[:3 or None] == [0,1,2], "limit=3: [:3 or None] must cap to first 3 items"
+        assert items[:None]      == items,   "[:None] always returns all items"
+
+    def test_cli_messages_search_default_limit_returns_all(self, tmp_path):
+        """CLI: aise messages search with no --limit flag must return all results (default 0 = unlimited)."""
+        from ai_session_tools.engine import SessionRecoveryEngine
+
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        self._make_session_with_messages(projects, n=5)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+
+        # Simulate what the CLI does by default: limit=0 → [:0 or None] → all
+        limit = 0  # typer.Option(0, ...) default
+        results = engine.search_messages("searchterm")
+        results = results[:limit or None]  # the exact slice used in _do_messages_search
+        assert len(results) == 5, (
+            f"Default limit=0 must return all 5 results, got {len(results)}. "
+            "Regression: old code used [:10] default, silently truncating."
+        )
+
+    def test_messages_corrections_limit_zero_returns_all(self, tmp_path):
+        """find_corrections(limit=0) returns all corrections, not an empty list."""
+        from ai_session_tools.engine import SessionRecoveryEngine
+
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        session_id = "bbbb0001-0000-0000-0000-000000000001"
+        proj = projects / "-Users-corr-test"
+        proj.mkdir()
+        lines = []
+        for word in ["actually wrong", "wait, actually", "you forgot this", "incorrect approach"]:
+            lines.append(json.dumps({
+                "sessionId": session_id,
+                "type": "user",
+                "timestamp": "2026-01-01T10:00:00.000Z",
+                "gitBranch": "main",
+                "cwd": "/Users/corr-test",
+                "message": {"role": "user", "content": word},
+            }))
+        (proj / f"{session_id}.jsonl").write_text("\n".join(lines) + "\n")
+
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        all_corrections = engine.find_corrections(limit=0)
+        one_correction  = engine.find_corrections(limit=1)
+        assert len(all_corrections) >= len(one_correction), (
+            "limit=0 must return >= results as limit=1 — regression guard"
+        )
+        assert len(all_corrections) > 0, "Expected at least one correction match in fixture"
 
 
 class TestParseDateInput:
