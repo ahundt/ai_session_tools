@@ -186,6 +186,23 @@ console = Console()
 err_console = Console(stderr=True)
 
 
+def _get_render_console() -> Console:
+    """Return a Console sized to the real terminal width.
+
+    When stdout is a TTY, returns the shared ``console`` (self-sizing).
+    When stdout is piped, tries stderr's terminal size (fd 2) so the width
+    reflects the user's actual window rather than a hardcoded guess.
+    Falls back to 120 columns if no terminal is detectable on any fd.
+    """
+    if sys.stdout.isatty():
+        return console
+    try:
+        width = os.get_terminal_size(2).columns  # stderr fd when stdout is piped
+    except OSError:
+        width = 120
+    return Console(width=width)
+
+
 # ── aise source CRUD commands ──────────────────────────────────────────────
 
 @source_app.command("list")
@@ -547,7 +564,7 @@ def _render_output(
     # When stdout is not a TTY (piped to head, grep, file, etc.), Rich defaults to 80 cols.
     # Use 120 cols instead — prevents column crushing while staying readable in most contexts.
     # sys already imported at cli.py:17; Console already imported at cli.py:24
-    render_console = console if sys.stdout.isatty() else Console(width=120)
+    render_console = _get_render_console()
     # Pre-compute all rows once; used for both column suppression check and row insertion.
     all_rows = [[str(v) for v in spec.row_fn(d)] for d in dicts]
     n_cols = len(spec.columns)
@@ -1477,7 +1494,7 @@ def _do_messages_search(
         return
 
     formatter = MessageFormatter(max_chars=max_chars)
-    render_console = console if sys.stdout.isatty() else Console(width=120)
+    render_console = _get_render_console()
     render_console.print(formatter.format_many(results))
     render_console.print(f"\n[bold]Found {len(results)} messages[/bold]")
 
