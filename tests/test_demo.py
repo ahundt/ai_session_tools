@@ -36,6 +36,7 @@ Output files (gitignored):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -118,9 +119,10 @@ def _msg(session_id: str, role: str, content, timestamp: str,
 def _tool_write(session_id: str, timestamp: str, file_path: str, content: str,
                 cwd: str | None = None) -> str:
     """Build an assistant JSONL record containing a Write tool call."""
+    _id = hashlib.md5(f"{session_id}{timestamp}{file_path}".encode()).hexdigest()[:8]
     return _msg(
         session_id, "assistant",
-        [{"type": "tool_use", "id": f"t-{uuid.uuid4().hex[:8]}", "name": "Write",
+        [{"type": "tool_use", "id": f"t-{_id}", "name": "Write",
           "input": {"file_path": file_path, "content": content}}],
         timestamp, cwd,
     )
@@ -129,9 +131,10 @@ def _tool_write(session_id: str, timestamp: str, file_path: str, content: str,
 def _tool_edit(session_id: str, timestamp: str, file_path: str,
                old_string: str, new_string: str, cwd: str | None = None) -> str:
     """Build an assistant JSONL record containing an Edit tool call."""
+    _id = hashlib.md5(f"{session_id}{timestamp}{file_path}edit".encode()).hexdigest()[:8]
     return _msg(
         session_id, "assistant",
-        [{"type": "tool_use", "id": f"t-{uuid.uuid4().hex[:8]}", "name": "Edit",
+        [{"type": "tool_use", "id": f"t-{_id}", "name": "Edit",
           "input": {"file_path": file_path,
                     "old_string": old_string, "new_string": new_string}}],
         timestamp, cwd,
@@ -141,9 +144,10 @@ def _tool_edit(session_id: str, timestamp: str, file_path: str,
 def _tool_bash(session_id: str, timestamp: str, command: str,
                cwd: str | None = None) -> str:
     """Build an assistant JSONL record containing a Bash tool call."""
+    _id = hashlib.md5(f"{session_id}{timestamp}{command}bash".encode()).hexdigest()[:8]
     return _msg(
         session_id, "assistant",
-        [{"type": "tool_use", "id": f"t-{uuid.uuid4().hex[:8]}", "name": "Bash",
+        [{"type": "tool_use", "id": f"t-{_id}", "name": "Bash",
           "input": {"command": command, "description": command[:60]}}],
         timestamp, cwd,
     )
