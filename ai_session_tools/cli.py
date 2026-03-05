@@ -1402,7 +1402,7 @@ def _do_messages_search(
     engine: "AISession",
     query: str,
     message_type: Optional[str] = None,
-    limit: int = 10,
+    limit: int = 0,
     max_chars: Optional[int] = None,
     fmt: Optional[str] = None,
     tool: Optional[str] = None,
@@ -1435,7 +1435,7 @@ def _do_messages_search(
         )
         if valid_session_ids is not None:
             ctx_results = [r for r in ctx_results if r.match.session_id in valid_session_ids]
-        ctx_results = ctx_results[:limit]
+        ctx_results = ctx_results[:limit or None]
         if not ctx_results:
             console.print(f"[yellow]No messages match query{tag}[/yellow]")
             return
@@ -1461,7 +1461,7 @@ def _do_messages_search(
     all_results = engine.search_messages(query, message_type=message_type, tool=tool)
     if valid_session_ids is not None:
         all_results = [m for m in all_results if m.session_id in valid_session_ids]
-    results = all_results[:limit]
+    results = all_results[:limit or None]
 
     if not results:
         console.print(f"[yellow]No messages match query{tag}[/yellow]")
@@ -1958,7 +1958,7 @@ def _do_get(
     engine: "AISession",
     session_id: Optional[str],
     message_type: Optional[str] = None,
-    limit: int = 10,
+    limit: int = 0,
     max_chars: Optional[int] = None,
     fmt: Optional[str] = None,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
@@ -2305,7 +2305,7 @@ def _messages_search_cmd(
     query: Optional[str] = typer.Argument(None, help="Text to search for in messages. Use quotes for multi-word queries."),
     query_opt: Optional[str] = typer.Option(None, "--query", "-q", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
-    limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
+    limit: int = typer.Option(0, "--limit", help="Max messages to return. 0 = unlimited (default)"),
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
     tool: Optional[str] = typer.Option(
@@ -2359,7 +2359,7 @@ def messages_get(
     session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016). Find IDs via 'aise list'."),
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
-    limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
+    limit: int = typer.Option(0, "--limit", help="Max messages to return. 0 = unlimited (default)"),
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
     since: Optional[str] = _OPT_SINCE,
@@ -2396,7 +2396,7 @@ def messages_corrections(
     when:   Optional[str] = _OPT_WHEN,
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
-    limit: int = typer.Option(20, "--limit", help="Max corrections to return. Default: 20"),
+    limit: int = typer.Option(0, "--limit", help="Max corrections to return. 0 = unlimited (default)"),
     fmt: Optional[str] = _OPT_FORMAT,
     pattern: Optional[List[str]] = typer.Option(
         None, "--pattern",
@@ -2588,7 +2588,7 @@ def _do_messages_extract(
         if since or until:
             from ai_session_tools.engine import _passes_date_filter
             results = [r for r in results if _passes_date_filter(r.get("timestamp", ""), since, until)]
-        if limit is not None:
+        if limit:
             results = results[:limit]
         _render_output(results, fmt, _EXTRACT_PBCOPY_SPEC, "No clipboard content found")
 
@@ -2650,7 +2650,7 @@ def _tools_search_cmd(
     provider: Optional[str] = _OPT_PROVIDER,
     tool: str = typer.Argument(..., help="Tool name (e.g. Bash, Edit, Write, Read, Glob, Grep)."),
     query: Optional[str] = typer.Argument(None, help="Optional text to match in tool input. Omit to list all uses."),
-    limit: int = typer.Option(10, "--limit", help="Max results. Default: 10"),
+    limit: int = typer.Option(0, "--limit", help="Max results. 0 = unlimited (default)"),
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
     since: Optional[str] = _OPT_SINCE,
@@ -2937,7 +2937,7 @@ def get(
     session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016)."),
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
-    limit: int = typer.Option(10, "--limit", help="Max messages to return. Default: 10"),
+    limit: int = typer.Option(0, "--limit", help="Max messages to return. 0 = unlimited (default)"),
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
     provider: Optional[str] = _OPT_PROVIDER,
