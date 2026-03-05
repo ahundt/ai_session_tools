@@ -1,4 +1,4 @@
-# AI Session Tools
+# AI Session Tools - aise
 
 Search, analyze, and organize AI sessions from Claude Code, AI Studio, and Gemini CLI.
 
