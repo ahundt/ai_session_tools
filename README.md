@@ -2,6 +2,9 @@
 
 Search, analyze, and organize AI sessions from Claude Code, AI Studio, and Gemini CLI.
 
+![demo](https://github.com/user-attachments/assets/1b3e12cc-68c0-4643-9d5c-4cf4f5cd8992)
+
+
 ## The problem
 
 AI tools save conversations in raw files — Claude Code uses JSONL with UUID names, AI Studio uses
