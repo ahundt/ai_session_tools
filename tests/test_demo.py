@@ -75,9 +75,11 @@ def pause(seconds: float) -> None:
 
 def section(title: str) -> None:
     """Print a visual section divider with a descriptive title (no act numbers)."""
-    sys.stdout.write(f"\n\033[90m{'─' * 60}\033[0m\n")
+    bar_len = max(68, len(title) + 6)  # always wider than the title + 2-space indent
+    bar = "─" * bar_len
+    sys.stdout.write(f"\n\n\n\033[90m{bar}\033[0m\n")
     sys.stdout.write(f"\033[1;96m  {title}\033[0m\n")
-    sys.stdout.write(f"\033[90m{'─' * 60}\033[0m\n\n")
+    sys.stdout.write(f"\033[90m{bar}\033[0m\n")
     sys.stdout.flush()
 
 
@@ -767,12 +769,17 @@ def run_demo_acts() -> None:
     pause(6.0)
 
     sys.stdout.write(
-        "\n\033[1;32m  Done!\033[0m\n"
-        "  Install:  pip install ai-session-tools\n"
-        "  Claude Code: /ar:claude-session-tools  (via autorun: https://github.com/ahundt/autorun)\n\n"
+        "\n\n"
+        "\033[1;32m  ══════════════════════════════════════════════════════════════════\033[0m\n"
+        "\033[1;32m  ✓  Demo complete — ai_session_tools recovers your AI session history\033[0m\n"
+        "\033[1;32m  ══════════════════════════════════════════════════════════════════\033[0m\n"
+        "\n"
+        "  Install:      uv pip install git+https://github.com/ahundt/ai_session_tools\n"
+        "  Claude Code:  /ar:claude-session-tools  (via autorun: https://github.com/ahundt/autorun)\n"
+        "\n"
     )
     sys.stdout.flush()
-    pause(4.0)
+    pause(6.0)
 
 
 # ── Recording pipeline ─────────────────────────────────────────────────────────
