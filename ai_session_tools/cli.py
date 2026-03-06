@@ -23,6 +23,7 @@ from typing import Callable as _Callable, List, Optional, Set
 import typer
 import click
 from rich.console import Console
+from rich.markup import escape as _esc
 from collections import defaultdict
 from typer.core import TyperGroup, HAS_RICH
 import typer.rich_utils as _ru
@@ -567,7 +568,6 @@ def _render_output(
             console.print(line, markup=False)
         return
     # Default: Rich table
-    from rich.markup import escape as _esc
     from rich.table import Table
     # When stdout is not a TTY (piped to head, grep, file, etc.), Rich defaults to 80 cols.
     # Use 120 cols instead — prevents column crushing while staying readable in most contexts.
@@ -751,6 +751,47 @@ def _is_compaction_content(content: Optional[str]) -> bool:
     return (content or "").startswith("This session is being continued")
 
 
+def _render_invocations_with_context(
+    invocations: list,
+    context_after: int,
+    engine: "AISession",
+    output: Optional[str] = None,
+    max_chars: int = 0,
+) -> None:
+    """Render invocations with trailing context messages.
+
+    Used by both `messages planning --context-after` and `commands context`.
+    """
+    truncate = max_chars if max_chars > 0 else None
+    out_console = Console(record=bool(output))
+    if not invocations:
+        out_console.print("[yellow]No invocations found.[/yellow]")
+        _write_output(out_console, output)
+        return
+    for inv in invocations:
+        path_display = _esc(inv.cwd) if inv.cwd else _project_display(inv.project_dir)
+        line = (
+            f"\n[bold cyan]{_esc(inv.command)}[/bold cyan] "
+            f"[dim]{inv.timestamp[:19]}[/dim] "
+            f"[blue]{inv.session_id[:8]}[/blue]"
+        )
+        if path_display:
+            line += f" [dim]{path_display}[/dim]"
+        if inv.git_branch:
+            line += f" [green]{_esc(inv.git_branch)}[/green]"
+        out_console.print(line)
+        if inv.args:
+            out_console.print(f"  [dim]args:[/dim] {_esc(inv.args)}")
+        messages = engine.get_messages(inv.session_id)
+        after_msgs = [m for m in messages if (m.timestamp or "") > inv.timestamp][:context_after]
+        for m in after_msgs:
+            content = (m.content or "")[:truncate]
+            out_console.print(f"  [dim][{m.type.value}] {(m.timestamp or '')[:19]}[/dim]")
+            out_console.print(f"  [dim]{_esc(content)}[/dim]")
+    out_console.print(f"\n[bold]Found {len(invocations)} invocations[/bold]")
+    _write_output(out_console, output)
+
+
 def _cfg_default(key: str, fallback):
     """Read user preference from config 'defaults' section, returning fallback if absent.
 
@@ -923,6 +964,27 @@ _PLANNING_SPEC = TableSpec(
         str(d["unique_sessions"]),
         str(d["unique_projects"]),
     ],
+)
+
+_INVOCATIONS_SPEC = TableSpec(
+    title_template="Slash Command Invocations ({n} found)",
+    columns=[
+        ColumnSpec("Timestamp", style="dim", no_wrap=True),
+        ColumnSpec("Session", style="cyan", no_wrap=True, min_width=8),
+        ColumnSpec("Command", style="bold cyan"),
+        ColumnSpec("Args"),
+        ColumnSpec("Path", style="blue", ratio=3),
+        ColumnSpec("Branch", style="green"),
+    ],
+    row_fn=lambda d: [
+        d.get("timestamp", "")[:19],
+        d.get("session_id", "")[:8],
+        d.get("command", ""),
+        d.get("args", ""),
+        d.get("cwd", "") or _project_display(d.get("project_dir", "")),
+        d.get("git_branch", ""),
+    ],
+    summary_template="Found {n} invocations",
 )
 
 
@@ -1717,10 +1779,11 @@ def _do_messages_planning(
     until: Optional[str] = None,   # canonical; before= is a hidden alias
     fmt: str = "table",
     commands_raw: Optional[str] = None,
-    show_args: bool = False,
-    show_sessions: bool = False,
+    detail: bool = False,
     context_after: int = 0,
     output: Optional[str] = None,
+    full_uuid: bool = False,
+    max_chars: int = 0,
 ) -> None:
     """Show planning command usage.
 
@@ -1729,10 +1792,11 @@ def _do_messages_planning(
     Args:
         commands_raw:  Raw --commands option value (CSV or bracketed list).
                        When provided, replaces config/defaults entirely.
-        show_args:     When True, switch to per-invocation output with args.
-        show_sessions: When True, show session IDs, cwds, and git branches per command.
-        context_after: When > 0, show N messages after each invocation.
+        detail:        When True, show per-invocation table via _INVOCATIONS_SPEC.
+        context_after: When > 0, show N messages after each invocation (implies detail).
         output:        Write output to FILE in addition to stdout (tee).
+        full_uuid:     When True, show full 36-char session UUIDs.
+        max_chars:     Truncate context content to this many chars. 0 = full.
     """
     if commands_raw:
         # CLI flag — highest priority
@@ -1746,35 +1810,30 @@ def _do_messages_planning(
         else:
             # Built-in defaults — lowest priority (engine uses DEFAULT_PLANNING_COMMANDS)
             commands = None
-    # --show-args, --show-sessions, or --context-after > 0: switch to per-invocation mode
-    if show_args or show_sessions or context_after > 0:
+    if context_after > 0:
+        # Context-after mode: per-invocation with trailing messages
         invocations = engine.get_planning_usage(
             project_filter=project, since=since, until=until,
             commands=commands, return_invocations=True,
         )
-        out_console = Console(record=bool(output))
-        if not invocations:
-            out_console.print("[yellow]No planning command invocations found[/yellow]")
-            _write_output(out_console, output)
-            return
-        for inv in invocations:
-            line = f"[bold cyan]{inv.command}[/bold cyan] [dim]{inv.timestamp[:19]}[/dim] [blue]{inv.session_id[:8]}[/blue]"
-            if show_sessions and inv.cwd:
-                line += f" [dim]{inv.cwd}[/dim]"
-            if show_sessions and inv.git_branch:
-                line += f" [green]{inv.git_branch}[/green]"
-            out_console.print(line)
-            if show_args and inv.args:
-                out_console.print(f"  [dim]args:[/dim] {inv.args}")
-            if context_after > 0:
-                messages = engine.get_messages(inv.session_id)
-                after_msgs = [m for m in messages if (m.timestamp or "") > inv.timestamp][:context_after]
-                for m in after_msgs:
-                    out_console.print(f"  [dim][{m.type.value}] {(m.timestamp or '')[:19]}[/dim]")
-                    out_console.print(f"  [dim]{(m.content or '')[:200]}[/dim]")
-        out_console.print(f"\n[bold]Found {len(invocations)} invocations[/bold]")
-        _write_output(out_console, output)
+        max_chars_val = max_chars if max_chars > 0 else _cfg_default("max_chars", 0)
+        _render_invocations_with_context(invocations, context_after, engine, output, max_chars=max_chars_val)
         return
+    if detail:
+        # Per-invocation listing via _render_output (table/json/csv/plain support)
+        invocations = engine.get_planning_usage(
+            project_filter=project, since=since, until=until,
+            commands=commands, return_invocations=True,
+        )
+        if output:
+            out_console = Console(record=True)
+            for inv in invocations:
+                out_console.print(f"{inv.command} {inv.timestamp[:19]} {inv.args}")
+            _write_output(out_console, output)
+        spec = _spec_with_full_uuid(_INVOCATIONS_SPEC, 1) if full_uuid else _INVOCATIONS_SPEC
+        _render_output(invocations, fmt, spec, "No planning command invocations found")
+        return
+    # Default: aggregate counts (unchanged existing behavior)
     results = engine.get_planning_usage(
         project_filter=project, since=since, until=until,
         commands=commands,
@@ -2658,18 +2717,16 @@ def messages_planning(
             "Example: --commands '/ar:plannew,/ar:pn,/myplanning,/plan'"
         ),
     ),
-    show_args: bool = typer.Option(
-        False, "--show-args",
-        help="Show the argument text passed to each slash command invocation (e.g. for '/ar:plannew fix auth', shows 'fix auth'). Switches to per-invocation output instead of count summary.",
-    ),
-    show_sessions: bool = typer.Option(
-        False, "--show-sessions",
-        help="Show session IDs, cwds, and git branches per command invocation. Switches to per-invocation output.",
+    detail: bool = typer.Option(
+        False, "--detail",
+        help="Show individual invocations instead of aggregate counts. Includes timestamp, session, args, cwd, and branch per invocation. Implied by --context-after.",
     ),
     context_after: int = typer.Option(
         0, "--context-after",
-        help="For each slash command invocation, show N messages that followed it. Implies --show-args. Default: 0 (count summary only).",
+        help="For each slash command invocation, show N messages that followed it. Implies --detail. Default: 0 (count summary only).",
     ),
+    full_uuid: bool = _OPT_FULL_UUID,
+    max_chars: Optional[int] = _OPT_MAX_CHARS,
     output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """Show slash-command usage frequency across all sessions.
@@ -2690,9 +2747,7 @@ def messages_planning(
         aise messages planning --project myproject
         aise messages planning --format json
         aise messages planning --commands '/ar:plannew,/ar:pn'
-        aise messages planning --commands '/mycommand,/mc,/plan,/p'
-        aise messages planning --show-args --since 14d           # show args per invocation
-        aise messages planning --show-sessions --since 14d       # show session metadata
+        aise messages planning --detail --since 14d              # per-invocation table
         aise messages planning --context-after 3 --since 14d    # show 3 messages after each
     """
     engine = _resolve_engine(ctx, provider)
@@ -2700,9 +2755,11 @@ def messages_planning(
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
+    max_chars_val = max_chars if max_chars is not None else _cfg_default("max_chars", 0)
     _do_messages_planning(engine, project, since, until, fmt, commands_raw=commands,
-                          show_args=show_args, show_sessions=show_sessions,
-                          context_after=context_after, output=output)
+                          detail=detail or context_after > 0,
+                          context_after=context_after, output=output,
+                          full_uuid=full_uuid, max_chars=max_chars_val)
 
 
 @messages_app.command("inspect")
@@ -2809,6 +2866,8 @@ def slash_list(
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
     fmt:    Optional[str] = _OPT_FORMAT,
+    full_uuid: bool = _OPT_FULL_UUID,
+    limit: int = typer.Option(0, "--limit", help="Max invocations to return. 0 = unlimited (default)."),
     output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """List every slash command invocation across all sessions.
@@ -2820,6 +2879,7 @@ def slash_list(
         aise commands list                                      # all slash commands
         aise commands list --command /ar:plannew                # only /ar:plannew
         aise commands list --since 14d --output ~/cmds.txt      # last 14 days, save to file
+        aise commands list --format json                        # JSON output
         aise slash list                                         # same via alias
     """
     engine = _resolve_engine(ctx, provider)
@@ -2827,11 +2887,9 @@ def slash_list(
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
-    # Use return_invocations=True to get per-invocation SlashCommandRecord list
     invocations = engine.get_planning_usage(
         since=since, until=until, return_invocations=True,
     )
-    # Filter by --command pattern if given
     if command:
         try:
             _check_redos_safe(command)
@@ -2842,27 +2900,15 @@ def slash_list(
             if "ReDoS" in msg:
                 err_console.print(f"[yellow]Warning:[/yellow] --command pattern rejected: {msg}. Falling back to literal substring match.")
             invocations = [inv for inv in invocations if command.lower() in inv.command.lower()]
-    out_console = Console(record=bool(output))
-    if not invocations:
-        out_console.print("[yellow]No slash command invocations found.[/yellow]")
+    if limit > 0:
+        invocations = invocations[:limit]
+    if output:
+        out_console = Console(record=True)
+        for inv in invocations:
+            out_console.print(f"{inv.command} {inv.timestamp[:19]} {inv.args}")
         _write_output(out_console, output)
-        return
-    for inv in invocations:
-        line = (
-            f"[bold cyan]{inv.command}[/bold cyan] "
-            f"[dim]{inv.timestamp[:19]}[/dim] "
-            f"[blue]{inv.session_id[:8]}[/blue] "
-            f"[dim]{inv.project_dir}[/dim]"
-        )
-        if inv.cwd:
-            line += f" [dim]{inv.cwd}[/dim]"
-        if inv.git_branch:
-            line += f" [green]{inv.git_branch}[/green]"
-        out_console.print(line)
-        if inv.args:
-            out_console.print(f"  [dim]{inv.args}[/dim]")
-    out_console.print(f"\n[bold]Found {len(invocations)} invocations[/bold]")
-    _write_output(out_console, output)
+    spec = _spec_with_full_uuid(_INVOCATIONS_SPEC, 1) if full_uuid else _INVOCATIONS_SPEC
+    _render_output(invocations, fmt, spec, "No slash command invocations found.")
 
 
 @slash_app.command("context")
@@ -2879,6 +2925,7 @@ def slash_context(
     when:   Optional[str] = _OPT_WHEN,
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
+    max_chars: Optional[int] = _OPT_MAX_CHARS,
     output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """For each invocation of COMMAND, show what followed it.
@@ -2900,7 +2947,6 @@ def slash_context(
     invocations = engine.get_planning_usage(
         since=since, until=until, return_invocations=True,
     )
-    # Filter to the requested command (substring or literal match)
     try:
         _check_redos_safe(command)
         cmd_re = _re.compile(command, _re.IGNORECASE)
@@ -2910,22 +2956,8 @@ def slash_context(
         if "ReDoS" in msg:
             err_console.print(f"[yellow]Warning:[/yellow] --command pattern rejected: {msg}. Falling back to literal substring match.")
         invocations = [inv for inv in invocations if command.lower() in inv.command.lower()]
-    out_console = Console(record=bool(output))
-    if not invocations:
-        out_console.print(f"[yellow]No invocations of {command!r} found.[/yellow]")
-        _write_output(out_console, output)
-        return
-    for inv in invocations:
-        out_console.print(f"\n[bold cyan]{inv.command}[/bold cyan] [dim]{inv.timestamp[:19]}[/dim] [blue]{inv.session_id[:8]}[/blue]")
-        if inv.args:
-            out_console.print(f"  [dim]args:[/dim] {inv.args}")
-        messages = engine.get_messages(inv.session_id)
-        after_msgs = [m for m in messages if (m.timestamp or "") > inv.timestamp][:context_after]
-        for m in after_msgs:
-            out_console.print(f"  [dim][{m.type.value}] {(m.timestamp or '')[:19]}[/dim]")
-            out_console.print(f"  [dim]{(m.content or '')[:300]}[/dim]")
-    out_console.print(f"\n[bold]Found {len(invocations)} invocations[/bold]")
-    _write_output(out_console, output)
+    max_chars_val = max_chars if max_chars is not None else _cfg_default("max_chars", 0)
+    _render_invocations_with_context(invocations, context_after, engine, output, max_chars=max_chars_val)
 
 
 #: Supported content extraction types for ``messages extract``.

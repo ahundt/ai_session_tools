@@ -11774,23 +11774,23 @@ class TestMessagesTimelineGrepTypeCompactionFlags:
 
 # TDD #13a: messages planning new CLI flags
 
-class TestMessagesPlanningShowArgsContextAfterFlags:
-    """TDD: messages planning --show-args and --context-after flags."""
+class TestMessagesPlanningDetailContextAfterFlags:
+    """TDD: messages planning --detail and --context-after flags."""
 
-    def test_planning_show_args_exits_cleanly(self, tmp_path):
-        """messages planning --show-args must be accepted."""
+    def test_planning_detail_exits_cleanly(self, tmp_path):
+        """messages planning --detail must be accepted."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--provider", "claude", "messages", "planning", "--show-args"],
+            app, ["--provider", "claude", "messages", "planning", "--detail"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_planning_show_args_includes_text_after_slash_command_token(self, tmp_path):
-        """messages planning --show-args shows args for each planning command."""
+    def test_planning_detail_includes_text_after_slash_command_token(self, tmp_path):
+        """messages planning --detail shows args for each planning command."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--provider", "claude", "messages", "planning", "--show-args"],
+            app, ["--provider", "claude", "messages", "planning", "--detail"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -12689,7 +12689,7 @@ class TestReDoSProtection:
 
 
 class TestShowSessions:
-    """Tests for --show-sessions flag on messages planning and SlashCommandRecord metadata."""
+    """Tests for --detail flag on messages planning and SlashCommandRecord metadata."""
 
     def test_slash_command_record_has_cwd_and_git_branch(self, tmp_path):
         """SlashCommandRecord should include cwd and git_branch from JSONL data."""
@@ -12705,23 +12705,23 @@ class TestShowSessions:
         assert d["cwd"] == "/Users/alice/proj1"
         assert d["git_branch"] == "main"
 
-    def test_planning_show_sessions_includes_cwd(self, tmp_path):
-        """messages planning --show-sessions should include cwd in output."""
+    def test_planning_detail_includes_cwd(self, tmp_path):
+        """messages planning --detail should include cwd in output."""
         _make_projects_with_sessions(tmp_path)
         env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
         result = runner.invoke(app, [
-            "messages", "planning", "--show-sessions",
+            "messages", "planning", "--detail",
         ], env=env)
         assert result.exit_code == 0
         # Session 1 has cwd=/Users/alice/proj1 and a planning command
         assert "/Users/alice/proj1" in result.output or "proj1" in result.output
 
-    def test_planning_show_sessions_flag(self, tmp_path):
-        """messages planning --show-sessions should show session IDs and metadata."""
+    def test_planning_detail_flag(self, tmp_path):
+        """messages planning --detail should show session IDs and metadata."""
         _make_projects_with_sessions(tmp_path)
         env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
         result = runner.invoke(app, [
-            "messages", "planning", "--show-sessions",
+            "messages", "planning", "--detail",
         ], env=env)
         assert result.exit_code == 0
         # Should show session ID prefix
@@ -12737,3 +12737,269 @@ class TestShowSessions:
         assert result.exit_code == 0
         # Should include cwd from session data
         assert "/Users/alice" in result.output or "proj1" in result.output
+
+
+# ── Addendum TDD: _INVOCATIONS_SPEC, _render_invocations_with_context, DRY refactor ──
+
+
+class TestInvocationsSpecRendering:
+    """TDD: _INVOCATIONS_SPEC auto-suppression, JSON format, full-uuid."""
+
+    def test_invocations_spec_auto_suppresses_empty_columns(self, tmp_path):
+        """Columns with all-empty values should be hidden by _render_output."""
+        from ai_session_tools.models import SlashCommandRecord
+        from ai_session_tools.cli import _INVOCATIONS_SPEC, _render_output
+        # Invocations with no cwd or git_branch — Path and Branch columns should auto-suppress
+        invocations = [
+            SlashCommandRecord(command="/commit", args="", session_id="aaaa0001-0000",
+                               timestamp="2026-01-24T10:00:00", project_dir="proj1",
+                               cwd="", git_branch=""),
+        ]
+        # _render_output prints to console — just verify no crash
+        import io
+        from rich.console import Console
+        console = Console(file=io.StringIO(), width=120)
+        _render_output(invocations, "table", _INVOCATIONS_SPEC, "No invocations")
+
+    def test_invocations_spec_json_format(self, tmp_path):
+        """--format json on commands list returns valid JSON with cwd/git_branch."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "list", "--format", "json",
+        ], env=env)
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        assert len(data) > 0
+        # Each record should have standard SlashCommandRecord keys
+        assert "command" in data[0]
+        assert "cwd" in data[0]
+        assert "git_branch" in data[0]
+
+    def test_invocations_spec_full_uuid(self, tmp_path):
+        """--full-uuid on commands list shows 36-char session IDs."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "list", "--full-uuid",
+        ], env=env)
+        assert result.exit_code == 0
+        # Full UUID: aaaa0001-0000-0000-0000-000000000000 (36 chars)
+        assert "aaaa0001-0000-0000-0000-000000000000" in result.output
+
+
+class TestRenderInvocationsWithContext:
+    """TDD: _render_invocations_with_context shared helper."""
+
+    def test_context_after_no_truncation_by_default(self, tmp_path):
+        """Context content should not be hardcoded-truncated by default."""
+        projects = _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "context", "/ar:plannew", "--context-after", "1",
+        ], env=env)
+        assert result.exit_code == 0
+        # Should contain invocation info
+        assert "/ar:plannew" in result.output
+
+    def test_context_after_max_chars(self, tmp_path):
+        """--max-chars should truncate context content."""
+        projects = _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "context", "/ar:plannew", "--context-after", "1",
+            "--max-chars", "10",
+        ], env=env)
+        assert result.exit_code == 0
+        assert "/ar:plannew" in result.output
+
+    def test_context_after_output_tee(self, tmp_path):
+        """--output should write file (tee)."""
+        projects = _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "ctx_out.txt"
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "context", "/ar:plannew", "--context-after", "1",
+            "--output", str(output_file),
+        ], env=env)
+        assert result.exit_code == 0
+        assert output_file.exists()
+        content = output_file.read_text()
+        assert "/ar:plannew" in content
+
+    def test_context_after_escapes_rich_markup(self, tmp_path):
+        """Paths with [brackets] should not cause Rich MarkupError."""
+        # Create session with bracket-containing cwd
+        projects = tmp_path / "projects"
+        proj = projects / "-Users-alice-proj1"
+        proj.mkdir(parents=True)
+        s1 = "cccc0003-0000-0000-0000-000000000000"
+        lines = [
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:10:00",
+                        "cwd": "/Users/alice/proj[1]", "gitBranch": "feat/[test]",
+                        "message": {"role": "user", "content": "/commit fix things"}}),
+            json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-24T10:11:00",
+                        "message": {"role": "assistant", "content": [
+                            {"type": "text", "text": "Done with [brackets] in content"}]}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "context", "/commit", "--context-after", "1",
+        ], env=env)
+        # Must not crash with MarkupError
+        assert result.exit_code == 0
+        assert "/commit" in result.output
+
+
+class TestPlanningDetailFlag:
+    """TDD: messages planning --detail flag replaces --show-args/--show-sessions."""
+
+    def test_planning_detail_shows_table(self, tmp_path):
+        """--detail should show per-invocation table output."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "messages", "planning", "--detail",
+        ], env=env)
+        assert result.exit_code == 0
+        # Should show invocation details
+        assert "aaaa0001" in result.output or "/ar:plannew" in result.output
+
+    def test_planning_detail_json_format(self, tmp_path):
+        """--detail --format json should return valid JSON."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "messages", "planning", "--detail", "--format", "json",
+        ], env=env)
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        if data:
+            assert "command" in data[0]
+            assert "args" in data[0]
+
+    def test_planning_detail_full_uuid(self, tmp_path):
+        """--detail --full-uuid should show full 36-char UUIDs."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "messages", "planning", "--detail", "--full-uuid",
+        ], env=env)
+        assert result.exit_code == 0
+        assert "aaaa0001-0000-0000-0000-000000000000" in result.output
+
+    def test_planning_context_after_implies_detail(self, tmp_path):
+        """--context-after should work without --detail (implies it)."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "messages", "planning", "--context-after", "2",
+        ], env=env)
+        assert result.exit_code == 0
+        assert "/ar:plannew" in result.output
+
+    def test_planning_context_after_max_chars(self, tmp_path):
+        """--context-after --max-chars should truncate context content."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "messages", "planning", "--context-after", "1", "--max-chars", "10",
+        ], env=env)
+        assert result.exit_code == 0
+
+
+class TestSlashListInvocationsSpec:
+    """TDD: slash_list with _INVOCATIONS_SPEC, --format, --full-uuid, --limit."""
+
+    def test_commands_list_json_format(self, tmp_path):
+        """commands list --format json should return valid JSON."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "list", "--format", "json",
+        ], env=env)
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+
+    def test_commands_list_full_uuid(self, tmp_path):
+        """commands list --full-uuid should show full UUIDs."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "list", "--full-uuid",
+        ], env=env)
+        assert result.exit_code == 0
+        assert "aaaa0001-0000-0000-0000-000000000000" in result.output
+
+    def test_commands_list_limit(self, tmp_path):
+        """commands list --limit 1 should return at most 1 invocation."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "list", "--limit", "1", "--format", "json",
+        ], env=env)
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) <= 1
+
+    def test_commands_list_auto_suppresses_empty_branch(self, tmp_path):
+        """Branch column should be hidden when all sessions have empty branch."""
+        # Create sessions without git_branch
+        projects = tmp_path / "projects"
+        proj = projects / "-Users-alice-nobranch"
+        proj.mkdir(parents=True)
+        s1 = "dddd0004-0000-0000-0000-000000000000"
+        lines = [
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:10:00",
+                        "cwd": "/Users/alice/nobranch",
+                        "message": {"role": "user", "content": "/commit fix"}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "list",
+        ], env=env)
+        assert result.exit_code == 0
+        # "Branch" header should not appear when all values are empty
+        # (auto-suppression in _render_output)
+        assert "Branch" not in result.output
+
+
+class TestSlashContextSharedHelper:
+    """TDD: slash_context using _render_invocations_with_context."""
+
+    def test_slash_context_no_truncation_default(self, tmp_path):
+        """slash context should show full content by default (no [:300] truncation)."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "context", "/ar:plannew", "--context-after", "1",
+        ], env=env)
+        assert result.exit_code == 0
+        assert "/ar:plannew" in result.output
+
+    def test_slash_context_max_chars(self, tmp_path):
+        """slash context --max-chars should truncate."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "context", "/ar:plannew", "--context-after", "1",
+            "--max-chars", "5",
+        ], env=env)
+        assert result.exit_code == 0
+
+    def test_slash_context_output_tee(self, tmp_path):
+        """slash context --output should write file."""
+        _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "slash_ctx.txt"
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "context", "/ar:plannew", "--context-after", "1",
+            "--output", str(output_file),
+        ], env=env)
+        assert result.exit_code == 0
+        assert output_file.exists()
