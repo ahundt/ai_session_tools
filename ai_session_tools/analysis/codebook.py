@@ -17,6 +17,44 @@ from pathlib import Path
 
 from ai_session_tools.config import get_config_section, load_config
 
+# ── Built-in defaults: used when no external CODEBOOK.md / keyword JSONs exist ──
+
+_DEFAULT_TECH_CODES: dict[str, list[str]] = {
+    "chain_of_thought": ["step by step", "let me think", "reasoning through"],
+    "few_shot": ["for example", "here is an example", "example output"],
+    "planning": ["implementation plan", "plan the approach", "design the solution"],
+    "test_driven": ["write tests first", "test driven", "failing test"],
+    "code_review": ["review this code", "code review", "pull request review"],
+    "debugging": ["debug this", "stack trace", "error message", "traceback"],
+    "refactoring": ["refactor this", "restructure", "clean up the code"],
+}
+
+_DEFAULT_ROLE_CODES: dict[str, list[str]] = {
+    "software_engineer": ["implement", "write code", "build the feature"],
+    "code_reviewer": ["review this", "check for bugs", "find issues"],
+    "architect": ["design the system", "architecture", "system design"],
+    "tester": ["write tests", "test coverage", "unit test"],
+    "devops": ["deploy", "CI pipeline", "docker", "kubernetes"],
+}
+
+_DEFAULT_KEYWORD_MAPS: dict[str, dict[str, list[str]]] = {
+    "task_categories": {
+        "coding": ["implement", "write code", "function", "class", "method"],
+        "debugging": ["debug", "fix bug", "error", "exception", "traceback"],
+        "testing": ["test", "assert", "pytest", "unittest", "coverage"],
+        "documentation": ["document", "docstring", "README", "comments"],
+        "refactoring": ["refactor", "clean up", "restructure", "simplify"],
+        "planning": ["plan", "design", "architect", "approach"],
+        "research": ["research", "investigate", "explore", "understand"],
+        "configuration": ["config", "setup", "install", "environment"],
+    },
+    "writing_methods": {
+        "interactive": ["help me", "can you", "please", "I need"],
+        "directive": ["implement", "write", "create", "add", "fix"],
+        "exploratory": ["what if", "how does", "explain", "why"],
+    },
+}
+
 
 def load_scoring_weights(org_dir: Path | None = None) -> dict:
     """Load scoring weights from config.json[scoring_weights] or org_dir/scoring_weights.json.
@@ -48,7 +86,7 @@ def load_codebook(org_dir: Path) -> tuple[dict[str, list[str]], dict[str, list[s
     role_codes: dict[str, list[str]] = {}
     codebook_path = org_dir / "CODEBOOK.md"
     if not codebook_path.exists():
-        return tech_codes, role_codes
+        return dict(_DEFAULT_TECH_CODES), dict(_DEFAULT_ROLE_CODES)
 
     in_roles = False
     with contextlib.suppress(OSError):
@@ -94,6 +132,8 @@ def load_keyword_maps(org_dir: Path | None = None) -> dict[str, dict[str, list[s
         path = org_dir / f"{name}.json"
         with contextlib.suppress(OSError, json.JSONDecodeError):
             maps[name] = json.loads(path.read_text(encoding="utf-8"))
+    if not maps:
+        return {k: dict(v) for k, v in _DEFAULT_KEYWORD_MAPS.items()}
     return maps
 
 

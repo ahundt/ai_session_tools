@@ -250,6 +250,9 @@ _parse_date_input = parse_date_input
 #: Used when analyze_planning_usage() is called with commands=None (discovery mode).
 _SLASH_CMD_DISCOVERY_RE = re.compile(r"^/(\w[\w:.-]*)(?=\s|$)")
 
+#: Fast timestamp extraction from raw JSONL lines (avoids json.loads for --after-timestamp).
+_TS_EXTRACT_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
+
 #: Extract slash command from Claude Code's XML tag format:
 #: <command-name>/ar:plannew</command-name>
 #: Returns the command name (e.g. "/ar:plannew") from the XML tag.
@@ -458,6 +461,36 @@ def _is_compaction(data: dict, content: Optional[str]) -> bool:
     return bool(data.get("isCompactSummary")) or (content or "").startswith(
         "This session is being continued"
     )
+
+
+def _is_continuation_summary(content: Optional[str]) -> bool:
+    """Return True if this message is a context continuation summary.
+
+    Stricter subset of _is_compaction: checks only the text prefix (not the
+    isCompactSummary flag). Used by find_corrections() to filter false positives
+    from continuation summaries that quote previous user messages verbatim.
+    """
+    if not content:
+        return False
+    return content.lstrip().startswith("This session is being continued from")
+
+
+def _is_skill_injection(data: dict, content: Optional[str], prev_was_slash: bool) -> bool:
+    """Detect skill injection messages: user messages injected by hook system.
+
+    Skill injections are user-role messages immediately following a <command-name>
+    message. They typically start with a markdown heading (# Skill Name) and
+    contain the full SKILL.md body. They never have their own <command-name> tag.
+    """
+    if not prev_was_slash:
+        return False
+    if data.get("type") != "user":
+        return False
+    if not content:
+        return False
+    if "<command-name>" in content:
+        return False
+    return content.lstrip().startswith("# ") or content.lstrip().startswith("<command-")
 
 
 class SessionRecoveryEngine:
@@ -1022,6 +1055,9 @@ class SessionRecoveryEngine:
         exclude_compaction: bool = False,
         since: Optional[str] = None,
         session_id: Optional[str] = None,
+        fixed_strings: bool = False,
+        after_index: int = 0,
+        after_timestamp: Optional[str] = None,
     ) -> List[SessionMessage]:
         """Search for messages across all sessions.
 
@@ -1033,6 +1069,10 @@ class SessionRecoveryEngine:
             tool: Optional tool name to filter by (e.g. 'Bash', 'Write', 'Edit').
                   When set, searches assistant messages for tool_use blocks with
                   this name. query is matched against the serialized tool input.
+            fixed_strings: When True, treat query as literal string (no regex).
+                           Consistent with grep -F / ripgrep -F.
+            after_index: Skip the first N messages in each session before searching.
+            after_timestamp: Skip messages before this timestamp within each session.
 
         Returns:
             List of matching SessionMessage objects. Empty list if projects_dir does not exist.
@@ -1046,11 +1086,17 @@ class SessionRecoveryEngine:
             message_type = "assistant"
 
         # Allow empty query when filtering by tool (list all invocations)
-        pattern = self._compile_pattern(query) if query else None
+        if fixed_strings:
+            pattern = None
+            is_literal = True
+            query_lower = query.lower() if query else None
+        else:
+            pattern = self._compile_pattern(query) if query else None
 
         # Pre-compute literal pre-filter: only safe when query has no regex metacharacters.
-        is_literal = not query or re.escape(query) == query
-        query_lower = query.lower() if (is_literal and query) else None
+        if not fixed_strings:
+            is_literal = not query or re.escape(query) == query
+            query_lower = query.lower() if (is_literal and query) else None
         # Heuristic: message_type value must appear in the raw JSON line (no false negatives).
         # "slash" and "compaction" are derived values (content-based), not literal JSONL fields —
         # they both come from "user" records, so pre-filter on "user" for those two.
@@ -1066,7 +1112,17 @@ class SessionRecoveryEngine:
         ):
             try:
                 with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                    _msg_idx = 0
                     for line in f:
+                        _msg_idx += 1
+                        # Skip messages before after_index within each session
+                        if after_index > 0 and _msg_idx <= after_index:
+                            continue
+                        # Skip messages before after_timestamp (fast raw-line check)
+                        if after_timestamp:
+                            _ts_m = _TS_EXTRACT_RE.search(line)
+                            if _ts_m and _ts_m.group(1) < after_timestamp:
+                                continue
                         try:
                             # Raw line pre-filters: skip json.loads when possible.
                             if query_lower and query_lower not in line.lower():
@@ -1112,7 +1168,14 @@ class SessionRecoveryEngine:
                                             and item.get("name", "").lower() == tool_lower):
                                         # Serialize input for query matching + display
                                         input_str = json.dumps(item.get("input", {}))
-                                        if not pattern or pattern.search(input_str):
+                                        # Match query against tool input (literal or regex)
+                                        if query_lower:
+                                            matched = query_lower in input_str.lower()
+                                        elif pattern:
+                                            matched = bool(pattern.search(input_str))
+                                        else:
+                                            matched = True  # no query = match all
+                                        if matched:
                                             messages.append(SessionMessage(
                                                 type=self._parse_message_type(msg_type),
                                                 timestamp=data.get("timestamp", ""),
@@ -1122,8 +1185,17 @@ class SessionRecoveryEngine:
                                             break  # one match per message line
                             else:
                                 # content already extracted above for type/compaction filtering
-                                if content and (not pattern or pattern.search(content)):
-                                    messages.append(
+                                if not content:
+                                    continue
+                                # Match query against content (literal or regex)
+                                if query_lower:
+                                    if query_lower not in content.lower():
+                                        continue
+                                elif pattern:
+                                    if not pattern.search(content):
+                                        continue
+                                # else: no query = match all
+                                messages.append(
                                         SessionMessage(
                                             type=self._parse_message_type(msg_type),
                                             timestamp=data.get("timestamp", ""),
@@ -1208,6 +1280,7 @@ class SessionRecoveryEngine:
         until: Optional[str] = None,   # canonical; --before is a hidden alias
         patterns: Optional[List[tuple]] = None,
         limit: int = 50,
+        session_id_prefix: Optional[str] = None,
     ) -> List[CorrectionMatch]:
         """Find user messages where corrections were given to Claude.
 
@@ -1230,13 +1303,17 @@ class SessionRecoveryEngine:
         ]
         results: List[CorrectionMatch] = []
         for project_dir_name, jsonl_file, skip_until_check in self._iter_all_jsonl(
-            project_filter, since=since, until=until
+            project_filter, since=since, until=until,
+            session_id_prefix=session_id_prefix,
         ):
             try:
                 with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                    prev_was_slash = False
                     for line in f:
                         try:
-                            # Raw pre-filter: skip non-user lines cheaply before json.loads
+                            # Raw pre-filter: skip non-user lines cheaply before json.loads.
+                            # Do NOT reset prev_was_slash here — non-user records (assistant,
+                            # system) can appear between a slash command and its skill injection.
                             if '"type":"user"' not in line and '"type": "user"' not in line:
                                 continue
                             data = _json_loads(line)
@@ -1256,6 +1333,16 @@ class SessionRecoveryEngine:
                             content = self._extract_content(data)
                             if not content:
                                 continue
+                            # Skip false positives: continuation summaries and skill injections.
+                            # Continuation summaries are never slash commands — always reset.
+                            if _is_continuation_summary(content):
+                                prev_was_slash = False
+                                continue
+                            is_slash = "<command-name>" in content
+                            if _is_skill_injection(data, content, prev_was_slash):
+                                prev_was_slash = False
+                                continue
+                            prev_was_slash = is_slash
                             for cat, regex, _kws in compiled:
                                 m = regex.search(content)
                                 if m:
@@ -1749,6 +1836,10 @@ class SessionRecoveryEngine:
         exclude_compaction: bool = False,
         since: Optional[str] = None,
         session_id: Optional[str] = None,
+        fixed_strings: bool = False,
+        skip_injection: bool = True,
+        after_index: int = 0,
+        after_timestamp: Optional[str] = None,
     ) -> List[ContextMatch]:
         """Search messages and return each match with surrounding context messages.
 
@@ -1761,6 +1852,11 @@ class SessionRecoveryEngine:
             context:      Number of messages before AND after each match to include.
             message_type: Optional filter: 'user', 'assistant', or 'system'.
             tool:         Optional tool name filter (same semantics as search_messages).
+            fixed_strings: When True, treat query as literal (no regex). Consistent with grep -F.
+            skip_injection: Exclude skill injection messages (SKILL.md content) from
+                context windows. Default True — injections are noise for auditing.
+            after_index:  Skip the first N messages in each session before matching.
+            after_timestamp: Skip messages before this timestamp within each session.
 
         Returns:
             List of ContextMatch, one per matching message (not deduplicated).
@@ -1768,7 +1864,10 @@ class SessionRecoveryEngine:
         if tool is not None and message_type is None:
             message_type = "assistant"
 
-        pattern = self._compile_pattern(query) if query else None
+        if fixed_strings:
+            pattern = None
+        else:
+            pattern = self._compile_pattern(query) if query else None
         tool_lower = tool.lower() if tool else None
 
         results: List[ContextMatch] = []
@@ -1826,6 +1925,11 @@ class SessionRecoveryEngine:
             nb = context_before if context_before >= 0 else context
             na = context_after if context_after >= 0 else context
             for i, msg in enumerate(all_msgs):
+                # Skip messages before after_index/after_timestamp thresholds
+                if after_index > 0 and (i + 1) <= after_index:
+                    continue
+                if after_timestamp and msg.timestamp and msg.timestamp < after_timestamp:
+                    continue
                 msg_type_str = msg.type.value if hasattr(msg.type, "value") else str(msg.type)
                 # Extended type filter: slash/compaction are content-based
                 if message_type == "slash":
@@ -1842,9 +1946,36 @@ class SessionRecoveryEngine:
                         continue
                 if exclude_compaction and (msg.content or "").startswith("This session is being continued"):
                     continue
-                if not pattern or pattern.search(msg.content):
+                # Match content against query: regex (default) or literal (-F)
+                content_text = msg.content or ""
+                if fixed_strings:
+                    matched = not query or query.lower() in content_text.lower()
+                else:
+                    matched = not pattern or pattern.search(content_text)
+                if matched:
                     ctx_before = all_msgs[max(0, i - nb): i]
-                    ctx_after = all_msgs[i + 1: i + 1 + na]
+                    raw_after = all_msgs[i + 1: i + 1 + na + (5 if skip_injection and na > 0 else 0)]
+                    if skip_injection and na > 0:
+                        # Filter out skill injections from context_after.
+                        # The match itself might be a slash command, making the next
+                        # user message a potential injection.
+                        is_slash = "<command-name>" in (msg.content or "")
+                        filtered = []
+                        prev_slash = is_slash
+                        for am in raw_after:
+                            if _is_skill_injection(
+                                {"type": am.type.value if hasattr(am.type, "value") else str(am.type)},
+                                am.content, prev_slash
+                            ):
+                                prev_slash = False
+                                continue
+                            prev_slash = "<command-name>" in (am.content or "")
+                            filtered.append(am)
+                            if len(filtered) >= na:
+                                break
+                        ctx_after = filtered
+                    else:
+                        ctx_after = raw_after[:na]
                     results.append(ContextMatch(
                         match=msg,
                         context_before=ctx_before,
@@ -2546,6 +2677,9 @@ class AISession:
         exclude_compaction: bool = False,
         since: str | None = None,
         session_id: str | None = None,
+        fixed_strings: bool = False,
+        after_index: int = 0,
+        after_timestamp: str | None = None,
     ) -> list[SessionMessage] | list[ContextMatch]:
         """Search messages across all configured AI session sources.
 
@@ -2560,6 +2694,9 @@ class AISession:
             exclude_compaction: Exclude compaction summary messages from results.
             since:             Only messages from sessions with mtime >= this ISO timestamp.
             session_id:        Scope to one session ID or prefix.
+            fixed_strings:     When True, treat query as literal string (no regex). Consistent with grep -F.
+            after_index:       Skip the first N messages in each session before searching.
+            after_timestamp:   Skip messages before this timestamp within each session.
 
         Returns:
             list[SessionMessage] when context=0 and no context_before/after (default).
@@ -2595,6 +2732,9 @@ class AISession:
                     exclude_compaction=exclude_compaction,
                     since=since,
                     session_id=session_id,
+                    fixed_strings=fixed_strings,
+                    after_index=after_index,
+                    after_timestamp=after_timestamp,
                 )
                 # Merge non-Claude results as ContextMatch (no context window available)
                 non_claude = _non_claude_results()
@@ -2620,6 +2760,9 @@ class AISession:
                 exclude_compaction=exclude_compaction,
                 since=since,
                 session_id=session_id,
+                fixed_strings=fixed_strings,
+                after_index=after_index,
+                after_timestamp=after_timestamp,
             )
             # Merge non-Claude results in multi-source mode
             non_claude = _non_claude_results()
@@ -2854,6 +2997,7 @@ class AISession:
         project_filter: str | None = None,
         patterns: list | None = None,
         limit: int | None = None,
+        session_id_prefix: str | None = None,
     ) -> list[CorrectionMatch]:
         """Find user messages where corrections were given to the AI.
 
@@ -2888,6 +3032,7 @@ class AISession:
                 until=until,
                 patterns=_patterns,
                 limit=limit,
+                session_id_prefix=session_id_prefix,
             )
         # Generic fallback: iterate sessions + messages
         compiled = [

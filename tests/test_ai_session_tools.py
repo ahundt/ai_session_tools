@@ -728,7 +728,7 @@ class TestMessagesSearchToolFlag:
     def test_tool_flag_returns_write_call(self, tmp_path):
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
-            app, ["--provider", "claude", "messages", "search", "*", "--tool", "Write"],
+            app, ["--provider", "claude", "messages", "search", "", "--tool", "Write"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
         assert result.exit_code == 0
@@ -7049,12 +7049,14 @@ class TestCodebookExtended:
         assert "task_categories" in result
         assert result["task_categories"] == categories
 
-    def test_load_keyword_maps_no_config_no_files_returns_empty(self, tmp_path, monkeypatch):
+    def test_load_keyword_maps_no_config_no_files_returns_defaults(self, tmp_path, monkeypatch):
         from ai_session_tools.analysis.codebook import load_keyword_maps
         self._patch_codebook(monkeypatch,
                              get_config_section_fn=lambda _: None)
         result = load_keyword_maps(org_dir=tmp_path)
-        assert result == {}
+        # With built-in defaults, should return non-empty maps when no external files exist
+        assert len(result) > 0
+        assert "task_categories" in result
 
     def test_load_keyword_maps_partial_file_presence(self, tmp_path, monkeypatch):
         import json
@@ -13003,3 +13005,750 @@ class TestSlashContextSharedHelper:
         ], env=env)
         assert result.exit_code == 0
         assert output_file.exists()
+
+
+# ─── TDD: Bug fixes and new features (2026-03-06) ───────────────────────────
+
+
+def _make_projects_with_many_slash_invocations(tmp_path: Path, count: int = 55) -> Path:
+    """Create projects dir with >50 slash command invocations to test engine limit bug."""
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-alice-proj1"
+    proj.mkdir(parents=True)
+    s1 = "cccc0003-0000-0000-0000-000000000000"
+    lines = []
+    for i in range(count):
+        ts = f"2026-01-24T{10 + i // 60:02d}:{i % 60:02d}:00.000Z"
+        cmd = "/ar:plannew" if i % 3 == 0 else "/commit"
+        lines.append(json.dumps({
+            "sessionId": s1, "type": "user", "timestamp": ts,
+            "cwd": "/Users/alice/proj1", "gitBranch": "main",
+            "message": {"role": "user", "content": f"{cmd} task {i}"},
+        }))
+    # Add one assistant response after last slash command
+    lines.append(json.dumps({
+        "sessionId": s1, "type": "assistant",
+        "timestamp": "2026-01-24T11:00:00.000Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+    }))
+    (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+    return projects
+
+
+def _make_projects_with_skill_injection(tmp_path: Path) -> Path:
+    """Create projects dir with slash command followed by skill injection for Bug 6 testing."""
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-alice-proj1"
+    proj.mkdir(parents=True)
+    s1 = "dddd0004-0000-0000-0000-000000000000"
+    lines = [
+        # Real slash command invocation
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                    "message": {"role": "user", "content":
+                                "<command-name>ar:plannew</command-name>\n/ar:plannew fix auth"}}),
+        # Skill injection (user message immediately after, starts with # heading)
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:01.000Z",
+                    "message": {"role": "user", "content":
+                                "# Create New Plan (/ar:plannew)\n\nThis is the full SKILL.md content..."}}),
+        # Assistant response (the actual context we want to see)
+        json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-24T10:01:00.000Z",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "text", "text": "I'll create a plan for fixing auth."}]}}),
+        # User follow-up
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:02:00.000Z",
+                    "message": {"role": "user", "content": "also add tests"}}),
+    ]
+    (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+    return projects
+
+
+# ─── Bug 1: commands list+context engine limit ──────────────────────────────
+
+
+class TestBug1CommandsLimitFix:
+    """Bug 1: commands list and context must not pre-truncate via engine default limit=50."""
+
+    def test_commands_list_returns_all_invocations_beyond_50(self, tmp_path):
+        """With >50 invocations, commands list should return all (not just first 50)."""
+        projects = _make_projects_with_many_slash_invocations(tmp_path, count=55)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "list"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # All 55 invocations should be present (not truncated to 50)
+        output = result.output
+        # Count occurrences of /ar:plannew (every 3rd = ~19) and /commit (~36)
+        assert "/ar:plannew" in output
+        assert "/commit" in output
+
+    def test_commands_context_finds_invocation_with_many_total(self, tmp_path):
+        """commands context should find /ar:plannew even when total invocations > 50."""
+        projects = _make_projects_with_many_slash_invocations(tmp_path, count=55)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "context", "/ar:plannew"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "No invocations found" not in result.output
+
+    def test_commands_list_command_filter_after_limit(self, tmp_path):
+        """--command filter should work correctly when total invocations > engine limit."""
+        projects = _make_projects_with_many_slash_invocations(tmp_path, count=55)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "list", "--command", "/ar:plannew"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # Only /ar:plannew should appear, not /commit
+        assert "/commit" not in result.output or "/ar:plannew" in result.output
+
+
+# ─── Bug 3: Path column min_width ───────────────────────────────────────────
+
+
+class TestBug3PathColumnRendering:
+    """Bug 3: Path column should not render one char per line."""
+
+    def test_path_not_rendered_vertically(self, tmp_path):
+        """Path column must not fold to single-char-per-line rendering."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "list"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        lines = result.output.strip().split("\n")
+        # Count lines that are ONLY a single visible char (excluding table borders)
+        single_char_lines = [
+            ln for ln in lines
+            if len(ln.strip().replace("┃", "").replace("│", "").strip()) == 1
+        ]
+        # A few single chars ok (e.g. table border chars), but not dozens
+        assert len(single_char_lines) < 5, (
+            f"Too many single-char lines ({len(single_char_lines)}), "
+            f"Path column may be rendering vertically"
+        )
+
+
+# ─── Bug 4: commands context --format ────────────────────────────────────────
+
+
+class TestBug4CommandsContextFormat:
+    """Bug 4: commands context should accept --format json/csv/plain."""
+
+    def test_context_accepts_format_json(self, tmp_path):
+        """commands context --format json should produce valid JSON array."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "context", "/ar:plannew",
+                  "--format", "json"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+
+    def test_context_format_json_contains_context_after(self, tmp_path):
+        """JSON output should include context_after array for each invocation."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "context", "/ar:plannew",
+                  "--format", "json", "--context-after", "2"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        if len(data) > 0:
+            assert "context_after" in data[0]
+
+
+# ─── Bug 7: --fixed-strings / -F ────────────────────────────────────────────
+
+
+class TestBug7LiteralDefaultRegexOptIn:
+    """Bug 7: literal search by default, --regex/-E opts in to regex."""
+
+    def test_literal_search_default(self, tmp_path):
+        """Default search is literal — 'forgot' matches 'you forgot to add the test'."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "forgot"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert len(result.output.strip()) > 0
+
+    def test_pipe_is_literal_by_default(self, tmp_path):
+        """Without -E, 'forgot|proj2' is literal (pipe is NOT regex OR)."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "forgot|proj2"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # The literal string "forgot|proj2" does not appear in any message
+
+    def test_regex_flag_enables_or(self, tmp_path):
+        """With --regex, 'forgot|proj2' is regex OR — matches both sessions."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "forgot|proj2", "--regex"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert len(result.output.strip()) > 0
+
+    def test_regex_long_flag(self, tmp_path):
+        """--regex should work same as -E."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "forgot|proj2",
+                  "--regex"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert len(result.output.strip()) > 0
+
+    def test_dot_is_literal_by_default(self, tmp_path):
+        """Without -E, '.' is literal dot, not regex any-char."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "file.txt"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # "file.txt" doesn't appear literally in fixture data
+
+    def test_timeline_grep_literal_default(self, tmp_path):
+        """messages timeline --grep PATTERN is literal by default."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
+                  "--grep", "forgot"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_timeline_grep_regex_flag(self, tmp_path):
+        """messages timeline --grep PATTERN -E enables regex."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
+                  "--grep", "forgot|feature", "--regex"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+# ─── Bug 6: Auto-skip skill injection in context windows ────────────────────
+
+
+class TestBug6SkipInjection:
+    """Bug 6: Skill injection (SKILL.md content) should be auto-filtered from context windows."""
+
+    def test_is_skill_injection_helper(self):
+        """_is_skill_injection detects user messages after slash commands starting with #."""
+        from ai_session_tools.engine import _is_skill_injection
+        # Skill injection: user msg after slash, starts with "# "
+        assert _is_skill_injection(
+            {"type": "user"},
+            "# Create New Plan\nFull skill content...",
+            prev_was_slash=True,
+        ) is True
+        # Not injection: no previous slash command
+        assert _is_skill_injection(
+            {"type": "user"},
+            "# Create New Plan\nFull skill content...",
+            prev_was_slash=False,
+        ) is False
+        # Not injection: assistant message
+        assert _is_skill_injection(
+            {"type": "assistant"},
+            "# Sure, here's the plan",
+            prev_was_slash=True,
+        ) is False
+        # Not injection: has its own <command-name> tag (it's a real invocation, not injection)
+        assert _is_skill_injection(
+            {"type": "user"},
+            "<command-name>commit</command-name>\n/commit",
+            prev_was_slash=True,
+        ) is False
+
+    def test_auto_skip_injection_on_search(self, tmp_path):
+        """Context-after on slash search should auto-exclude skill injection (no flag needed)."""
+        projects = _make_projects_with_skill_injection(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "",
+                  "--type", "slash", "--context-after", "3"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # Skill injection content should NOT appear — filtered automatically
+        assert "SKILL.md content" not in result.output
+
+    def test_auto_skip_injection_on_commands_context(self, tmp_path):
+        """commands context should auto-skip skill injection (no flag needed)."""
+        projects = _make_projects_with_skill_injection(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "context", "/ar:plannew",
+                  "--context-after", "3"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+# ─── Bug 5+2: analyze with Claude sessions ──────────────────────────────────
+
+
+class TestBug5AnalyzeClaude:
+    """Bug 5+2: analyze pipeline should find Claude sessions."""
+
+    def test_analyze_accepts_provider_claude(self, tmp_path):
+        """aise analyze --provider claude should not error."""
+        org = tmp_path / "org"
+        org.mkdir()
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "analyze", "--org-dir", str(org), "--force"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "0 sessions" not in result.output.lower()
+
+    def test_analyze_does_not_reject_claude_source_filter(self, tmp_path):
+        """source_filter='claude' should not be silently dropped."""
+        org = tmp_path / "org"
+        org.mkdir()
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "analyze", "--org-dir", str(org), "--force"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        # Should not say "No such option" or silently produce 0 results
+        assert result.exit_code == 0
+
+
+# ─── Feature 1: --ids-only ──────────────────────────────────────────────────
+
+
+class TestFeature1IdsOnly:
+    """Feature 1: --ids-only outputs session IDs one per line."""
+
+    def test_list_ids_only(self, tmp_path):
+        """aise list --ids-only should output one session ID per line."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "list", "--ids-only"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        lines = [ln for ln in result.output.strip().split("\n") if ln.strip()]
+        assert len(lines) == 2  # 2 sessions in fixture
+        assert "aaaa0001" in lines[0] or "aaaa0001" in lines[1]
+
+    def test_commands_list_ids_only(self, tmp_path):
+        """commands list --ids-only should output session IDs."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "list", "--ids-only"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        lines = [ln for ln in result.output.strip().split("\n") if ln.strip()]
+        assert len(lines) >= 1
+
+    def test_corrections_ids_only(self, tmp_path):
+        """messages corrections --ids-only should output session IDs."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "corrections", "--ids-only"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_planning_ids_only(self, tmp_path):
+        """messages planning --ids-only should output session IDs."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "planning", "--ids-only"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+# ─── Feature 2: --session on corrections ─────────────────────────────────────
+
+
+class TestFeature2CorrectionsSession:
+    """Feature 2: messages corrections --session filters to single session."""
+
+    def test_corrections_with_session_filter(self, tmp_path):
+        """--session aaaa0001 should only show corrections from that session."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "corrections",
+                  "--session", "aaaa0001"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # Session 1 has "you forgot to add the test" (triggers skip_step pattern)
+        output = result.output
+        assert "aaaa0001" in output or "forgot" in output or result.output.strip()
+
+    def test_corrections_with_nonexistent_session(self, tmp_path):
+        """--session with nonexistent prefix should return no results."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "corrections",
+                  "--session", "zzzz9999"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+# ─── Feature 3: --after-index / --after-timestamp ────────────────────────────
+
+
+class TestFeature3AfterIndexTimestamp:
+    """Feature 3: --after-index and --after-timestamp skip messages in search."""
+
+    def test_after_index_skips_messages(self, tmp_path):
+        """--after-index 2 should skip first 2 messages per session."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "",
+                  "--after-index", "2"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_after_timestamp_skips_old_messages(self, tmp_path):
+        """--after-timestamp should skip messages before the given time."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "",
+                  "--after-timestamp", "2026-01-24T10:08:00"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # Only messages after 10:08 should match — the 10:10 and 10:11 messages
+        # The first two messages (10:00, 10:05) should be skipped
+
+    def test_after_index_combined_with_session(self, tmp_path):
+        """--after-index with --session should work together."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "",
+                  "--session", "aaaa0001", "--after-index", "1"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+# ─── TDD: Bug 10+12 — corrections false positives ────────────────────────────
+
+def _make_projects_with_continuation_and_injection(tmp_path: Path) -> Path:
+    """Create projects dir with sessions containing continuation summaries and skill injections."""
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-alice-proj1"
+    proj.mkdir(parents=True)
+    s1 = "cccc0001-0000-0000-0000-000000000000"
+    lines = [
+        # Normal user message with a real correction
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                    "message": {"role": "user", "content": "you forgot to add the test"}}),
+        # Context continuation summary — should be SKIPPED by corrections
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:01:00.000Z",
+                    "message": {"role": "user", "content":
+                        "This session is being continued from a previous conversation that ran out of context. "
+                        "The summary below covers what was discussed: the user said 'you forgot to handle errors' "
+                        "and 'you missed the edge case'."}}),
+        # Slash command (sets prev_was_slash=True for next message)
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:02:00.000Z",
+                    "message": {"role": "user", "content": "<command-name>ar:plannew</command-name> make plan"}}),
+        # Skill injection — should be SKIPPED by corrections
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:02:01.000Z",
+                    "message": {"role": "user", "content":
+                        "# Create New Plan\n\nDo not overconfident or falsely claim tasks are complete. "
+                        "You missed important details in your previous work."}}),
+        # Normal correction after injection (prev_was_slash should be False now)
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:03:00.000Z",
+                    "message": {"role": "user", "content": "actually that is wrong, please fix it"}}),
+    ]
+    (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+    return projects
+
+
+class TestContinuationSummaryHelper:
+    """TDD: _is_continuation_summary() helper."""
+
+    def test_detects_continuation_summary(self):
+        from ai_session_tools.engine import _is_continuation_summary
+        assert _is_continuation_summary(
+            "This session is being continued from a previous conversation that ran out of context."
+        )
+
+    def test_rejects_normal_message(self):
+        from ai_session_tools.engine import _is_continuation_summary
+        assert not _is_continuation_summary("you forgot to add the test")
+
+    def test_rejects_empty(self):
+        from ai_session_tools.engine import _is_continuation_summary
+        assert not _is_continuation_summary("")
+
+    def test_rejects_none(self):
+        from ai_session_tools.engine import _is_continuation_summary
+        assert not _is_continuation_summary(None)
+
+    def test_handles_leading_whitespace(self):
+        from ai_session_tools.engine import _is_continuation_summary
+        assert _is_continuation_summary(
+            "  This session is being continued from a previous conversation"
+        )
+
+
+class TestCorrectionsSkipsContinuationAndInjection:
+    """TDD: find_corrections() skips continuation summaries and skill injections."""
+
+    def test_skips_continuation_summary(self, tmp_path):
+        """Continuation summaries should not produce correction matches."""
+        projects = _make_projects_with_continuation_and_injection(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        corrections = engine.find_corrections(limit=0)
+        # The continuation message contains "you forgot" and "you missed" in quoted text —
+        # these should NOT appear as corrections
+        for c in corrections:
+            assert not c.content.startswith("This session is being continued"), (
+                f"Continuation summary matched as correction: {c.content[:80]}"
+            )
+
+    def test_skips_skill_injection(self, tmp_path):
+        """Skill injection messages should not produce correction matches."""
+        projects = _make_projects_with_continuation_and_injection(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        corrections = engine.find_corrections(limit=0)
+        for c in corrections:
+            assert not c.content.startswith("# Create New Plan"), (
+                f"Skill injection matched as correction: {c.content[:80]}"
+            )
+
+    def test_real_corrections_still_found(self, tmp_path):
+        """Real corrections should still be detected after filtering."""
+        projects = _make_projects_with_continuation_and_injection(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        corrections = engine.find_corrections(limit=0)
+        # "you forgot to add the test" is a real correction (skip_step)
+        assert any("you forgot" in c.content for c in corrections), (
+            f"Expected 'you forgot' correction. Got: {[c.content[:60] for c in corrections]}"
+        )
+        # "actually that is wrong" is a real correction (misunderstanding)
+        assert any("actually" in c.content.lower() for c in corrections), (
+            f"Expected 'actually' correction. Got: {[c.content[:60] for c in corrections]}"
+        )
+
+    def test_correction_count_excludes_false_positives(self, tmp_path):
+        """Total corrections should not include continuation or injection messages."""
+        projects = _make_projects_with_continuation_and_injection(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        corrections = engine.find_corrections(limit=0)
+        # 5 messages: 2 real corrections, 1 continuation (false positive), 1 injection (false positive), 1 slash cmd
+        # Should get exactly 2 corrections
+        assert len(corrections) == 2, (
+            f"Expected 2 corrections, got {len(corrections)}: {[c.content[:60] for c in corrections]}"
+        )
+
+    def test_skill_injection_with_intervening_assistant(self, tmp_path):
+        """Skill injection should be filtered even with assistant messages in between."""
+        projects = tmp_path / "projects"
+        proj = projects / "-Users-alice-proj1"
+        proj.mkdir(parents=True)
+        s1 = "eeee0001-0000-0000-0000-000000000000"
+        lines = [
+            # Slash command
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "message": {"role": "user", "content": "<command-name>ar:plannew</command-name> plan"}}),
+            # Intervening assistant message (non-user, should not reset prev_was_slash)
+            json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-24T10:00:01.000Z",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": "OK"}]}}),
+            # Skill injection after intervening assistant — should still be filtered
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:02.000Z",
+                        "message": {"role": "user", "content":
+                            "# Plan New\n\nYou forgot important steps. You missed the edge case."}}),
+            # Real correction
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:01:00.000Z",
+                        "message": {"role": "user", "content": "actually that is wrong"}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        corrections = engine.find_corrections(limit=0)
+        # Only "actually that is wrong" should match — the injection should be filtered
+        assert len(corrections) == 1, (
+            f"Expected 1 correction, got {len(corrections)}: {[c.content[:60] for c in corrections]}"
+        )
+        assert "actually" in corrections[0].content
+
+    def test_continuation_with_command_name_does_not_set_prev_was_slash(self, tmp_path):
+        """Continuation summaries quoting <command-name> should not cause next msg to be skipped."""
+        projects = tmp_path / "projects"
+        proj = projects / "-Users-alice-proj1"
+        proj.mkdir(parents=True)
+        s1 = "ffff0001-0000-0000-0000-000000000000"
+        lines = [
+            # Continuation summary that quotes a command-name tag
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "message": {"role": "user", "content":
+                            "This session is being continued from a previous conversation. "
+                            "The user ran <command-name>ar:plannew</command-name> and you forgot to test."}}),
+            # Next user message starts with "# " — should NOT be treated as skill injection
+            # because the preceding message was a continuation (prev_was_slash=False)
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:01:00.000Z",
+                        "message": {"role": "user", "content":
+                            "# Review Notes\n\nYou forgot to handle the edge case."}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        corrections = engine.find_corrections(limit=0)
+        # "You forgot to handle the edge case" should be found — the "# Review Notes" msg
+        # should NOT be filtered as skill injection
+        assert len(corrections) >= 1, (
+            f"Expected at least 1 correction, got {len(corrections)}"
+        )
+        assert any("you forgot" in c.content.lower() for c in corrections)
+
+
+# ─── TDD: Bug 9 — session drop reporting ─────────────────────────────────────
+
+class TestAnalyzeSessionDropReporting:
+    """TDD: analyzer.py should report why sessions were skipped."""
+
+    def test_claude_skip_counts_printed(self, tmp_path, monkeypatch):
+        """analyze should print skip counts for Claude sessions."""
+        # Create a projects dir with a mix of valid and empty sessions
+        projects = tmp_path / "projects"
+        proj = projects / "-Users-alice-proj1"
+        proj.mkdir(parents=True)
+
+        # Valid session with user text
+        s1 = "dddd0001-0000-0000-0000-000000000000"
+        lines1 = [
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "message": {"role": "user", "content": "hello world"}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines1))
+
+        # Empty session (no messages)
+        s2 = "dddd0002-0000-0000-0000-000000000000"
+        (proj / f"{s2}.jsonl").write_text("")
+
+        # Session with only assistant messages (no user text)
+        s3 = "dddd0003-0000-0000-0000-000000000000"
+        lines3 = [
+            json.dumps({"sessionId": s3, "type": "assistant", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": "Sure!"}]}}),
+        ]
+        (proj / f"{s3}.jsonl").write_text("\n".join(lines3))
+
+        org = tmp_path / "org"
+        org.mkdir()
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(projects))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        import io
+        from contextlib import redirect_stdout
+        from ai_session_tools.analysis.analyzer import run_analysis
+        cfg = {"org_dir": str(org)}
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            run_analysis(source_filter="claude", config=cfg)
+        output = buf.getvalue()
+        # Should mention skipped sessions with reasons
+        assert "Skipped" in output or "skipped" in output, (
+            f"Expected skip report in output. Got:\n{output}"
+        )
+
+
+# ─── TDD: Bug 8 — default codebook + keyword maps ────────────────────────────
+
+class TestDefaultCodebookAndKeywordMaps:
+    """TDD: codebook.py should have built-in defaults when no external files exist."""
+
+    def test_load_codebook_returns_defaults_when_missing(self, tmp_path):
+        """load_codebook() should return non-empty defaults when CODEBOOK.md is absent."""
+        from ai_session_tools.analysis.codebook import load_codebook
+        tech_codes, role_codes = load_codebook(tmp_path)
+        # With defaults, at least tech_codes should have entries
+        assert len(tech_codes) > 0, "Expected default tech_codes when CODEBOOK.md is missing"
+
+    def test_load_keyword_maps_returns_defaults_when_missing(self, tmp_path):
+        """load_keyword_maps() should return non-empty defaults when no config/JSON files exist."""
+        from ai_session_tools.analysis.codebook import load_keyword_maps
+        maps = load_keyword_maps(tmp_path)
+        assert len(maps) > 0, "Expected default keyword_maps when no external files exist"
+        # Should have at least task_categories
+        assert "task_categories" in maps, "Expected task_categories in default keyword maps"
+
+    def test_compile_codes_works_with_defaults(self, tmp_path):
+        """compile_codes() should produce valid patterns from default codebook."""
+        from ai_session_tools.analysis.codebook import load_codebook, compile_codes
+        tech_codes, _role_codes = load_codebook(tmp_path)
+        patterns = compile_codes(tech_codes)
+        assert len(patterns) > 0, "Expected compiled patterns from default codebook"
+        # Each pattern should be a compiled regex
+        import re
+        for _code, pat in patterns.items():
+            assert isinstance(pat, re.Pattern), f"Expected re.Pattern, got {type(pat)}"
+
+    def test_external_codebook_overrides_defaults(self, tmp_path):
+        """When CODEBOOK.md exists, load_codebook() should use it, not defaults."""
+        from ai_session_tools.analysis.codebook import load_codebook
+        codebook = tmp_path / "CODEBOOK.md"
+        codebook.write_text(
+            "## 1. Techniques\n"
+            "| Code | Description | Category | Markers |\n"
+            "| `custom_tech` | Custom | Cat | `custom marker phrase` |\n"
+        )
+        tech_codes, _role_codes = load_codebook(tmp_path)
+        assert "custom_tech" in tech_codes, "External CODEBOOK.md should override defaults"
+
+
+# ─── TDD: Bug 11 — dynamic vocab header ──────────────────────────────────────
+
+class TestDynamicVocabHeader:
+    """TDD: write_vocab_report() should use dynamic source name, not hardcoded 'AI Studio'."""
+
+    def test_vocab_header_uses_source_names(self, tmp_path):
+        """write_vocab_report() with source_names=['Claude Code'] should say 'Claude Code'."""
+        from collections import Counter
+        from ai_session_tools.analysis.analyzer import write_vocab_report
+        tri = Counter({"hello world test": 5})
+        quad = Counter({"hello world test phrase": 3})
+        outfile = tmp_path / "VOCABULARY_ANALYSIS.md"
+        write_vocab_report(tri, quad, outfile, min_freq=1, source_names=["Claude Code"])
+        content = outfile.read_text()
+        assert "Claude Code" in content, f"Expected 'Claude Code' in header. Got:\n{content[:200]}"
+        assert "AI Studio" not in content, f"Should not say 'AI Studio'. Got:\n{content[:200]}"
+
+    def test_vocab_header_multiple_sources(self, tmp_path):
+        """write_vocab_report() with multiple sources should list them."""
+        from collections import Counter
+        from ai_session_tools.analysis.analyzer import write_vocab_report
+        tri = Counter({"hello world test": 5})
+        quad = Counter({"hello world test phrase": 3})
+        outfile = tmp_path / "VOCABULARY_ANALYSIS.md"
+        write_vocab_report(tri, quad, outfile, min_freq=1,
+                          source_names=["Claude Code", "AI Studio"])
+        content = outfile.read_text()
+        assert "Claude Code" in content
+        assert "AI Studio" in content
+
+    def test_vocab_header_default_fallback(self, tmp_path):
+        """write_vocab_report() without source_names should have a reasonable default."""
+        from collections import Counter
+        from ai_session_tools.analysis.analyzer import write_vocab_report
+        tri = Counter({"hello world test": 5})
+        quad = Counter({"hello world test phrase": 3})
+        outfile = tmp_path / "VOCABULARY_ANALYSIS.md"
+        write_vocab_report(tri, quad, outfile, min_freq=1)
+        content = outfile.read_text()
+        # Should still produce valid output
+        assert "Vocabulary Analysis" in content

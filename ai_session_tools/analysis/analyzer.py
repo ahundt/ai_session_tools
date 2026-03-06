@@ -234,20 +234,23 @@ def write_vocab_report(
     output_file: Path,
     min_freq: int = 3,
     stop_words: frozenset[str] | None = None,
+    source_names: list[str] | None = None,
 ) -> None:
     """Write vocabulary analysis to markdown. No arbitrary truncation.
 
     min_freq: loaded from scoring_weights.json["min_ngram_freq"] (default 3).
     stop_words: loaded from stop_words.json (default _DEFAULT_STOP_WORDS).
+    source_names: list of source names to display in header (e.g. ["Claude Code", "AI Studio"]).
     """
     tri_rows = [(freq, phrase) for phrase, freq in tri.most_common()
                 if freq >= min_freq and is_meaningful(phrase, stop_words)]
     quad_rows = [(freq, phrase) for phrase, freq in quad.most_common()
                  if freq >= min_freq and is_meaningful(phrase, stop_words)]
 
+    source_label = ", ".join(source_names) if source_names else "all"
     lines = [
         "# Vocabulary Analysis: Recurring Prompt Phrases\n\n",
-        "N-gram analysis of user turns across all AI Studio sessions.\n",
+        f"N-gram analysis of user turns across {source_label} sessions.\n",
         "Source: PromptEngineering.org — https://www.promptengineering.org/building-a-reusable-prompt-library/\n\n",
         f"## 3-Word Phrases ({len(tri_rows)} total with freq >= {min_freq})\n\n",
         "| Count | Phrase |\n| :--- | :--- |\n",
@@ -268,10 +271,12 @@ def _filter_config_by_source(cfg: dict, source_filter: str) -> dict:
 
     Args:
         cfg: Configuration dict
-        source_filter: 'aistudio', 'gemini', or None (all)
+        source_filter: 'aistudio', 'gemini', 'claude', or None (all)
 
     Returns:
-        Filtered config dict with only requested sources in source_dirs
+        Filtered config dict with only requested sources in source_dirs.
+        Claude uses auto-discovery (not source_dirs), so 'claude' filter
+        sets a '_include_claude' marker for run_analysis to check.
     """
     filtered = dict(cfg)
     if not source_filter:
@@ -287,6 +292,10 @@ def _filter_config_by_source(cfg: dict, source_filter: str) -> dict:
     if source_filter in ("gemini", "all"):
         if "gemini_cli" in sd:
             new_sd["gemini_cli"] = sd["gemini_cli"]
+
+    # Claude uses auto-discovery, not explicit source_dirs.
+    # Set marker so run_analysis knows to include/exclude Claude.
+    filtered["_include_claude"] = source_filter in ("claude", "all")
 
     filtered["source_dirs"] = new_sd
     return filtered
@@ -447,7 +456,100 @@ def run_analysis(
                 records.append(rec)
                 tri.update(get_ngrams(prose_text_g, 3))
                 quad.update(get_ngrams(prose_text_g, 4))
+
+    # Process Claude Code sessions via auto-discovery
+    include_claude = cfg.get("_include_claude", True)  # True when no filter or filter=claude/all
+    if source_filter and source_filter not in ("claude", "all"):
+        include_claude = False
+    if include_claude:
+        try:
+            import os as _os
+            from ai_session_tools.engine import SessionRecoveryEngine
+            _claude_base = Path(_os.getenv("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))).expanduser()
+            _projects = Path(_os.getenv(
+                "AI_SESSION_TOOLS_PROJECTS", str(_claude_base / "projects")
+            )).expanduser()
+            _recovery = Path(_os.getenv(
+                "AI_SESSION_TOOLS_RECOVERY", str(_claude_base / "recovery")
+            )).expanduser()
+            claude_engine = SessionRecoveryEngine(_projects, _recovery)
+            claude_sessions = claude_engine.get_sessions()
+            print(f"Analyzing {len(claude_sessions)} Claude Code sessions...")
+            _claude_ok = _claude_empty = _claude_no_user = _claude_err = 0
+            for session_info in claude_sessions:
+                try:
+                    messages = claude_engine.get_messages(session_info.session_id)
+                    if not messages:
+                        _claude_empty += 1
+                        continue
+                    user_text = " ".join(
+                        m.content for m in messages
+                        if m.type.value == "user" and m.content
+                    )
+                    if not user_text.strip():
+                        _claude_no_user += 1
+                        continue
+                    name = session_info.session_id
+                    fp_c = f"claude/{session_info.project_dir}/{name}"
+                    era = _detect_era(
+                        name, user_text, filepath=fp_c,
+                        timestamp=session_info.timestamp_first,
+                    )
+                    lower_sample = user_text[:5000].lower()
+                    prose_text_c = extract_prose(user_text)
+                    pf_c = prose_fraction(user_text)
+                    user_msgs_c = [m for m in messages if m.type.value == "user"]
+                    first_user_c = user_msgs_c[0].content if user_msgs_c else ""
+                    is_single_c = len(user_msgs_c) == 1
+                    p_role_c = classify_prompt_role(
+                        first_user_c, is_first_in_session=True,
+                        continuation_markers=continuation_markers,
+                        min_initial_len=min_initial_len,
+                    )
+                    if is_single_c:
+                        p_role_c = "standalone"
+                    rec = SessionRecord(
+                        name=name,
+                        source_dir=session_info.project_dir,
+                        filepath=fp_c,
+                        source_format="claude_jsonl",
+                        user_text=user_text,
+                        chunk_count=len(messages),
+                        user_chunk_count=len(user_msgs_c),
+                        era=era,
+                        has_srt="srt" in lower_sample,
+                        has_transcript="transcript" in lower_sample,
+                        prose_frac=pf_c,
+                        prompt_role=p_role_c,
+                    )
+                    apply_codes(rec, tech_patterns, role_patterns, keyword_maps, scoring_weights, marker_window=mw)
+                    records.append(rec)
+                    tri.update(get_ngrams(prose_text_c, 3))
+                    quad.update(get_ngrams(prose_text_c, 4))
+                    _claude_ok += 1
+                except Exception:
+                    _claude_err += 1
+            _claude_skip = len(claude_sessions) - _claude_ok
+            if _claude_skip:
+                print(f"  Skipped {_claude_skip} Claude sessions "
+                      f"({_claude_empty} no messages, {_claude_no_user} no user text, "
+                      f"{_claude_err} errors)")
+        except ImportError:
+            pass  # SessionRecoveryEngine not available
+        except Exception as exc:
+            print(f"Warning: Claude session analysis failed: {exc}")
+
     print(f"Total after all sources: {len(records)} sessions")
+
+    # Build source_names from which sources contributed records
+    _source_names: list[str] = []
+    _formats_seen = {r.source_format for r in records}
+    if any(f in _formats_seen for f in ("aistudio_json", "markdown")):
+        _source_names.append("AI Studio")
+    if "gemini_json" in _formats_seen:
+        _source_names.append("Gemini")
+    if "claude_jsonl" in _formats_seen:
+        _source_names.append("Claude Code")
 
     compute_descendant_boost(records, scoring_weights.get("descendant_boost", 15))
 
@@ -457,7 +559,8 @@ def run_analysis(
         json.dump(db, f, indent=2)
     print(f"Analysis complete: {len(records)} sessions -> {db_file}")
 
-    write_vocab_report(tri, quad, vocab_output, min_freq=min_ngram_freq, stop_words=stop_words)
+    write_vocab_report(tri, quad, vocab_output, min_freq=min_ngram_freq, stop_words=stop_words,
+                       source_names=_source_names or None)
     return records
 
 

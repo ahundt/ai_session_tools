@@ -28,7 +28,7 @@ from collections import defaultdict
 from typer.core import TyperGroup, HAS_RICH
 import typer.rich_utils as _ru
 
-from .engine import SessionRecoveryEngine, _check_redos_safe
+from .engine import SessionRecoveryEngine, _check_redos_safe, _is_skill_injection
 from .formatters import MessageFormatter, get_formatter
 from .models import FileVersion, FilterSpec
 
@@ -720,6 +720,23 @@ _OPT_OUTPUT = typer.Option(
 )
 
 
+_OPT_IDS_ONLY = typer.Option(
+    False, "--ids-only",
+    help="Output only session IDs, one per line. Designed for piping to other aise commands "
+         "via xargs or shell loops. Suppresses all other output.",
+)
+
+
+def _output_ids_only(items: list, id_field: str = "session_id") -> None:
+    """Output unique session IDs, one per line. For pipe-friendly output."""
+    seen: set[str] = set()
+    for item in items:
+        sid = getattr(item, id_field, None) or (item.get(id_field, "") if isinstance(item, dict) else "")
+        if sid and sid not in seen:
+            seen.add(sid)
+            typer.echo(sid)
+
+
 class MsgFilterType(str, Enum):
     """CLI filter enum for --type on messages search and messages timeline.
 
@@ -783,7 +800,21 @@ def _render_invocations_with_context(
         if inv.args:
             out_console.print(f"  [dim]args:[/dim] {_esc(inv.args)}")
         messages = engine.get_messages(inv.session_id)
-        after_msgs = [m for m in messages if (m.timestamp or "") > inv.timestamp][:context_after]
+        raw_after = [m for m in messages if (m.timestamp or "") > inv.timestamp]
+        # Filter out skill injection messages (SKILL.md content injected after slash
+        # commands). These are noise for auditing — users want the AI response, not
+        # the injected skill body.
+        after_msgs: list = []
+        prev_slash = True  # inv itself is a slash command
+        for m in raw_after:
+            mtype = m.type.value if hasattr(m.type, "value") else str(m.type)
+            if _is_skill_injection({"type": mtype}, m.content, prev_slash):
+                prev_slash = False
+                continue
+            prev_slash = "<command-name>" in (m.content or "")
+            after_msgs.append(m)
+            if len(after_msgs) >= context_after:
+                break
         for m in after_msgs:
             content = (m.content or "")[:truncate]
             out_console.print(f"  [dim][{m.type.value}] {(m.timestamp or '')[:19]}[/dim]")
@@ -973,7 +1004,7 @@ _INVOCATIONS_SPEC = TableSpec(
         ColumnSpec("Session", style="cyan", no_wrap=True, min_width=8),
         ColumnSpec("Command", style="bold cyan"),
         ColumnSpec("Args"),
-        ColumnSpec("Path", style="blue", ratio=3),
+        ColumnSpec("Path", style="blue", ratio=3, min_width=20, overflow="ellipsis"),
         ColumnSpec("Branch", style="green"),
     ],
     row_fn=lambda d: [
@@ -1523,6 +1554,9 @@ def _do_messages_search(
     until: Optional[str] = None,   # canonical; before= is a hidden alias
     full_uuid: bool = False,
     output: Optional[str] = None,
+    fixed_strings: bool = False,
+    after_index: int = 0,
+    after_timestamp: Optional[str] = None,
 ) -> None:
     """Search messages across all sessions. When context > 0, each result includes
     up to ``context`` surrounding messages from the same session file.
@@ -1555,6 +1589,9 @@ def _do_messages_search(
             tool=tool,
             since=since,
             session_id=session,
+            fixed_strings=fixed_strings,
+            after_index=after_index,
+            after_timestamp=after_timestamp,
         )
         ctx_results = ctx_results[:limit or None]
         out_console = Console(record=bool(output))
@@ -1589,6 +1626,9 @@ def _do_messages_search(
         tool=tool,
         since=since,
         session_id=session,
+        fixed_strings=fixed_strings,
+        after_index=after_index,
+        after_timestamp=after_timestamp,
     )
     results = all_results[:limit or None]
 
@@ -1738,6 +1778,7 @@ def _do_messages_corrections(
     pattern_overrides: Optional[List[str]] = None,
     full_uuid: bool = False,
     output: Optional[str] = None,
+    session: Optional[str] = None,
 ) -> None:
     """Find user corrections across sessions.
 
@@ -1762,6 +1803,7 @@ def _do_messages_corrections(
     corrections = engine.find_corrections(
         project_filter=project, since=since, until=until,
         limit=limit, patterns=patterns,
+        session_id_prefix=session,
     )
     spec = _spec_with_full_uuid(_CORRECTIONS_SPEC) if full_uuid else _CORRECTIONS_SPEC
     if output:
@@ -1922,6 +1964,7 @@ def _do_messages_timeline(
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
     grep: Optional[str] = None,
+    grep_regex: bool = False,
     exclude_compaction: bool = False,
     output: Optional[str] = None,
 ) -> None:
@@ -1944,18 +1987,22 @@ def _do_messages_timeline(
         events = [e for e in events if (e.get("timestamp") or "") >= since]
     if until:
         events = [e for e in events if (e.get("timestamp") or "") <= until]
-    # --grep post-filter (case-insensitive regex; fallback to literal on invalid/dangerous regex)
+    # --grep post-filter (literal by default; regex with -E/--regex)
     if grep:
-        try:
-            _check_redos_safe(grep)
-            grep_re = _re.compile(grep, _re.IGNORECASE)
-            events = [e for e in events if grep_re.search(e.get("content_preview") or "")]
-        except (ValueError, _re.error) as exc:
-            msg = str(exc)
-            if "ReDoS" in msg:
-                err_console.print(f"[yellow]Warning:[/yellow] --grep pattern rejected: {msg}. Falling back to literal substring match.")
-            else:
-                err_console.print(f"[yellow]Warning:[/yellow] --grep pattern is not valid regex; falling back to literal substring match.")
+        if grep_regex:
+            try:
+                _check_redos_safe(grep)
+                grep_re = _re.compile(grep, _re.IGNORECASE)
+                events = [e for e in events if grep_re.search(e.get("content_preview") or "")]
+            except (ValueError, _re.error) as exc:
+                msg = str(exc)
+                if "ReDoS" in msg:
+                    err_console.print(f"[yellow]Warning:[/yellow] --grep pattern rejected: {msg}. Falling back to literal substring match.")
+                else:
+                    err_console.print(f"[yellow]Warning:[/yellow] --grep pattern is not valid regex; falling back to literal substring match.")
+                grep_lower = grep.lower()
+                events = [e for e in events if grep_lower in (e.get("content_preview") or "").lower()]
+        else:
             grep_lower = grep.lower()
             events = [e for e in events if grep_lower in (e.get("content_preview") or "").lower()]
     if not events:
@@ -2566,16 +2613,35 @@ def _messages_search_cmd(
     when:   Optional[str] = _OPT_WHEN,
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
+    regex: bool = typer.Option(
+        False, "--regex",
+        help="Treat query as a regex pattern (case-insensitive). "
+             "Default is literal substring match (faster, no metacharacter surprises). "
+             "Enables |, .*, \\b, etc.",
+    ),
+    after_index: int = typer.Option(
+        0, "--after-index",
+        help="Skip the first N messages in each session before searching. "
+             "Combine with --session to search after a specific point.",
+    ),
+    after_timestamp: Optional[str] = typer.Option(
+        None, "--after-timestamp",
+        help="Skip messages before this timestamp within each session. "
+             "Accepts same date formats as --since (ISO, relative like '14d').",
+    ),
     full_uuid: bool = _OPT_FULL_UUID,
     output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """Search conversation messages across all configured session sources.
 
     Accessible as both 'messages search' and 'messages find' (aliases).
+    Query is a literal substring match by default (fast, case-insensitive).
+    Use --regex for regex patterns.
 
     Examples:
-        aise messages search "authentication"                         # all messages
-        aise messages search "critique" --type user                   # user turns only
+        aise messages search "authentication"                         # literal match (default)
+        aise messages search "file.txt"                               # . is literal, not regex
+        aise messages search "forgot|missed" --regex                   # regex OR (requires --regex)
         aise messages search "step by step" --type assistant          # AI turns only
         aise messages find "error"                                    # find is an alias
         aise messages search "*" --tool Write                         # all Write tool calls
@@ -2584,11 +2650,12 @@ def _messages_search_cmd(
         aise messages search "" --type user --no-compaction           # typed user messages only
         aise messages search "" --type compaction --since 14d         # inspect compacted content
         aise messages search "error" --session 83326782               # scope to one session
-        aise messages search "error" --since 2026-01-01               # sessions since Jan 1
-        aise messages search "error" --when 202X                      # sessions in the 2020s decade
+        aise messages search "error" --session abc --after-index 50   # skip first 50 msgs
     """
     q = query or query_opt
     msg_type_str = message_type.value if message_type else None
+    # fixed_strings is the inverse of regex: literal by default, regex opt-in
+    fixed_strings = not regex
     # Contradiction check: --type compaction --no-compaction → empty result
     if message_type == MsgFilterType.compaction and exclude_compaction:
         err_console.print("[yellow]Warning:[/yellow] --type compaction --no-compaction contradicts itself. Returning 0 results.")
@@ -2599,12 +2666,18 @@ def _messages_search_cmd(
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
+    # Normalize after_timestamp the same way as --since
+    if after_timestamp:
+        from ai_session_tools.engine import _parse_date_input
+        after_timestamp = _parse_date_input(after_timestamp)
     _do_messages_search(engine, q or "", msg_type_str, limit, max_chars, fmt,
                         tool=tool, context=context,
                         context_before=context_before, context_after=context_after,
                         exclude_compaction=exclude_compaction, session=session,
                         since=since, until=until,
-                        full_uuid=full_uuid, output=output)
+                        full_uuid=full_uuid, output=output,
+                        fixed_strings=fixed_strings,
+                        after_index=after_index, after_timestamp=after_timestamp)
 
 
 _register_alias(messages_app, _messages_search_cmd, "search", "find")
@@ -2649,6 +2722,10 @@ def messages_corrections(
     ctx: typer.Context,
     provider: Optional[str] = _OPT_PROVIDER,
     project: Optional[str] = typer.Option(None, "--project", help="Filter by project directory substring."),
+    session: Optional[str] = typer.Option(
+        None, "--session",
+        help="Scope corrections to one session ID or prefix. Find IDs via 'aise list'.",
+    ),
     since:  Optional[str] = _OPT_SINCE,
     until:  Optional[str] = _OPT_UNTIL,
     when:   Optional[str] = _OPT_WHEN,
@@ -2668,6 +2745,7 @@ def messages_corrections(
         ),
     ),
     full_uuid: bool = _OPT_FULL_UUID,
+    ids_only: bool = _OPT_IDS_ONLY,
     output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """Find user messages where corrections were given to Claude.
@@ -2683,6 +2761,8 @@ def messages_corrections(
     Examples:
         aise messages corrections
         aise messages corrections --limit 50 --project myproject
+        aise messages corrections --session 83326782
+        aise messages corrections --ids-only | xargs -I{} aise export session {}
         aise messages corrections --format json
         aise messages corrections --pattern 'regression:you deleted' --pattern 'regression:you removed'
         aise messages corrections --pattern 'oops:nono' --pattern 'oops:that.s wrong'
@@ -2693,8 +2773,16 @@ def messages_corrections(
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
+    if ids_only:
+        corrections = engine.find_corrections(
+            project_filter=project, since=since, until=until,
+            limit=limit, session_id_prefix=session,
+        )
+        _output_ids_only(corrections)
+        return
     _do_messages_corrections(engine, project, since, until, limit, fmt,
-                              pattern_overrides=pattern, full_uuid=full_uuid, output=output)
+                              pattern_overrides=pattern, full_uuid=full_uuid, output=output,
+                              session=session)
 
 
 @messages_app.command("planning")
@@ -2726,6 +2814,7 @@ def messages_planning(
         help="For each slash command invocation, show N messages that followed it. Implies --detail. Default: 0 (count summary only).",
     ),
     full_uuid: bool = _OPT_FULL_UUID,
+    ids_only: bool = _OPT_IDS_ONLY,
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
@@ -2755,6 +2844,14 @@ def messages_planning(
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
+    if ids_only:
+        invocations = engine.get_planning_usage(
+            project_filter=project, since=since, until=until,
+            commands=_parse_commands_option(commands) if commands else None,
+            return_invocations=True,
+        )
+        _output_ids_only(invocations)
+        return
     max_chars_val = max_chars if max_chars is not None else _cfg_default("max_chars", 0)
     _do_messages_planning(engine, project, since, until, fmt, commands_raw=commands,
                           detail=detail or context_after > 0,
@@ -2801,7 +2898,11 @@ def messages_timeline(
     ),
     grep: Optional[str] = typer.Option(
         None, "--grep",
-        help="Show only events whose content matches this pattern (case-insensitive regex, re.search). Applied after --type filtering. Simple substring patterns work as-is.",
+        help="Show only events whose content matches this pattern (case-insensitive literal substring). Use -E for regex. Applied after --type filtering.",
+    ),
+    grep_regex: bool = typer.Option(
+        False, "--regex", "-E",
+        help="Treat --grep pattern as regex instead of literal substring.",
     ),
     exclude_compaction: bool = typer.Option(
         False, "--no-compaction",
@@ -2843,7 +2944,8 @@ def messages_timeline(
         raise typer.Exit(code=1)
     _do_messages_timeline(engine, session_id, fmt, preview_chars=preview_chars,
                           message_type=msg_type_str, since=since, until=until,
-                          grep=grep, exclude_compaction=exclude_compaction,
+                          grep=grep, grep_regex=grep_regex,
+                          exclude_compaction=exclude_compaction,
                           output=output)
 
 
@@ -2867,6 +2969,7 @@ def slash_list(
     before: Optional[str] = _OPT_BEFORE,
     fmt:    Optional[str] = _OPT_FORMAT,
     full_uuid: bool = _OPT_FULL_UUID,
+    ids_only: bool = _OPT_IDS_ONLY,
     limit: int = typer.Option(0, "--limit", help="Max invocations to return. 0 = unlimited (default)."),
     output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
@@ -2880,6 +2983,7 @@ def slash_list(
         aise commands list --command /ar:plannew                # only /ar:plannew
         aise commands list --since 14d --output ~/cmds.txt      # last 14 days, save to file
         aise commands list --format json                        # JSON output
+        aise commands list --ids-only | xargs -I{} aise export session {}
         aise slash list                                         # same via alias
     """
     engine = _resolve_engine(ctx, provider)
@@ -2888,7 +2992,7 @@ def slash_list(
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
     invocations = engine.get_planning_usage(
-        since=since, until=until, return_invocations=True,
+        since=since, until=until, return_invocations=True, limit=0,
     )
     if command:
         try:
@@ -2902,11 +3006,15 @@ def slash_list(
             invocations = [inv for inv in invocations if command.lower() in inv.command.lower()]
     if limit > 0:
         invocations = invocations[:limit]
+    if ids_only:
+        _output_ids_only(invocations)
+        return
     if output:
         out_console = Console(record=True)
         for inv in invocations:
             out_console.print(f"{inv.command} {inv.timestamp[:19]} {inv.args}")
         _write_output(out_console, output)
+        return
     spec = _spec_with_full_uuid(_INVOCATIONS_SPEC, 1) if full_uuid else _INVOCATIONS_SPEC
     _render_output(invocations, fmt, spec, "No slash command invocations found.")
 
@@ -2926,6 +3034,7 @@ def slash_context(
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
     max_chars: Optional[int] = _OPT_MAX_CHARS,
+    fmt: Optional[str] = _OPT_FORMAT,
     output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """For each invocation of COMMAND, show what followed it.
@@ -2937,7 +3046,7 @@ def slash_context(
         aise commands context /ar:plannew
         aise commands context /ar:plannew --context-after 10
         aise commands context /commit --since 14d --output ~/commit-context.txt
-        aise slash context /plan --since 7d
+        aise commands context /ar:plannew --format json
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
@@ -2945,7 +3054,7 @@ def slash_context(
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
     invocations = engine.get_planning_usage(
-        since=since, until=until, return_invocations=True,
+        since=since, until=until, return_invocations=True, limit=0,
     )
     try:
         _check_redos_safe(command)
@@ -2956,6 +3065,36 @@ def slash_context(
         if "ReDoS" in msg:
             err_console.print(f"[yellow]Warning:[/yellow] --command pattern rejected: {msg}. Falling back to literal substring match.")
         invocations = [inv for inv in invocations if command.lower() in inv.command.lower()]
+    if fmt and fmt in ("json", "csv"):
+        import json as _json
+        items = []
+        for inv in invocations:
+            messages = engine.get_messages(inv.session_id)
+            raw_after = [m for m in messages if (m.timestamp or "") > inv.timestamp]
+            # Filter skill injections (same logic as _render_invocations_with_context)
+            filtered: list = []
+            _prev_slash = True  # inv is a slash command
+            for m in raw_after:
+                _mtype = m.type.value if hasattr(m.type, "value") else str(m.type)
+                if _is_skill_injection({"type": _mtype}, m.content, _prev_slash):
+                    _prev_slash = False
+                    continue
+                _prev_slash = "<command-name>" in (m.content or "")
+                filtered.append(m)
+                if len(filtered) >= context_after:
+                    break
+            items.append({
+                **inv.to_dict(),
+                "context_after": [{"type": m.type.value, "timestamp": m.timestamp, "content": m.content} for m in filtered],
+            })
+        if fmt == "json":
+            console.print_json(data=items)
+        else:
+            for item in items:
+                console.print(f"{item['timestamp'][:19]}  {item['command']}  {item.get('args', '')}")
+        if output:
+            _write_output(console, output)
+        return
     max_chars_val = max_chars if max_chars is not None else _cfg_default("max_chars", 0)
     _render_invocations_with_context(invocations, context_after, engine, output, max_chars=max_chars_val)
 
@@ -3191,6 +3330,7 @@ def list_sessions(
     limit: Optional[int] = typer.Option(None, "--limit", help="Max sessions to return. Default: unlimited."),
     fmt: Optional[str] = _OPT_FORMAT,
     full_uuid: bool = _OPT_FULL_UUID,
+    ids_only: bool = _OPT_IDS_ONLY,
 ) -> None:
     """List sessions with metadata.
 
@@ -3203,12 +3343,19 @@ def list_sessions(
         aise list --since 2026-01 --until 2026-03  # January through March 2026
         aise list --format json                # JSON output
         aise list --full-uuid                  # show full 36-char session UUIDs
+        aise list --ids-only | xargs -I{} aise messages search "error" --session {}
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
+    if ids_only:
+        sessions = engine.get_sessions(project_filter=project, since=since, until=until)
+        if limit:
+            sessions = sessions[:limit]
+        _output_ids_only(sessions)
+        return
     _do_list_sessions(engine, project, since, until, limit, fmt, full_uuid=full_uuid)
 
 
@@ -3808,6 +3955,7 @@ def cmd_analyze(
     To narrow to one backend, use --provider:
         aise analyze --provider aistudio  (analyze only AI Studio sessions)
         aise analyze --provider gemini    (analyze only Gemini CLI sessions)
+        aise analyze --provider claude    (analyze only Claude Code sessions)
         aise analyze                      (analyze all configured sources)
     """
     from ai_session_tools.analysis import pipeline_state as ps
@@ -3828,7 +3976,7 @@ def cmd_analyze(
     # Get source filter from ctx.obj (set by app_callback composition root)
     ctx_obj = ctx.obj if ctx.obj else {}
     source_filter = ctx_obj.get("source")
-    if source_filter and source_filter not in ("aistudio", "gemini", "all"):
+    if source_filter and source_filter not in ("aistudio", "gemini", "claude", "all"):
         source_filter = None  # fallback: None means all sources
     organize_formats = [f.strip() for f in fmt.split(",")] if fmt else None
     pipeline_order = _pipeline_order(cfg)
