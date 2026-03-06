@@ -250,6 +250,20 @@ _parse_date_input = parse_date_input
 #: Used when analyze_planning_usage() is called with commands=None (discovery mode).
 _SLASH_CMD_DISCOVERY_RE = re.compile(r"^/(\w[\w:.-]*)(?=\s|$)")
 
+#: Raw-line pre-filter for discovery mode: checks if a JSONL line could contain
+#: a slash command in the message content fields. Matches '"/ar:plannew' but NOT
+#: '"/Users/foo' in a "cwd" or "path" field.
+#:
+#: _extract_content reads content from three JSON field names: "content", "text",
+#: "message". A slash command must appear at the START of one of those values
+#: (after optional leading space/tab — lstrip() handles it). "cwd", "path", and
+#: other fields are excluded, eliminating the false-positive that caused every
+#: user message to pass the naive '"/' check (every message has "cwd":"/Users/...").
+#:
+#: The \w after '/' mirrors _SLASH_CMD_DISCOVERY_RE's first char requirement —
+#: only word characters start valid slash command names.
+_SLASH_CMD_CONTENT_RE = re.compile(r'"(?:content|text|message)"\s*:\s*"[ \t]*/\w')
+
 #: System message patterns to filter from export
 _EXPORT_FILTER_PATTERNS = (
     "[Request interrupted",
@@ -1240,6 +1254,15 @@ class SessionRecoveryEngine:
                             # Raw pre-filter: discovery mode only needs user messages
                             if discovery_mode:
                                 if '"type":"user"' not in line and '"type": "user"' not in line:
+                                    continue
+                                # Slash commands must appear at the start of a content,
+                                # text, or message JSON field value. _SLASH_CMD_CONTENT_RE
+                                # checks for exactly those fields — excluding "cwd", "path",
+                                # and other fields that also contain '/' but cannot hold
+                                # slash command invocations. The naive '"/' check was
+                                # ineffective because every user message has
+                                # "cwd":"/Users/..." which always contains '"/'.
+                                if not _SLASH_CMD_CONTENT_RE.search(line):
                                     continue
                             data = _json_loads(line)
                             if discovery_mode and data.get("type") != "user":
@@ -2348,7 +2371,36 @@ class AISession:
         return self._source
 
     @property
+    def _claude_backend(self) -> "SessionRecoveryEngine | None":
+        """Return the Claude backend if available, regardless of multi-source wrapping.
+
+        When source="all", _backend is a MultiSourceEngine whose _sources list
+        contains a ClaudeSource adapter (not SessionRecoveryEngine directly).
+        ClaudeSource wraps SessionRecoveryEngine as self._engine. This property
+        unwraps that chain to find the fast Claude backend — enabling Claude-
+        specific fast paths (analyze_planning_usage with mtime + content
+        pre-filters) even in multi-source mode.
+        """
+        if isinstance(self._backend, SessionRecoveryEngine):
+            return self._backend
+        if isinstance(self._backend, MultiSourceEngine):
+            for src in self._backend._sources:
+                if isinstance(src, SessionRecoveryEngine):
+                    return src
+                # ClaudeSource wraps SessionRecoveryEngine as _engine
+                if isinstance(src, ClaudeSource):
+                    return src._engine
+        return None
+
+    @property
     def _is_claude(self) -> bool:
+        """True only when _backend is directly a SessionRecoveryEngine (not multi-source).
+
+        Use _claude_backend instead when you need the Claude backend even inside
+        a MultiSourceEngine (e.g. for Claude-only features like slash command analysis).
+        Aggregate methods (get_sessions, search_messages) should use _is_claude because
+        they need to return combined results from all sources when source='all'.
+        """
         return isinstance(self._backend, SessionRecoveryEngine)
 
     def _warn_claude_only(self, feature: str) -> None:
@@ -2360,8 +2412,9 @@ class AISession:
 
     def _claude_only(self, method_name: str, default: object, *args: object, **kwargs: object) -> object:
         """Delegate to Claude backend or warn + return default. DRY pattern for all claude-only features."""
-        if self._is_claude:
-            return getattr(self._backend, method_name)(*args, **kwargs)
+        be = self._claude_backend
+        if be:
+            return getattr(be, method_name)(*args, **kwargs)
         self._warn_claude_only(method_name.replace("_", " ").title())
         return default
 
@@ -2399,9 +2452,10 @@ class AISession:
             list[ContextMatch]   when context>0 or context_before/after are set.
         """
         use_context = context > 0 or context_before >= 0 or context_after >= 0
+        claude_be = self._claude_backend
         if use_context:
-            if self._is_claude:
-                return self._backend.search_messages_with_context(
+            if claude_be:
+                return claude_be.search_messages_with_context(
                     query, context,
                     context_before=context_before,
                     context_after=context_after,
@@ -2421,8 +2475,8 @@ class AISession:
                 )
             plain = self._backend.search_messages(query, message_type)
             return [ContextMatch(match=m, context_before=[], context_after=[]) for m in plain]
-        if self._is_claude:
-            return self._backend.search_messages(
+        if claude_be:
+            return claude_be.search_messages(
                 query, message_type, tool,
                 exclude_compaction=exclude_compaction,
                 since=since,
@@ -2439,11 +2493,39 @@ class AISession:
                      since: str | None = None,   # canonical; after= is a hidden alias
                      until: str | None = None,   # canonical; before= is a hidden alias
                      ) -> list[SessionInfo]:
-        """List sessions. Applies date filter for all backends via _passes_date_filter."""
+        """List sessions. Applies date filter for all backends via _passes_date_filter.
+
+        In multi-source mode (source="all"): uses the fast Claude path
+        (with mtime pre-filter) for Claude sessions and the generic path
+        for non-Claude sources, then merges results.
+        """
         if self._is_claude:
             return self._backend.get_sessions(project_filter, since, until)
+        # Multi-source: use fast Claude path if available, generic for others
+        claude_be = self._claude_backend
+        if claude_be:
+            # Fast path for Claude sessions (mtime pre-filter via _iter_all_jsonl)
+            claude_sessions = claude_be.get_sessions(project_filter, since, until)
+            # Generic path for non-Claude sources only
+            non_claude = []
+            for src in getattr(self._backend, "_sources", []):
+                if isinstance(src, ClaudeSource):
+                    continue  # already handled above
+                try:
+                    non_claude.extend(src.list_sessions())
+                except Exception:  # noqa: BLE001
+                    pass
+            if since or until:
+                non_claude = [
+                    s for s in non_claude
+                    if _passes_date_filter(s.timestamp_first, since, until)
+                ]
+            all_sessions = claude_sessions + non_claude
+            all_sessions.sort(key=lambda s: s.timestamp_first or "", reverse=True)
+            return all_sessions
+        # Pure non-Claude: use generic list + filter
         sessions = self._backend.list_sessions()
-        if since or until:   # only filter when needed (default: no restriction)
+        if since or until:
             sessions = [
                 s for s in sessions
                 if _passes_date_filter(s.timestamp_first, since, until)
@@ -2456,8 +2538,13 @@ class AISession:
 
         Uses MultiSourceEngine.list_sessions() + read_session() public API — no private attribute access.
         """
+        claude_be = self._claude_backend
+        if claude_be:
+            result = claude_be.get_messages(session_id, message_type)
+            if result:
+                return result
         if self._is_claude:
-            return self._backend.get_messages(session_id, message_type)
+            return []  # Claude-only mode, session not found
         import contextlib
         found: list = []
         # Use public list_sessions() + read_session() — do NOT access _sources directly
@@ -2475,9 +2562,10 @@ class AISession:
                        until: str | None = None,         # canonical; before= is a hidden alias
                        ) -> SessionStatistics:
         """Return session statistics. Default since=None, until=None: no date restriction."""
-        if self._is_claude:
-            return self._backend.get_statistics(since=since, until=until)
-        # Non-Claude backends (aistudio, gemini_cli): total_files/versions always 0.
+        claude_be = self._claude_backend
+        if claude_be and self._is_claude:
+            return claude_be.get_statistics(since=since, until=until)
+        # Non-Claude or multi-source backends: aggregate stats.
         if since or until:
             sessions = self.get_sessions(since=since, until=until)
             per_source: dict[str, int] = {}
@@ -2643,8 +2731,12 @@ class AISession:
             limit = _engine_cfg_default("limit", 50)
         # Merge user-supplied patterns from config with defaults (T58)
         _patterns = patterns or _get_correction_patterns()
-        if self._is_claude:
-            return self._backend.find_corrections(
+        # Fast Claude path: direct JSONL scan with mtime pre-filter.
+        # Works even in multi-source mode (source="all") since corrections
+        # are detected from Claude JSONL records only.
+        claude_be = self._claude_backend
+        if claude_be:
+            return claude_be.find_corrections(
                 project_filter=project_filter,
                 since=since,
                 until=until,
@@ -2717,8 +2809,12 @@ class AISession:
         """
         if limit is None:
             limit = _engine_cfg_default("limit", 50)
-        if self._is_claude:
-            results = self._backend.analyze_planning_usage(
+        # Fast Claude path: direct JSONL scan with mtime + content pre-filters.
+        # Works even in multi-source mode (source="all") since slash commands
+        # are a Claude Code concept — AI Studio and Gemini CLI don't have them.
+        claude_be = self._claude_backend
+        if claude_be:
+            results = claude_be.analyze_planning_usage(
                 commands=commands,
                 project_filter=project_filter,
                 since=since,
@@ -2830,8 +2926,11 @@ class AISession:
             Markdown string — caller handles writing to file.
             Returns "" if session not found.
         """
-        if self._is_claude:
-            return self._claude_only("export_session_markdown", "", session_id)
+        claude_be = self._claude_backend
+        if claude_be:
+            result = claude_be.export_session_markdown(session_id)
+            if result:
+                return result
         # Generic fallback: build markdown from messages API
         messages = self.get_messages(session_id)
         if not messages:
@@ -2902,8 +3001,9 @@ class AISession:
         For AI Studio / Gemini CLI sessions: message counts and timestamps only
         (tool_uses_by_name={}, files_touched=[] — not tracked by non-Claude backends).
         """
-        if self._is_claude:
-            return self._backend.analyze_session(session_id)
+        claude_be = self._claude_backend
+        if claude_be:
+            return claude_be.analyze_session(session_id)
         # Generic fallback: compute stats from messages API
         messages = self.get_messages(session_id)
         if not messages:
@@ -2946,8 +3046,9 @@ class AISession:
         """
         if preview_chars is None:
             preview_chars = _engine_cfg_default("preview_chars", 150)
-        if self._is_claude:
-            return self._backend.timeline_session(session_id, preview_chars)
+        claude_be = self._claude_backend
+        if claude_be:
+            return claude_be.timeline_session(session_id, preview_chars)
         # Generic fallback: build from messages API
         messages = self.get_messages(session_id)
         events = []
@@ -2970,8 +3071,9 @@ class AISession:
     @property
     def recovery_dir(self) -> Path:
         """Recovery directory (Claude-only). Used by _version_src_path in cli.py."""
-        if self._is_claude:
-            return self._backend.recovery_dir
+        claude_be = self._claude_backend
+        if claude_be:
+            return claude_be.recovery_dir
         from pathlib import Path
         return Path()
 
@@ -2981,8 +3083,9 @@ class AISession:
 
         Returns Path() (empty path) for non-Claude backends.
         """
-        if self._is_claude:
-            return self._backend.projects_dir
+        claude_be = self._claude_backend
+        if claude_be:
+            return claude_be.projects_dir
         from pathlib import Path
         return Path()
 

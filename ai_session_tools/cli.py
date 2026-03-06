@@ -1861,16 +1861,17 @@ def _do_messages_timeline(
     events = engine.get_session_timeline(session_id, preview_chars=preview_chars)
     any_filter_active = bool(message_type or grep or exclude_compaction or since or until)
     has_events_before_filter = bool(events)
+    # Timeline events use "content_preview" as the content key (from timeline_session()).
     # --type filter (extended to include slash and compaction)
     if message_type == "slash":
-        events = [e for e in events if "<command-name>" in (e.get("content") or "")]
+        events = [e for e in events if "<command-name>" in (e.get("content_preview") or "")]
     elif message_type == "compaction":
-        events = [e for e in events if _is_compaction_content(e.get("content"))]
+        events = [e for e in events if _is_compaction_content(e.get("content_preview"))]
     elif message_type:
         events = [e for e in events if e.get("type") == message_type]
     # --no-compaction post-filter (applies after --type)
     if exclude_compaction:
-        events = [e for e in events if not _is_compaction_content(e.get("content"))]
+        events = [e for e in events if not _is_compaction_content(e.get("content_preview"))]
     if since:
         events = [e for e in events if (e.get("timestamp") or "") >= since]
     if until:
@@ -1879,11 +1880,11 @@ def _do_messages_timeline(
     if grep:
         try:
             grep_re = _re.compile(grep, _re.IGNORECASE)
-            events = [e for e in events if grep_re.search(e.get("content") or "")]
+            events = [e for e in events if grep_re.search(e.get("content_preview") or "")]
         except _re.error:
             err_console.print(f"[yellow]Warning:[/yellow] --grep pattern is not valid regex; falling back to literal substring match.")
             grep_lower = grep.lower()
-            events = [e for e in events if grep_lower in (e.get("content") or "").lower()]
+            events = [e for e in events if grep_lower in (e.get("content_preview") or "").lower()]
     if not events:
         if any_filter_active and has_events_before_filter:
             # Session exists and has events, but all were filtered out — exit 0
@@ -1910,7 +1911,7 @@ def _do_messages_timeline(
         for e in events:
             ts = (e.get("timestamp") or "")[:19]
             etype = e.get("type") or ""
-            content = e.get("content") or ""
+            content = e.get("content_preview") or ""
             out_console.print(f"[dim][{etype}] {ts}[/dim]")
             out_console.print(content)
         _write_output(out_console, output)

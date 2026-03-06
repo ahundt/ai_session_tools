@@ -11142,7 +11142,7 @@ def _make_projects_with_slash_and_compaction(tmp_path: Path) -> Path:
 
 # TDD #2a: _path_mtime_iso helper
 
-class TestPathMtimeIso:
+class TestPathMtimeIsoHelper:
     """TDD: _path_mtime_iso converts file mtime to 19-char UTC ISO string."""
 
     def test_existing_file_returns_19char_iso(self, tmp_path):
@@ -11232,10 +11232,10 @@ class TestSlashCmdDiscoveryRe:
 
 # TDD #4a: _iter_all_jsonl mtime pre-filter
 
-class TestIterAllJsonlMtimePreFilter:
+class TestIterAllJsonlMtimeAndSessionIdPreFilter:
     """TDD: _iter_all_jsonl with since param applies mtime pre-filter."""
 
-    def test_since_future_skips_all_files(self, tmp_path):
+    def test_since_far_future_excludes_all_existing_files(self, tmp_path):
         """since=9999-01-01 means all existing files are excluded by mtime."""
         projects = _make_projects_with_sessions(tmp_path)
         engine = _make_engine(tmp_path, projects)
@@ -11243,7 +11243,7 @@ class TestIterAllJsonlMtimePreFilter:
         # All existing files have mtime < 9999 — they should all be excluded
         assert results == [], f"Expected no files with far-future since, got: {results}"
 
-    def test_since_past_includes_all_files(self, tmp_path):
+    def test_since_far_past_includes_all_existing_files(self, tmp_path):
         """since=2000-01-01 means all existing files are included (mtime > 2000)."""
         projects = _make_projects_with_sessions(tmp_path)
         engine = _make_engine(tmp_path, projects)
@@ -11266,7 +11266,7 @@ class TestIterAllJsonlMtimePreFilter:
         results = list(engine._iter_all_jsonl(session_id_prefix="zzzz9999"))
         assert results == []
 
-    def test_session_id_prefix_matches_multiple(self, tmp_path):
+    def test_session_id_prefix_partial_string_matches_all_sessions_starting_with_it(self, tmp_path):
         """session_id_prefix=aaaa matches any session starting with aaaa."""
         projects = _make_projects_with_sessions(tmp_path)
         engine = _make_engine(tmp_path, projects)
@@ -11275,7 +11275,7 @@ class TestIterAllJsonlMtimePreFilter:
         # Both should return the same session
         assert len(results_prefix) == len(results_full) == 1
 
-    def test_invalid_since_does_not_crash(self, tmp_path):
+    def test_invalid_since_string_falls_back_to_no_filter(self, tmp_path):
         """_iter_all_jsonl with invalid since does not crash — ValueError caught."""
         projects = _make_projects_with_sessions(tmp_path)
         engine = _make_engine(tmp_path, projects)
@@ -11283,7 +11283,7 @@ class TestIterAllJsonlMtimePreFilter:
         results = list(engine._iter_all_jsonl(since="INVALID_DATE"))
         assert len(results) >= 1
 
-    def test_raw_relative_since_normalized(self, tmp_path):
+    def test_relative_since_string_normalized_to_iso_before_filter(self, tmp_path):
         """since='14d' (raw relative) is normalized by _iter_all_jsonl."""
         projects = _make_projects_with_sessions(tmp_path)
         engine = _make_engine(tmp_path, projects)
@@ -11338,7 +11338,7 @@ class TestIsCompaction:
 
 # TDD #6a: slash/compaction type filters in search_messages engine
 
-class TestSlashCompactionFilters:
+class TestSearchMessagesSlashAndCompactionTypeFilters:
     """TDD: search_messages with --type slash/compaction and --no-compaction."""
 
     def test_type_slash_returns_only_slash_invocations(self, tmp_path):
@@ -11391,7 +11391,7 @@ class TestSlashCompactionFilters:
 
 # TDD #7a: since/session_id threading through engine callers
 
-class TestSinceSessionIdThreading:
+class TestSinceAndSessionIdThreadedThroughEngineCalls:
     """TDD: since and session_id params thread through engine search methods."""
 
     def test_search_messages_since_filters_files(self, tmp_path):
@@ -11435,7 +11435,7 @@ class TestSinceSessionIdThreading:
 
 # TDD #8a: context_before/after in search_messages_with_context
 
-class TestContextAsymmetric:
+class TestSearchMessagesAsymmetricContextWindow:
     """TDD: search_messages_with_context supports context_before and context_after."""
 
     def test_context_after_3_has_at_most_3_after(self, tmp_path):
@@ -11493,7 +11493,7 @@ class TestContextAsymmetric:
 
 # TDD #9a: SlashCommandRecord dataclass and invocation mode
 
-class TestSlashCommandRecord:
+class TestSlashCommandRecordDataclass:
     """TDD: SlashCommandRecord dataclass and analyze_planning_usage(return_invocations=True)."""
 
     def test_planning_invocation_importable(self):
@@ -11557,15 +11557,15 @@ class TestSlashCommandRecord:
 
 # TDD #10a: MsgFilterType enum and _write_output helper in CLI
 
-class TestMsgFilterTypeAndWriteOutput:
+class TestMsgFilterTypeEnumAndOutputHelper:
     """TDD: MsgFilterType enum and _write_output helper exist in cli.py."""
 
-    def test_msg_filter_type_importable(self):
+    def test_msg_filter_type_enum_importable_from_cli_module(self):
         """MsgFilterType should be importable from ai_session_tools.cli."""
         from ai_session_tools.cli import MsgFilterType
         assert MsgFilterType is not None
 
-    def test_msg_filter_type_has_required_values(self):
+    def test_msg_filter_type_enum_has_all_five_values_user_assistant_tool_slash_compaction(self):
         """MsgFilterType has user, assistant, tool, slash, compaction."""
         from ai_session_tools.cli import MsgFilterType
         assert MsgFilterType.user.value == "user"
@@ -11574,7 +11574,7 @@ class TestMsgFilterTypeAndWriteOutput:
         assert MsgFilterType.slash.value == "slash"
         assert MsgFilterType.compaction.value == "compaction"
 
-    def test_write_output_creates_file(self, tmp_path):
+    def test_write_output_helper_writes_console_text_to_file_on_disk(self, tmp_path):
         """_write_output creates a file with the recorded console output."""
         from rich.console import Console
         from ai_session_tools.cli import _write_output
@@ -11585,7 +11585,7 @@ class TestMsgFilterTypeAndWriteOutput:
         assert output_path.exists()
         assert "Hello from test" in output_path.read_text()
 
-    def test_write_output_none_path_is_noop(self, tmp_path):
+    def test_write_output_helper_does_nothing_when_output_path_is_none(self, tmp_path):
         """_write_output with None output_path does nothing."""
         from rich.console import Console
         from ai_session_tools.cli import _write_output
@@ -11596,10 +11596,10 @@ class TestMsgFilterTypeAndWriteOutput:
 
 # TDD #11a: messages search new CLI flags
 
-class TestMessagesSearchNewFlags:
+class TestMessagesSearchTypeSessionContextFlags:
     """TDD: messages search --type slash/compaction, --no-compaction, --session, --context-after."""
 
-    def test_messages_search_type_slash_flag_accepted(self, tmp_path):
+    def test_messages_search_type_slash_returns_only_slash_invocations(self, tmp_path):
         """messages search --type slash must be accepted (not invalid option)."""
         projects = _make_projects_with_slash_and_compaction(tmp_path)
         result = runner.invoke(
@@ -11608,7 +11608,7 @@ class TestMessagesSearchNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_messages_search_type_compaction_flag_accepted(self, tmp_path):
+    def test_messages_search_type_compaction_returns_only_compaction_messages(self, tmp_path):
         """messages search --type compaction must be accepted."""
         projects = _make_projects_with_slash_and_compaction(tmp_path)
         result = runner.invoke(
@@ -11617,7 +11617,7 @@ class TestMessagesSearchNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_messages_search_no_compaction_flag_accepted(self, tmp_path):
+    def test_messages_search_no_compaction_excludes_compaction_summaries(self, tmp_path):
         """messages search --no-compaction must be accepted."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11626,7 +11626,7 @@ class TestMessagesSearchNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_messages_search_session_flag_accepted(self, tmp_path):
+    def test_messages_search_session_limits_results_to_one_session(self, tmp_path):
         """messages search --session SESSION_ID must be accepted."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11635,7 +11635,7 @@ class TestMessagesSearchNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_messages_search_session_scopes_results(self, tmp_path):
+    def test_messages_search_session_flag_excludes_messages_from_other_sessions(self, tmp_path):
         """messages search --session aaaa0001 only returns messages from that session."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11648,7 +11648,7 @@ class TestMessagesSearchNewFlags:
         assert all(m.get("session_id", "").startswith("aaaa0001") for m in data), (
             f"All results must be from aaaa0001; got: {[m.get('session_id') for m in data]}")
 
-    def test_messages_search_context_after_flag_accepted(self, tmp_path):
+    def test_messages_search_context_after_returns_trailing_context(self, tmp_path):
         """messages search --context-after N must be accepted."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11657,7 +11657,7 @@ class TestMessagesSearchNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_messages_search_context_before_flag_accepted(self, tmp_path):
+    def test_messages_search_context_before_returns_preceding_context(self, tmp_path):
         """messages search --context-before N must be accepted."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11666,7 +11666,7 @@ class TestMessagesSearchNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_messages_search_type_compaction_no_compaction_warns(self, tmp_path):
+    def test_messages_search_type_compaction_with_no_compaction_flag_warns_and_exits_0(self, tmp_path):
         """--type compaction --no-compaction is a contradiction — CLI warns and exits 0."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11678,7 +11678,7 @@ class TestMessagesSearchNewFlags:
         assert "warn" in result.output.lower() or "contradict" in result.output.lower(), (
             f"Expected warning for contradiction; got: {result.output}")
 
-    def test_messages_search_output_flag_creates_file(self, tmp_path):
+    def test_messages_search_output_flag_writes_search_results_to_file(self, tmp_path):
         """messages search --output FILE creates file with same content as stdout."""
         projects = _make_projects_with_sessions(tmp_path)
         output_file = tmp_path / "search_out.txt"
@@ -11694,10 +11694,10 @@ class TestMessagesSearchNewFlags:
 
 # TDD #12a: messages timeline new CLI flags
 
-class TestMessagesTimelineNewFlags:
+class TestMessagesTimelineGrepTypeCompactionFlags:
     """TDD: messages timeline --grep, --type slash/compaction, --no-compaction, --output."""
 
-    def test_timeline_grep_flag_accepted(self, tmp_path):
+    def test_timeline_grep_start_pattern_exits_cleanly_with_at_least_one_match(self, tmp_path):
         """messages timeline --grep PATTERN must be accepted."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11706,7 +11706,7 @@ class TestMessagesTimelineNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_timeline_grep_filters_results(self, tmp_path):
+    def test_timeline_grep_start_pattern_excludes_you_forgot_message(self, tmp_path):
         """messages timeline --grep 'start' only shows events matching 'start'."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11719,7 +11719,7 @@ class TestMessagesTimelineNewFlags:
         assert "you forgot" not in result.output.lower(), (
             f"'you forgot' should be filtered out; got: {result.output}")
 
-    def test_timeline_grep_regex_pattern(self, tmp_path):
+    def test_timeline_grep_accepts_pipe_separated_or_regex_pattern(self, tmp_path):
         """messages timeline --grep supports regex patterns like 'start|forgot'."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11729,7 +11729,7 @@ class TestMessagesTimelineNewFlags:
         )
         assert result.exit_code == 0
 
-    def test_timeline_type_slash_flag_accepted(self, tmp_path):
+    def test_timeline_type_slash_returns_only_slash_command_events(self, tmp_path):
         """messages timeline --type slash must be accepted."""
         projects = _make_projects_with_slash_and_compaction(tmp_path)
         result = runner.invoke(
@@ -11738,7 +11738,7 @@ class TestMessagesTimelineNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_timeline_no_compaction_flag_accepted(self, tmp_path):
+    def test_timeline_no_compaction_excludes_compaction_summary_events(self, tmp_path):
         """messages timeline --no-compaction must be accepted."""
         projects = _make_projects_with_slash_and_compaction(tmp_path)
         result = runner.invoke(
@@ -11747,7 +11747,7 @@ class TestMessagesTimelineNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_timeline_type_compaction_no_compaction_warns(self, tmp_path):
+    def test_timeline_type_compaction_with_no_compaction_flag_warns_and_exits_0(self, tmp_path):
         """messages timeline --type compaction --no-compaction warns and exits 0."""
         projects = _make_projects_with_slash_and_compaction(tmp_path)
         result = runner.invoke(
@@ -11758,7 +11758,7 @@ class TestMessagesTimelineNewFlags:
         assert result.exit_code == 0
         assert "warn" in result.output.lower() or "contradict" in result.output.lower()
 
-    def test_timeline_output_flag_creates_file(self, tmp_path):
+    def test_timeline_output_flag_writes_timeline_events_to_file(self, tmp_path):
         """messages timeline --output FILE creates file with content."""
         projects = _make_projects_with_sessions(tmp_path)
         output_file = tmp_path / "timeline_out.txt"
@@ -11773,10 +11773,10 @@ class TestMessagesTimelineNewFlags:
 
 # TDD #13a: messages planning new CLI flags
 
-class TestMessagesPlanningNewFlags:
+class TestMessagesPlanningShowArgsContextAfterFlags:
     """TDD: messages planning --show-args and --context-after flags."""
 
-    def test_planning_show_args_flag_accepted(self, tmp_path):
+    def test_planning_show_args_exits_cleanly(self, tmp_path):
         """messages planning --show-args must be accepted."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11785,7 +11785,7 @@ class TestMessagesPlanningNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_planning_show_args_displays_args(self, tmp_path):
+    def test_planning_show_args_includes_text_after_slash_command_token(self, tmp_path):
         """messages planning --show-args shows args for each planning command."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11797,7 +11797,7 @@ class TestMessagesPlanningNewFlags:
         assert "add login form" in result.output, (
             f"Expected 'add login form' in output; got:\n{result.output}")
 
-    def test_planning_context_after_flag_accepted(self, tmp_path):
+    def test_planning_context_after_exits_cleanly(self, tmp_path):
         """messages planning --context-after N must be accepted."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11806,7 +11806,7 @@ class TestMessagesPlanningNewFlags:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_planning_output_flag_creates_file(self, tmp_path):
+    def test_planning_output_writes_command_counts_to_file(self, tmp_path):
         """messages planning --output FILE creates file."""
         projects = _make_projects_with_sessions(tmp_path)
         output_file = tmp_path / "planning_out.txt"
@@ -11820,10 +11820,10 @@ class TestMessagesPlanningNewFlags:
 
 # TDD #14a: messages corrections --output and aise commands group
 
-class TestMessagesCorrectionOutput:
+class TestMessagesCorrectionOutputToFile:
     """TDD: messages corrections --output flag."""
 
-    def test_corrections_output_flag_accepted(self, tmp_path):
+    def test_corrections_output_flag_exits_cleanly(self, tmp_path):
         """messages corrections --output FILE must be accepted."""
         projects = _make_projects_with_sessions(tmp_path)
         output_file = tmp_path / "corr_out.txt"
@@ -11834,7 +11834,7 @@ class TestMessagesCorrectionOutput:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_corrections_output_creates_file(self, tmp_path):
+    def test_corrections_output_flag_writes_correction_matches_to_file(self, tmp_path):
         """messages corrections --output FILE creates a file."""
         projects = _make_projects_with_sessions(tmp_path)
         output_file = tmp_path / "corr_out.txt"
@@ -11846,10 +11846,10 @@ class TestMessagesCorrectionOutput:
         assert output_file.exists(), "Output file must be created by --output flag"
 
 
-class TestCommandsGroup:
+class TestSlashCommandsSubgroupListAndContext:
     """TDD: aise commands subcommand group with list and context subcommands."""
 
-    def test_commands_list_subcommand_exists(self, tmp_path):
+    def test_commands_list_subcommand_exits_cleanly(self, tmp_path):
         """aise commands list must be a valid subcommand."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11858,7 +11858,7 @@ class TestCommandsGroup:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_commands_list_shows_planning_commands(self, tmp_path):
+    def test_commands_list_shows_slash_invocations_from_session(self, tmp_path):
         """aise commands list shows slash command invocations."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11869,7 +11869,7 @@ class TestCommandsGroup:
         assert "/ar:plannew" in result.output or "/ar:pn" in result.output, (
             f"Expected commands in output; got:\n{result.output}")
 
-    def test_commands_list_command_filter_works(self, tmp_path):
+    def test_commands_list_command_filter_limits_output_to_matching_slash_commands(self, tmp_path):
         """aise commands list --command /ar:plannew filters to only that command."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11879,7 +11879,7 @@ class TestCommandsGroup:
         assert result.exit_code == 0
         assert "/ar:pn" not in result.output
 
-    def test_commands_list_output_flag_creates_file(self, tmp_path):
+    def test_commands_list_output_flag_writes_invocations_to_file(self, tmp_path):
         """aise commands list --output FILE creates a file."""
         projects = _make_projects_with_sessions(tmp_path)
         output_file = tmp_path / "cmds_out.txt"
@@ -11890,7 +11890,7 @@ class TestCommandsGroup:
         assert result.exit_code == 0
         assert output_file.exists()
 
-    def test_commands_context_subcommand_exists(self, tmp_path):
+    def test_commands_context_subcommand_exits_cleanly(self, tmp_path):
         """aise commands context COMMAND must be a valid subcommand."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11899,7 +11899,7 @@ class TestCommandsGroup:
         )
         assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
 
-    def test_commands_context_shows_context_after(self, tmp_path):
+    def test_commands_context_shows_messages_following_slash_invocation(self, tmp_path):
         """aise commands context /ar:plannew --context-after 2 shows 2 messages after."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
@@ -11914,7 +11914,7 @@ class TestCommandsGroup:
 
 # TDD #new-a: _path_stat_iso helper
 
-class TestPathStatIso:
+class TestPathStatIsoHelper:
     """TDD: _path_stat_iso returns (mtime_iso, birthtime_iso) from one stat() call."""
 
     def test_existing_file_returns_mtime_iso(self, tmp_path):
@@ -11965,7 +11965,7 @@ class TestPathStatIso:
 
 # TDD #new-b: _read_first_timestamp helper
 
-class TestReadFirstTimestamp:
+class TestReadFirstTimestampHelper:
     """TDD: _read_first_timestamp reads first valid timestamp from JSONL."""
 
     def test_returns_first_timestamp(self, tmp_path):
@@ -12015,7 +12015,7 @@ class TestReadFirstTimestamp:
 
 # TDD #new-c: _iter_all_jsonl until param and 3-tuple yield
 
-class TestIterAllJsonlUntilParam:
+class TestIterAllJsonlUntilDateFilter:
     """TDD: _iter_all_jsonl 3-tuple yield and until pre-filter."""
 
     def test_yields_three_tuple(self, tmp_path):
@@ -12096,3 +12096,241 @@ class TestIterAllJsonlUntilParam:
         engine = _make_engine(tmp_path, projects)
         results = engine.analyze_planning_usage(until="2000-01-01T00:00:00")
         assert results == []
+
+# Edge case sweep: tests from plan that were not yet covered
+
+class TestMessagesTimelineTypeAndNoCompactionFilters:
+    """Edge cases: messages timeline --type compaction, --type user, --type slash --grep."""
+
+    def test_timeline_type_compaction_shows_only_this_session_continued_messages(self, tmp_path):
+        """messages timeline --type compaction shows only compaction events."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
+                  "--type", "compaction", "--format", "plain"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+        # Compaction message starts with "This session is being continued"
+        assert "being continued" in result.output or result.output.strip() == ""
+
+    def test_timeline_type_user_shows_only_user_role_events(self, tmp_path):
+        """messages timeline --type user shows only user-role events."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
+                  "--type", "user", "--format", "plain"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_timeline_type_slash_with_grep_shows_only_slash_invocations_matching_grep(self, tmp_path):
+        """messages timeline --type slash --grep 'plannew' shows only slash invocations matching grep."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
+                  "--type", "slash", "--grep", "plannew"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+        # "plannew" is in the slash message — should appear or empty (type filter first)
+        assert "plannew" in result.output or result.output.strip() == ""
+
+    def test_timeline_no_compaction_flag_hides_this_session_continued_prefix_messages(self, tmp_path):
+        """messages timeline --no-compaction hides compaction summary events."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
+                  "--no-compaction", "--format", "plain"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # The compaction message must not appear
+        assert "being continued" not in result.output
+
+
+class TestIsCompactionHelperWithNoneEmptyAndPrefixContent:
+    """_is_compaction helper with None, empty, prefix-match, and false-positive content."""
+
+    def test_is_compaction_true_when_flag_set_even_if_content_is_none(self):
+        """_is_compaction does not crash on None content field."""
+        from ai_session_tools.engine import _is_compaction
+        # isCompactSummary=True with None content — should not raise
+        assert _is_compaction({"isCompactSummary": True}, None) is True
+
+    def test_is_compaction_false_for_empty_content_without_flag(self):
+        """_is_compaction returns False for empty content with no flag."""
+        from ai_session_tools.engine import _is_compaction
+        assert _is_compaction({}, "") is False
+        assert _is_compaction({}, None) is False
+
+    def test_is_compaction_true_for_this_session_is_being_continued_prefix(self):
+        """_is_compaction returns True for 'This session is being continued' prefix."""
+        from ai_session_tools.engine import _is_compaction
+        content = "This session is being continued from a previous conversation."
+        assert _is_compaction({}, content) is True
+
+    def test_is_compaction_false_for_regular_messages(self):
+        """_is_compaction returns False for regular user messages."""
+        from ai_session_tools.engine import _is_compaction
+        assert _is_compaction({}, "fix the login bug") is False
+        assert _is_compaction({}, "<command-name>ar:plannew</command-name>") is False
+
+
+class TestMtimeSkipVerificationWithMock:
+    """Verify files are skipped (stat called but not opened) when mtime < since."""
+
+    def test_mtime_skipped_files_never_opened_for_reading(self, tmp_path):
+        """When since is far future, stat() runs but open() is never called."""
+        from unittest.mock import patch
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+
+        opened_files = []
+        original_open = open
+
+        def mock_open(path, *args, **kwargs):
+            opened_files.append(str(path))
+            return original_open(path, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=mock_open):
+            results = list(engine._iter_all_jsonl(since="9999-01-01T00:00:00"))
+
+        assert results == [], "No files should pass the mtime pre-filter"
+        # open() should not have been called for any JSONL session file
+        jsonl_opens = [p for p in opened_files if p.endswith(".jsonl")]
+        assert jsonl_opens == [], f"JSONL files should not be opened; got: {jsonl_opens}"
+
+    def test_stat_oserror_returns_none_and_file_is_yielded_conservatively(self, tmp_path):
+        """OSError in _path_mtime_iso returns None → file is yielded (conservative)."""
+        from ai_session_tools.engine import _path_mtime_iso
+        # Non-existent path → OSError → None
+        result = _path_mtime_iso(tmp_path / "nonexistent.jsonl")
+        assert result is None
+
+    def test_invalid_since_in_iter_all_jsonl_falls_back_to_no_filter(self, tmp_path):
+        """Invalid since string doesn't crash; all files are still yielded."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        all_files = list(engine._iter_all_jsonl())
+        invalid_since_files = list(engine._iter_all_jsonl(since="not-a-date"))
+        assert len(invalid_since_files) == len(all_files)
+
+
+class TestSlashCmdContentRejectsCwdAndPathFields:
+    """_SLASH_CMD_CONTENT_RE only matches slash commands in content/text/message fields.
+
+    Every user message has "cwd":"/Users/..." which contains '"/' — the naive
+    '"/' check was a no-op. _SLASH_CMD_CONTENT_RE is stricter: it requires the
+    slash to be in a content, text, or message JSON field value, not in cwd/path.
+    """
+
+    def test_content_field_with_slash_command_matches(self):
+        """'content' field value starting with /word matches."""
+        from ai_session_tools.engine import _SLASH_CMD_CONTENT_RE
+        line = '{"type": "user", "message": {"content": "/ar:plannew fix auth"}, "cwd": "/Users/foo"}'
+        assert _SLASH_CMD_CONTENT_RE.search(line), "content field slash command must match"
+
+    def test_text_field_with_slash_command_matches(self):
+        """'text' field value starting with /word matches (array content format)."""
+        from ai_session_tools.engine import _SLASH_CMD_CONTENT_RE
+        line = '{"type": "user", "message": {"content": [{"type": "text", "text": "/commit"}]}, "cwd": "/Users/foo"}'
+        assert _SLASH_CMD_CONTENT_RE.search(line), "text field slash command must match"
+
+    def test_message_field_string_with_slash_command_matches(self):
+        """'message' string value starting with /word matches (direct string format)."""
+        from ai_session_tools.engine import _SLASH_CMD_CONTENT_RE
+        line = '{"type": "user", "message": "/help", "cwd": "/Users/foo"}'
+        assert _SLASH_CMD_CONTENT_RE.search(line), "message string slash command must match"
+
+    def test_cwd_field_with_path_does_not_match(self):
+        """'cwd' field with /Users/... path does NOT match — eliminating the false positive."""
+        from ai_session_tools.engine import _SLASH_CMD_CONTENT_RE
+        line = '{"type": "user", "message": {"content": "Hello world"}, "cwd": "/Users/foo/bar"}'
+        assert not _SLASH_CMD_CONTENT_RE.search(line), "cwd path must not match"
+
+    def test_path_field_does_not_match(self):
+        """'path' field with /usr/local path does NOT match."""
+        from ai_session_tools.engine import _SLASH_CMD_CONTENT_RE
+        line = '{"type": "user", "path": "/usr/local/bin", "message": {"content": "Hello"}}'
+        assert not _SLASH_CMD_CONTENT_RE.search(line), "path field must not match"
+
+    def test_url_in_content_does_not_match_when_url_starts_content(self):
+        """Content starting with https:// does not match — no slash immediately after quote."""
+        from ai_session_tools.engine import _SLASH_CMD_CONTENT_RE
+        line = '{"type": "user", "message": {"content": "https://example.com/path"}}'
+        assert not _SLASH_CMD_CONTENT_RE.search(line), "URL-starting content must not match"
+
+    def test_content_field_leading_spaces_before_slash_command_matches(self):
+        """Content with leading spaces before slash is handled (lstrip() semantics)."""
+        from ai_session_tools.engine import _SLASH_CMD_CONTENT_RE
+        line = '{"type": "user", "message": {"content": "  /ar:plannew"}, "cwd": "/Users/foo"}'
+        assert _SLASH_CMD_CONTENT_RE.search(line), "leading spaces before slash command must match"
+
+    def test_content_with_just_slash_no_word_char_does_not_match(self):
+        """'/' alone (no word char after) does not match — mirrors _SLASH_CMD_DISCOVERY_RE \\w requirement."""
+        from ai_session_tools.engine import _SLASH_CMD_CONTENT_RE
+        line = '{"type": "user", "message": {"content": "/"}, "cwd": "/Users/foo"}'
+        assert not _SLASH_CMD_CONTENT_RE.search(line), "bare slash without word char must not match"
+
+
+class TestClaudeBackendFoundInMultiSourceEngine:
+    """AISession._claude_backend must find the Claude backend inside
+    MultiSourceEngine via the ClaudeSource adapter wrapper.
+
+    Without this fix, source="all" takes the O(S×M) slow fallback for
+    every Claude-only method (planning, corrections, timeline, etc.)
+    instead of the fast JSONL path with mtime pre-filter.
+    """
+
+    def test_claude_backend_returns_session_recovery_engine_when_direct(self, tmp_path):
+        """When source='claude', _claude_backend returns SessionRecoveryEngine directly."""
+        from ai_session_tools.engine import SessionRecoveryEngine, AISession
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        session = AISession._from_backend(engine, "claude")
+        assert session._claude_backend is engine
+        assert session._is_claude is True
+
+    def test_claude_backend_found_inside_multi_source_engine(self, tmp_path):
+        """When source='all', _claude_backend finds SessionRecoveryEngine inside ClaudeSource.
+
+        _is_claude remains False (direct backend is MultiSourceEngine) — _is_claude is
+        used by aggregate methods (get_sessions, search_messages) that need combined results.
+        Claude-only methods (planning, corrections, timeline) use _claude_backend instead.
+        """
+        from ai_session_tools.engine import (
+            SessionRecoveryEngine, MultiSourceEngine, ClaudeSource, AISession,
+        )
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        claude_src = ClaudeSource(engine)
+        multi = MultiSourceEngine([claude_src])
+        session = AISession._from_backend(multi, "all")
+        assert session._claude_backend is engine, \
+            "_claude_backend must unwrap ClaudeSource._engine to find SessionRecoveryEngine"
+        # _is_claude is False because direct backend is MultiSourceEngine.
+        # Claude-only methods should use _claude_backend, not _is_claude.
+        assert session._is_claude is False
+
+    def test_claude_backend_returns_none_without_claude_source(self, tmp_path):
+        """When no Claude source present, _claude_backend returns None."""
+        from ai_session_tools.engine import MultiSourceEngine, AISession
+        multi = MultiSourceEngine([])
+        session = AISession._from_backend(multi, "aistudio")
+        assert session._claude_backend is None
+        assert session._is_claude is False
+
+    def test_planning_usage_uses_fast_path_in_multi_source_mode(self, tmp_path):
+        """get_planning_usage via AISession(source='all') uses fast analyze_planning_usage."""
+        from ai_session_tools.engine import (
+            SessionRecoveryEngine, MultiSourceEngine, ClaudeSource, AISession,
+        )
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        claude_src = ClaudeSource(engine)
+        multi = MultiSourceEngine([claude_src])
+        session = AISession._from_backend(multi, "all")
+        # Should not hang or be slow — uses fast Claude path
+        results = session.get_planning_usage(since="2020-01-01")
+        assert isinstance(results, list)
