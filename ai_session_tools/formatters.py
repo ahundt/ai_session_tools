@@ -16,11 +16,13 @@ from .models import SessionFile, SessionMessage
 
 try:
     from rich.console import Console
+    from rich.markup import escape as _rich_escape
     from rich.table import Table
 
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
+    _rich_escape = str  # no-op fallback when Rich is not installed
 
 
 class ResultFormatter(ABC):
@@ -190,6 +192,7 @@ class MessageFormatter(ResultFormatter):
     def format(self, data: SessionMessage) -> str:
         """Format single message."""
         text = data.preview(self.max_chars) if self.max_chars else data.content.replace("\n", " ")
+        text = _rich_escape(text)
         return f"""Type:       {self._type_str(data.type)}
 Session:    {data.session_id}
 Timestamp:  {data.timestamp}
@@ -201,6 +204,7 @@ Length:     {len(data.content)} chars"""
         lines = []
         for msg in items:
             text = msg.preview(self.max_chars) if self.max_chars else msg.content.replace("\n", " ")
+            text = _rich_escape(text)
             lines.append(f"[{self._type_str(msg.type)}] {msg.timestamp[:19]} - {text}")
         return "\n".join(lines)
 

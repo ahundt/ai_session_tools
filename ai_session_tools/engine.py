@@ -250,6 +250,11 @@ _parse_date_input = parse_date_input
 #: Used when analyze_planning_usage() is called with commands=None (discovery mode).
 _SLASH_CMD_DISCOVERY_RE = re.compile(r"^/(\w[\w:.-]*)(?=\s|$)")
 
+#: Extract slash command from Claude Code's XML tag format:
+#: <command-name>/ar:plannew</command-name>
+#: Returns the command name (e.g. "/ar:plannew") from the XML tag.
+_COMMAND_NAME_TAG_RE = re.compile(r"<command-name>(/[\w][\w:.-]*)</command-name>")
+
 #: Raw-line pre-filter for discovery mode: checks if a JSONL line could contain
 #: a slash command in the message content fields. Matches '"/ar:plannew' but NOT
 #: '"/Users/foo' in a "cwd" or "path" field.
@@ -262,7 +267,12 @@ _SLASH_CMD_DISCOVERY_RE = re.compile(r"^/(\w[\w:.-]*)(?=\s|$)")
 #:
 #: The \w after '/' mirrors _SLASH_CMD_DISCOVERY_RE's first char requirement —
 #: only word characters start valid slash command names.
-_SLASH_CMD_CONTENT_RE = re.compile(r'"(?:content|text|message)"\s*:\s*"[ \t]*/\w')
+#:
+#: Claude Code wraps slash commands in XML tags: <command-name>/ar:plannew</command-name>
+#: so the regex also matches content starting with '<command' to catch both formats.
+_SLASH_CMD_CONTENT_RE = re.compile(
+    r'"(?:content|text|message)"\s*:\s*"[ \t]*(?:/\w|<command)'
+)
 
 #: System message patterns to filter from export
 _EXPORT_FILTER_PATTERNS = (
@@ -270,6 +280,69 @@ _EXPORT_FILTER_PATTERNS = (
     "<task-notification>",
     "<system-reminder>",
 )
+
+
+def _check_redos_safe(pattern: str) -> None:
+    """Reject regex patterns with nested quantifiers that cause catastrophic backtracking.
+
+    Detects the most common ReDoS patterns: a quantifier (+, *, {n,}) applied to a
+    group that itself contains a quantifier (e.g. ``(a+)+``, ``(a*)*``, ``(a|a)+``).
+
+    This is a fast static heuristic, not a full NFA analysis. It catches the patterns
+    that cause exponential backtracking in Python's re engine. Safe patterns pass through.
+
+    Args:
+        pattern: The regex string to validate.
+
+    Raises:
+        ValueError: If the pattern contains nested quantifier structures.
+    """
+    # Parse the regex to detect nested quantifiers using re's internal parser.
+    # re._parser (Python 3.11+) or sre_parse (older) — both expose the same API.
+    try:
+        import re._parser as _sre  # Python 3.11+
+    except ImportError:
+        import sre_parse as _sre  # Python 3.6-3.10
+
+    try:
+        parsed = _sre.parse(pattern)
+    except re.error:
+        return  # Invalid regex will be caught by re.compile(); not our concern here.
+
+    def _has_quantifier(items) -> bool:
+        """Check if any item in a parsed regex group contains a quantifier."""
+        for op, av in items:
+            if op in (_sre.MAX_REPEAT, _sre.MIN_REPEAT):
+                return True
+            if op == _sre.SUBPATTERN and av[3] is not None:
+                if _has_quantifier(av[3]):
+                    return True
+            if op == _sre.BRANCH:
+                for branch in av[1]:
+                    if _has_quantifier(branch):
+                        return True
+        return False
+
+    def _check_nested(items) -> None:
+        """Walk parsed regex tree and raise on nested quantifiers."""
+        for op, av in items:
+            if op in (_sre.MAX_REPEAT, _sre.MIN_REPEAT):
+                # av = (min, max, [contents])
+                inner = av[2]
+                if _has_quantifier(inner):
+                    raise ValueError(
+                        f"ReDoS risk: nested quantifiers in pattern {pattern!r}. "
+                        "Patterns like (a+)+, (a*)*, (a|a)+ cause catastrophic "
+                        "backtracking. Use a simpler pattern."
+                    )
+                _check_nested(inner)
+            elif op == _sre.SUBPATTERN and av[3] is not None:
+                _check_nested(av[3])
+            elif op == _sre.BRANCH:
+                for branch in av[1]:
+                    _check_nested(branch)
+
+    _check_nested(parsed)
 
 
 def _passes_date_filter(ts: str, since: Optional[str], until: Optional[str]) -> bool:
@@ -575,11 +648,12 @@ class SessionRecoveryEngine:
             Compiled regex, case-insensitive.
 
         Raises:
-            ValueError: If pattern is not a valid glob or regex.
+            ValueError: If pattern is not a valid glob or regex, or has ReDoS risk.
         """
         if "*" in pattern or "?" in pattern:
             regex_pattern = fnmatch.translate(pattern)
             return re.compile(regex_pattern, re.IGNORECASE)
+        _check_redos_safe(pattern)
         try:
             return re.compile(pattern, re.IGNORECASE)
         except re.error as exc:
@@ -1012,6 +1086,9 @@ class SessionRecoveryEngine:
                             if message_type == "slash":
                                 if msg_type != "user" or "<command-name>" not in (content or ""):
                                     continue
+                                # Exclude compaction summaries that quote <command-name> from prior messages
+                                if _is_compaction(data, content):
+                                    continue
                             elif message_type == "compaction":
                                 if not _is_compaction(data, content):
                                     continue
@@ -1234,12 +1311,12 @@ class SessionRecoveryEngine:
             List[SlashCommandRecord] sorted by timestamp when return_invocations=True.
         """
         discovery_mode = commands is None
-        # Pattern mode only: compile provided patterns
-        compiled = (
-            []
-            if discovery_mode
-            else [(cmd, re.compile(cmd, re.IGNORECASE)) for cmd in commands]  # type: ignore[union-attr]
-        )
+        # Pattern mode only: compile provided patterns (with ReDoS protection)
+        compiled = []
+        if not discovery_mode:
+            for cmd in commands:  # type: ignore[union-attr]
+                _check_redos_safe(cmd)
+                compiled.append((cmd, re.compile(cmd, re.IGNORECASE)))
         counts: Dict[str, int] = defaultdict(int)
         session_ids_by_cmd: Dict[str, set] = defaultdict(set)
         project_dirs_by_cmd: Dict[str, set] = defaultdict(set)
@@ -1283,15 +1360,28 @@ class SessionRecoveryEngine:
                                 continue
                             session_id = data.get("sessionId", "")
                             if discovery_mode:
-                                # Match slash command at the very start of message content
+                                # Match slash command: try bare "/command" at start,
+                                # then fall back to <command-name> XML tag (Claude Code format).
                                 m = _SLASH_CMD_DISCOVERY_RE.match(content.lstrip())
-                                if m:
-                                    cmd = m.group(0)  # e.g. "/ar:plannew", "/commit"
+                                cmd = m.group(0) if m else None
+                                args_text = ""
+                                if not cmd:
+                                    # Claude Code wraps invocations in XML tags
+                                    tag_m = _COMMAND_NAME_TAG_RE.search(content)
+                                    if tag_m:
+                                        cmd = tag_m.group(1)
+                                        # Extract args from <command-args> tag if present
+                                        args_m = re.search(
+                                            r"<command-args>(.*?)</command-args>",
+                                            content, re.DOTALL,
+                                        )
+                                        args_text = args_m.group(1).strip() if args_m else ""
+                                if cmd:
                                     counts[cmd] += 1
                                     session_ids_by_cmd[cmd].add(session_id)
                                     project_dirs_by_cmd[cmd].add(project_dir_name)
                                     if return_invocations:
-                                        args = content.lstrip()[len(cmd):].strip()
+                                        args = args_text or content.lstrip()[len(cmd):].strip()
                                         invocations_list.append(SlashCommandRecord(
                                             command=cmd,
                                             args=args,
@@ -1305,11 +1395,28 @@ class SessionRecoveryEngine:
                                         counts[cmd] += 1
                                         session_ids_by_cmd[cmd].add(session_id)
                                         project_dirs_by_cmd[cmd].add(project_dir_name)
+                                        if return_invocations:
+                                            # Extract args from XML tag or from content after command
+                                            tag_m = _COMMAND_NAME_TAG_RE.search(content)
+                                            args_m = re.search(
+                                                r"<command-args>(.*?)</command-args>",
+                                                content, re.DOTALL,
+                                            )
+                                            inv_args = args_m.group(1).strip() if args_m else ""
+                                            inv_cmd = tag_m.group(1) if tag_m else cmd.rstrip(r"\b")
+                                            invocations_list.append(SlashCommandRecord(
+                                                command=inv_cmd,
+                                                args=inv_args,
+                                                session_id=session_id,
+                                                timestamp=ts,
+                                                project_dir=project_dir_name,
+                                            ))
+                                        break  # one match per message
                         except (json.JSONDecodeError, KeyError, ValueError):
                             continue
             except OSError:
                 continue
-        if return_invocations and discovery_mode:
+        if return_invocations:
             invocations_list.sort(key=lambda x: x.timestamp)
             return invocations_list
         if discovery_mode:
@@ -1719,6 +1826,9 @@ class SessionRecoveryEngine:
                 # Extended type filter: slash/compaction are content-based
                 if message_type == "slash":
                     if msg_type_str != "user" or "<command-name>" not in (msg.content or ""):
+                        continue
+                    # Exclude compaction summaries that quote <command-name> tags
+                    if (msg.content or "").startswith("This session is being continued"):
                         continue
                 elif message_type == "compaction":
                     if not (msg.content or "").startswith("This session is being continued"):

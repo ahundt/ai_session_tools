@@ -27,7 +27,7 @@ from collections import defaultdict
 from typer.core import TyperGroup, HAS_RICH
 import typer.rich_utils as _ru
 
-from .engine import SessionRecoveryEngine
+from .engine import SessionRecoveryEngine, _check_redos_safe
 from .formatters import MessageFormatter, get_formatter
 from .models import FileVersion, FilterSpec
 
@@ -564,16 +564,18 @@ def _render_output(
     if fmt in ("csv", "plain"):
         for d in dicts:
             line = spec.plain_fn(d) if spec.plain_fn else "  ".join(str(v) for v in spec.row_fn(d))
-            console.print(line)
+            console.print(line, markup=False)
         return
     # Default: Rich table
+    from rich.markup import escape as _esc
     from rich.table import Table
     # When stdout is not a TTY (piped to head, grep, file, etc.), Rich defaults to 80 cols.
     # Use 120 cols instead — prevents column crushing while staying readable in most contexts.
     # sys already imported at cli.py:17; Console already imported at cli.py:24
     render_console = _get_render_console()
     # Pre-compute all rows once; used for both column suppression check and row insertion.
-    all_rows = [[str(v) for v in spec.row_fn(d)] for d in dicts]
+    # Escape Rich markup in cell values to prevent MarkupError on content like [/spawn-session].
+    all_rows = [[_esc(str(v)) for v in spec.row_fn(d)] for d in dicts]
     n_cols = len(spec.columns)
     # Suppress columns where every row value is "" (falsy); avoids invisible 0-width headers.
     # Note: "0" is truthy — message count columns with all-zero values are NOT suppressed.
@@ -1876,13 +1878,18 @@ def _do_messages_timeline(
         events = [e for e in events if (e.get("timestamp") or "") >= since]
     if until:
         events = [e for e in events if (e.get("timestamp") or "") <= until]
-    # --grep post-filter (case-insensitive regex; fallback to literal on invalid regex)
+    # --grep post-filter (case-insensitive regex; fallback to literal on invalid/dangerous regex)
     if grep:
         try:
+            _check_redos_safe(grep)
             grep_re = _re.compile(grep, _re.IGNORECASE)
             events = [e for e in events if grep_re.search(e.get("content_preview") or "")]
-        except _re.error:
-            err_console.print(f"[yellow]Warning:[/yellow] --grep pattern is not valid regex; falling back to literal substring match.")
+        except (ValueError, _re.error) as exc:
+            msg = str(exc)
+            if "ReDoS" in msg:
+                err_console.print(f"[yellow]Warning:[/yellow] --grep pattern rejected: {msg}. Falling back to literal substring match.")
+            else:
+                err_console.print(f"[yellow]Warning:[/yellow] --grep pattern is not valid regex; falling back to literal substring match.")
             grep_lower = grep.lower()
             events = [e for e in events if grep_lower in (e.get("content_preview") or "").lower()]
     if not events:
@@ -2814,9 +2821,13 @@ def slash_list(
     # Filter by --command pattern if given
     if command:
         try:
+            _check_redos_safe(command)
             cmd_re = _re.compile(command, _re.IGNORECASE)
             invocations = [inv for inv in invocations if cmd_re.search(inv.command)]
-        except _re.error:
+        except (ValueError, _re.error) as exc:
+            msg = str(exc)
+            if "ReDoS" in msg:
+                err_console.print(f"[yellow]Warning:[/yellow] --command pattern rejected: {msg}. Falling back to literal substring match.")
             invocations = [inv for inv in invocations if command.lower() in inv.command.lower()]
     out_console = Console(record=bool(output))
     if not invocations:
@@ -2873,9 +2884,13 @@ def slash_context(
     )
     # Filter to the requested command (substring or literal match)
     try:
+        _check_redos_safe(command)
         cmd_re = _re.compile(command, _re.IGNORECASE)
         invocations = [inv for inv in invocations if cmd_re.search(inv.command)]
-    except _re.error:
+    except (ValueError, _re.error) as exc:
+        msg = str(exc)
+        if "ReDoS" in msg:
+            err_console.print(f"[yellow]Warning:[/yellow] --command pattern rejected: {msg}. Falling back to literal substring match.")
         invocations = [inv for inv in invocations if command.lower() in inv.command.lower()]
     out_console = Console(record=bool(output))
     if not invocations:

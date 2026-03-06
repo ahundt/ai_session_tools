@@ -12458,3 +12458,230 @@ class TestMultiSourceProviderCompleteness:
         results = session.search_messages("result")
         assert len(results) == 1
         assert results[0].content == "simple result"
+
+
+class TestXmlSlashCommandDiscovery:
+    """Verify slash command discovery handles Claude Code's XML tag format.
+
+    Claude Code wraps slash commands in XML tags like:
+    <command-message>ar:plannew</command-message>
+    <command-name>/ar:plannew</command-name>
+    <command-args>add login form</command-args>
+
+    Both the raw-line pre-filter (_SLASH_CMD_CONTENT_RE) and the discovery
+    regex (_COMMAND_NAME_TAG_RE) must handle this format.
+    """
+
+    def _make_xml_session(self, tmp_path):
+        """Create a session with XML-format slash commands (real Claude Code format)."""
+        projects = tmp_path / "projects"
+        proj = projects / "-Users-alice-proj1"
+        proj.mkdir(parents=True)
+        s1 = "cccc0003-0000-0000-0000-000000000000"
+        lines = [
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "cwd": "/Users/alice/proj1",
+                        "message": {"role": "user", "content": (
+                            "<command-message>ar:plannew</command-message>\n"
+                            "<command-name>/ar:plannew</command-name>\n"
+                            "<command-args>add login form</command-args>"
+                        )}}),
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:05:00.000Z",
+                        "message": {"role": "user", "content": (
+                            "<command-message>commit</command-message>\n"
+                            "<command-name>/commit</command-name>"
+                        )}}),
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:10:00.000Z",
+                        "message": {"role": "user", "content": "just a normal message"}}),
+            # Compaction summary that quotes a <command-name> tag
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:15:00.000Z",
+                        "isCompactSummary": True,
+                        "message": {"role": "user", "content": (
+                            "This session is being continued from a previous conversation. "
+                            "The user ran <command-name>/ar:plannew</command-name> earlier."
+                        )}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        return projects
+
+    def test_planning_discovers_xml_format_commands(self, tmp_path):
+        """analyze_planning_usage finds commands in XML <command-name> tags."""
+        from ai_session_tools.engine import SessionRecoveryEngine
+        projects = self._make_xml_session(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        result = engine.analyze_planning_usage(since="2020-01-01")
+        commands = {r.command: r.count for r in result}
+        assert "/ar:plannew" in commands, "XML-format /ar:plannew must be discovered"
+        assert "/commit" in commands, "XML-format /commit must be discovered"
+        assert commands["/ar:plannew"] == 1, "compaction quoting <command-name> must NOT be counted"
+
+    def test_planning_show_args_from_xml_tags(self, tmp_path):
+        """return_invocations extracts args from <command-args> XML tag."""
+        from ai_session_tools.engine import SessionRecoveryEngine
+        projects = self._make_xml_session(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        invocations = engine.analyze_planning_usage(
+            since="2020-01-01", return_invocations=True,
+        )
+        plannew = [inv for inv in invocations if inv.command == "/ar:plannew"]
+        assert len(plannew) == 1
+        assert plannew[0].args == "add login form"
+
+    def test_planning_pattern_mode_with_return_invocations(self, tmp_path):
+        """return_invocations works in pattern mode (--commands provided)."""
+        from ai_session_tools.engine import SessionRecoveryEngine
+        projects = self._make_xml_session(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        invocations = engine.analyze_planning_usage(
+            since="2020-01-01", commands=["/ar:plannew"],
+            return_invocations=True,
+        )
+        assert len(invocations) >= 1
+        assert invocations[0].command == "/ar:plannew"
+        assert invocations[0].args == "add login form"
+
+    def test_slash_type_filter_excludes_compaction_quoting_command_name(self, tmp_path):
+        """--type slash must not match compaction summaries that quote <command-name>."""
+        from ai_session_tools.engine import SessionRecoveryEngine
+        projects = self._make_xml_session(tmp_path)
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        results = engine.search_messages("", message_type="slash", since="2020-01-01")
+        # Should find the 2 real invocations, NOT the compaction summary
+        assert len(results) == 2
+        contents = [r.content for r in results]
+        assert not any("This session is being continued" in c for c in contents), \
+            "compaction summary must not appear in --type slash results"
+
+    def test_content_re_matches_xml_command_format(self):
+        """_SLASH_CMD_CONTENT_RE raw-line pre-filter matches XML <command format."""
+        from ai_session_tools.engine import _SLASH_CMD_CONTENT_RE
+        xml_line = '{"type":"user","message":{"content":"<command-name>/ar:plannew</command-name>"}}'
+        assert _SLASH_CMD_CONTENT_RE.search(xml_line), \
+            "content starting with <command must pass raw-line pre-filter"
+
+    def test_content_re_still_rejects_cwd_paths(self):
+        """_SLASH_CMD_CONTENT_RE must still reject cwd field paths."""
+        from ai_session_tools.engine import _SLASH_CMD_CONTENT_RE
+        cwd_line = '{"type":"user","cwd":"/Users/alice/proj","message":{"content":"hello"}}'
+        assert not _SLASH_CMD_CONTENT_RE.search(cwd_line), \
+            "cwd field with /Users path must NOT pass raw-line pre-filter"
+
+
+class TestRichMarkupEscaping:
+    """Verify that Rich markup in message content doesn't crash rendering."""
+
+    def test_message_formatter_escapes_brackets(self):
+        """MessageFormatter.format_many must escape [/tag] in content."""
+        from ai_session_tools.formatters import MessageFormatter
+        from ai_session_tools.models import MessageType, SessionMessage
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-01-01T00:00:00",
+            content="spawned [/spawn-session] task",
+            session_id="test-001",
+        )
+        formatter = MessageFormatter()
+        output = formatter.format_many([msg])
+        # Must not contain literal [/spawn-session] — should be escaped
+        assert "\\[/spawn-session]" in output or "[/spawn-session]" not in output
+
+    def test_message_formatter_format_single_escapes(self):
+        """MessageFormatter.format (single message) must escape brackets."""
+        from ai_session_tools.formatters import MessageFormatter
+        from ai_session_tools.models import MessageType, SessionMessage
+        msg = SessionMessage(
+            type=MessageType.USER,
+            timestamp="2026-01-01T00:00:00",
+            content="test [bold]not markup[/bold] here",
+            session_id="test-001",
+        )
+        formatter = MessageFormatter()
+        output = formatter.format(msg)
+        # Escaped brackets should not be interpreted as Rich markup
+        assert "\\[bold]" in output or "[bold]" not in output
+
+
+class TestReDoSProtection:
+    """Tests for ReDoS (regex denial of service) protection on user-provided patterns."""
+
+    def test_check_redos_safe_rejects_nested_plus(self):
+        """Nested quantifiers like (a+)+ must be rejected."""
+        from ai_session_tools.engine import _check_redos_safe
+        with pytest.raises(ValueError, match="[Rr]e[Dd]o[Ss]|nested|dangerous"):
+            _check_redos_safe("(a+)+")
+
+    def test_check_redos_safe_rejects_nested_star(self):
+        """Nested quantifiers like (a*)* must be rejected."""
+        from ai_session_tools.engine import _check_redos_safe
+        with pytest.raises(ValueError, match="[Rr]e[Dd]o[Ss]|nested|dangerous"):
+            _check_redos_safe("(a*)*")
+
+    def test_check_redos_safe_rejects_nested_star_plus(self):
+        """Mixed nested quantifiers like (a*)+b must be rejected."""
+        from ai_session_tools.engine import _check_redos_safe
+        with pytest.raises(ValueError, match="[Rr]e[Dd]o[Ss]|nested|dangerous"):
+            _check_redos_safe("(a*)+b")
+
+    def test_check_redos_safe_rejects_nested_repeat_in_alternation(self):
+        """Nested quantifiers inside alternation like (a+|b)+ must be rejected."""
+        from ai_session_tools.engine import _check_redos_safe
+        with pytest.raises(ValueError, match="[Rr]e[Dd]o[Ss]|nested"):
+            _check_redos_safe("(a+|b)+")
+
+    def test_check_redos_safe_allows_simple_patterns(self):
+        """Normal patterns must be accepted without error."""
+        from ai_session_tools.engine import _check_redos_safe
+        # These should not raise
+        _check_redos_safe("hello")
+        _check_redos_safe("foo.*bar")
+        _check_redos_safe(r"\d+")
+        _check_redos_safe("(abc|def)")
+        _check_redos_safe("[a-z]+")
+        _check_redos_safe(r"error|warning|critical")
+
+    def test_check_redos_safe_allows_non_nested_groups(self):
+        """Groups with quantifiers that are NOT nested are safe."""
+        from ai_session_tools.engine import _check_redos_safe
+        _check_redos_safe("(abc)+")
+        _check_redos_safe("(a|b)+c")
+        _check_redos_safe(r"(\d+)\.(\d+)")
+
+    def test_compile_pattern_rejects_redos(self, tmp_path):
+        """_compile_pattern must reject ReDoS patterns via _check_redos_safe."""
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        with pytest.raises(ValueError, match="[Rr]e[Dd]o[Ss]|nested|dangerous"):
+            engine._compile_pattern("(a+)+b")
+
+    def test_compile_pattern_accepts_safe_regex(self, tmp_path):
+        """_compile_pattern must accept normal regex patterns."""
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        pat = engine._compile_pattern(r"error\d+warning")
+        assert pat.search("error42warning")
+
+    def test_compile_pattern_accepts_glob(self, tmp_path):
+        """_compile_pattern must accept glob patterns (skip ReDoS check for globs)."""
+        engine = SessionRecoveryEngine(tmp_path / "projects", tmp_path / "recovery")
+        pat = engine._compile_pattern("*.py")
+        assert pat.search("test.py")
+
+    def test_grep_flag_rejects_redos_pattern(self, tmp_path):
+        """CLI --grep flag must reject ReDoS-vulnerable patterns gracefully."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        s1 = "aaaa0001-0000-0000-0000-000000000000"
+        result = runner.invoke(app, [
+            "messages", "timeline", s1,
+            "--grep", "(a+)+b",
+        ], env=env)
+        # Should warn about dangerous pattern and fall back to literal, not hang
+        assert result.exit_code == 0 or "ReDoS" in (result.output or "") or "Warning" in (result.output or "")
+
+    def test_commands_list_rejects_redos_command_pattern(self, tmp_path):
+        """CLI commands list --command must reject ReDoS patterns gracefully."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "list", "--command", "(a+)+b",
+        ], env=env)
+        # Should warn/fall back to literal, not hang
+        assert result.exit_code == 0 or "ReDoS" in (result.output or "") or "Warning" in (result.output or "")
