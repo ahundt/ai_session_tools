@@ -245,6 +245,7 @@ def _make_projects_with_sessions(tmp_path: Path) -> Path:
         json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:05:00.000Z",
                     "message": {"role": "user", "content": "you forgot to add the test"}}),
         json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:10:00.000Z",
+                    "gitBranch": "main", "cwd": "/Users/alice/proj1",
                     "message": {"role": "user", "content": "/ar:plannew add login form"}}),
         json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-24T10:11:00.000Z",
                     "message": {"role": "assistant", "content": [
@@ -11514,7 +11515,7 @@ class TestSlashCommandRecordDataclass:
         assert inv.session_id == "aaaa0001"
 
     def test_planning_invocation_to_dict(self):
-        """SlashCommandRecord.to_dict() has 5 keys."""
+        """SlashCommandRecord.to_dict() has 7 keys (command, args, session_id, timestamp, project_dir, cwd, git_branch)."""
         from ai_session_tools.engine import SlashCommandRecord
         inv = SlashCommandRecord(
             command="/ar:plannew", args="add login form",
@@ -11522,7 +11523,7 @@ class TestSlashCommandRecordDataclass:
             project_dir="-Users-alice-proj1",
         )
         d = inv.to_dict()
-        assert set(d.keys()) == {"command", "args", "session_id", "timestamp", "project_dir"}
+        assert set(d.keys()) == {"command", "args", "session_id", "timestamp", "project_dir", "cwd", "git_branch"}
 
     def test_return_invocations_true_returns_list_of_invocations(self, tmp_path):
         """analyze_planning_usage(return_invocations=True) returns SlashCommandRecord list."""
@@ -12685,3 +12686,54 @@ class TestReDoSProtection:
         ], env=env)
         # Should warn/fall back to literal, not hang
         assert result.exit_code == 0 or "ReDoS" in (result.output or "") or "Warning" in (result.output or "")
+
+
+class TestShowSessions:
+    """Tests for --show-sessions flag on messages planning and SlashCommandRecord metadata."""
+
+    def test_slash_command_record_has_cwd_and_git_branch(self, tmp_path):
+        """SlashCommandRecord should include cwd and git_branch from JSONL data."""
+        from ai_session_tools.models import SlashCommandRecord
+        rec = SlashCommandRecord(
+            command="/ar:plannew", args="add login form",
+            session_id="aaaa0001", timestamp="2026-01-24T10:10:00",
+            project_dir="proj1", cwd="/Users/alice/proj1", git_branch="main",
+        )
+        assert rec.cwd == "/Users/alice/proj1"
+        assert rec.git_branch == "main"
+        d = rec.to_dict()
+        assert d["cwd"] == "/Users/alice/proj1"
+        assert d["git_branch"] == "main"
+
+    def test_planning_show_sessions_includes_cwd(self, tmp_path):
+        """messages planning --show-sessions should include cwd in output."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "messages", "planning", "--show-sessions",
+        ], env=env)
+        assert result.exit_code == 0
+        # Session 1 has cwd=/Users/alice/proj1 and a planning command
+        assert "/Users/alice/proj1" in result.output or "proj1" in result.output
+
+    def test_planning_show_sessions_flag(self, tmp_path):
+        """messages planning --show-sessions should show session IDs and metadata."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "messages", "planning", "--show-sessions",
+        ], env=env)
+        assert result.exit_code == 0
+        # Should show session ID prefix
+        assert "aaaa0001" in result.output
+
+    def test_commands_list_shows_cwd(self, tmp_path):
+        """commands list should show cwd per invocation."""
+        _make_projects_with_sessions(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        result = runner.invoke(app, [
+            "commands", "list",
+        ], env=env)
+        assert result.exit_code == 0
+        # Should include cwd from session data
+        assert "/Users/alice" in result.output or "proj1" in result.output

@@ -756,6 +756,8 @@ class SlashCommandRecord:
     session_id: str
     timestamp: str
     project_dir: str
+    cwd: str = ""          # working directory from JSONL record
+    git_branch: str = ""   # git branch from JSONL record
 
     def to_dict(self) -> dict:
         return {
@@ -764,6 +766,8 @@ class SlashCommandRecord:
             "session_id": self.session_id,
             "timestamp": self.timestamp,
             "project_dir": self.project_dir,
+            "cwd": self.cwd,
+            "git_branch": self.git_branch,
         }
 
 

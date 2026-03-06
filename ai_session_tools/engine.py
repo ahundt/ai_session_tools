@@ -1388,6 +1388,8 @@ class SessionRecoveryEngine:
                                             session_id=session_id,
                                             timestamp=ts,
                                             project_dir=project_dir_name,
+                                            cwd=data.get("cwd", ""),
+                                            git_branch=data.get("gitBranch", ""),
                                         ))
                             else:
                                 for cmd, regex in compiled:
@@ -1410,6 +1412,8 @@ class SessionRecoveryEngine:
                                                 session_id=session_id,
                                                 timestamp=ts,
                                                 project_dir=project_dir_name,
+                                                cwd=data.get("cwd", ""),
+                                                git_branch=data.get("gitBranch", ""),
                                             ))
                                         break  # one match per message
                         except (json.JSONDecodeError, KeyError, ValueError):

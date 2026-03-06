@@ -1718,6 +1718,7 @@ def _do_messages_planning(
     fmt: str = "table",
     commands_raw: Optional[str] = None,
     show_args: bool = False,
+    show_sessions: bool = False,
     context_after: int = 0,
     output: Optional[str] = None,
 ) -> None:
@@ -1729,6 +1730,7 @@ def _do_messages_planning(
         commands_raw:  Raw --commands option value (CSV or bracketed list).
                        When provided, replaces config/defaults entirely.
         show_args:     When True, switch to per-invocation output with args.
+        show_sessions: When True, show session IDs, cwds, and git branches per command.
         context_after: When > 0, show N messages after each invocation.
         output:        Write output to FILE in addition to stdout (tee).
     """
@@ -1744,8 +1746,8 @@ def _do_messages_planning(
         else:
             # Built-in defaults — lowest priority (engine uses DEFAULT_PLANNING_COMMANDS)
             commands = None
-    # --show-args or --context-after > 0: switch to per-invocation mode
-    if show_args or context_after > 0:
+    # --show-args, --show-sessions, or --context-after > 0: switch to per-invocation mode
+    if show_args or show_sessions or context_after > 0:
         invocations = engine.get_planning_usage(
             project_filter=project, since=since, until=until,
             commands=commands, return_invocations=True,
@@ -1756,7 +1758,12 @@ def _do_messages_planning(
             _write_output(out_console, output)
             return
         for inv in invocations:
-            out_console.print(f"[bold cyan]{inv.command}[/bold cyan] [dim]{inv.timestamp[:19]}[/dim] [blue]{inv.session_id[:8]}[/blue]")
+            line = f"[bold cyan]{inv.command}[/bold cyan] [dim]{inv.timestamp[:19]}[/dim] [blue]{inv.session_id[:8]}[/blue]"
+            if show_sessions and inv.cwd:
+                line += f" [dim]{inv.cwd}[/dim]"
+            if show_sessions and inv.git_branch:
+                line += f" [green]{inv.git_branch}[/green]"
+            out_console.print(line)
             if show_args and inv.args:
                 out_console.print(f"  [dim]args:[/dim] {inv.args}")
             if context_after > 0:
@@ -2655,6 +2662,10 @@ def messages_planning(
         False, "--show-args",
         help="Show the argument text passed to each slash command invocation (e.g. for '/ar:plannew fix auth', shows 'fix auth'). Switches to per-invocation output instead of count summary.",
     ),
+    show_sessions: bool = typer.Option(
+        False, "--show-sessions",
+        help="Show session IDs, cwds, and git branches per command invocation. Switches to per-invocation output.",
+    ),
     context_after: int = typer.Option(
         0, "--context-after",
         help="For each slash command invocation, show N messages that followed it. Implies --show-args. Default: 0 (count summary only).",
@@ -2681,6 +2692,7 @@ def messages_planning(
         aise messages planning --commands '/ar:plannew,/ar:pn'
         aise messages planning --commands '/mycommand,/mc,/plan,/p'
         aise messages planning --show-args --since 14d           # show args per invocation
+        aise messages planning --show-sessions --since 14d       # show session metadata
         aise messages planning --context-after 3 --since 14d    # show 3 messages after each
     """
     engine = _resolve_engine(ctx, provider)
@@ -2689,7 +2701,8 @@ def messages_planning(
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
     _do_messages_planning(engine, project, since, until, fmt, commands_raw=commands,
-                          show_args=show_args, context_after=context_after, output=output)
+                          show_args=show_args, show_sessions=show_sessions,
+                          context_after=context_after, output=output)
 
 
 @messages_app.command("inspect")
@@ -2835,12 +2848,17 @@ def slash_list(
         _write_output(out_console, output)
         return
     for inv in invocations:
-        out_console.print(
+        line = (
             f"[bold cyan]{inv.command}[/bold cyan] "
             f"[dim]{inv.timestamp[:19]}[/dim] "
             f"[blue]{inv.session_id[:8]}[/blue] "
             f"[dim]{inv.project_dir}[/dim]"
         )
+        if inv.cwd:
+            line += f" [dim]{inv.cwd}[/dim]"
+        if inv.git_branch:
+            line += f" [green]{inv.git_branch}[/green]"
+        out_console.print(line)
         if inv.args:
             out_console.print(f"  [dim]{inv.args}[/dim]")
     out_console.print(f"\n[bold]Found {len(invocations)} invocations[/bold]")
