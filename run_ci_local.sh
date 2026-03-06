@@ -65,10 +65,13 @@ echo -e "${BOLD}=== ai_session_tools Local CI ===${NC}"
 echo "Working directory: $SCRIPT_DIR"
 echo "CLAUDE_CONFIG_DIR: $CLAUDE_CONFIG_DIR"
 
-# Step 1: Install dependencies (including dev extras for pytest/ruff/mypy)
-# uv sync alone does NOT install [project.optional-dependencies] -- need --all-extras
-step "Install dependencies (uv sync --all-extras)" \
-    uv sync --all-extras
+# Step 1: Install dependencies
+# uv sync creates the venv automatically -- no explicit uv venv step needed.
+# --all-extras installs [project.optional-dependencies] (pytest, ruff, mypy).
+# --dev installs [tool.uv.dev-dependencies] if present (none currently, but correct per uv docs).
+# uv.lock is NOT committed (.gitignore), so --locked is intentionally omitted.
+step "Install dependencies (uv sync --all-extras --dev)" \
+    uv sync --all-extras --dev
 
 # Step 2: Verify Python version
 step "Verify Python version" \

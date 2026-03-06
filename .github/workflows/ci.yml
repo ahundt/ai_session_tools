@@ -27,40 +27,36 @@ jobs:
           - os: windows-latest
             python-version: "3.12"
     runs-on: ${{ matrix.os }}
-    env:
-      UV_PYTHON: ${{ matrix.python-version }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Install uv and Python
+        # setup-uv@v7 is the current recommended version per official uv docs.
+        # python-version here replaces actions/setup-python -- setup-uv handles both.
+        # enable-cache speeds up installs by caching the uv cache between runs.
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
+          enable-cache: true
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          version: "latest"
-
-      - name: Create virtual environment
-        run: uv venv --python ${{ matrix.python-version }}
-
-      - name: Install dependencies (including dev extras)
-        # --all-extras installs [project.optional-dependencies] (pytest, ruff, mypy).
-        # uv sync also installs the project in editable mode since [build-system] is defined.
-        # uv pip install -e . is NOT needed -- it would be redundant.
-        run: uv sync --all-extras
-
-      - name: Verify Python version in venv
+      - name: Verify Python version
         run: |
           uv run python --version
           echo "Expected: Python ${{ matrix.python-version }}"
 
+      - name: Install dependencies
+        # uv sync creates the venv automatically -- no explicit uv venv step needed.
+        # --all-extras installs [project.optional-dependencies] (pytest, ruff, mypy).
+        # --dev installs [tool.uv.dev-dependencies] if present (none currently, but correct per uv docs).
+        # uv sync also installs the project in editable mode since [build-system] is defined.
+        # uv.lock is NOT committed (.gitignore), so --locked is intentionally omitted.
+        run: uv sync --all-extras --dev
+
       - name: Build package
         # Verifies hatchling build system produces wheel/sdist correctly.
-        # Separate from the editable install already done by uv sync.
+        # Separate concern from the editable install already done by uv sync.
         run: uv build
 
       - name: Smoke test CLI
