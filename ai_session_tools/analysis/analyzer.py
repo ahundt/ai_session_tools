@@ -111,10 +111,11 @@ def _detect_era(
         return m.group(1)
 
     # Priority 2: 2-digit year prefix at start of name (YY-MM-DD or YYMMDD)
-    m2 = re.match(r"(\d{2})[-]?\d{2}[-]?\d{2}", name)
+    # Validate month (01-12) and day (01-31) to reject UUID hex digits.
+    m2 = re.match(r"(\d{2})[-]?(\d{2})[-]?(\d{2})", name)
     if m2:
-        yy = int(m2.group(1))
-        if 20 <= yy <= 99:  # reasonable 21st century range
+        yy, mm, dd = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+        if 20 <= yy <= 99 and 1 <= mm <= 12 and 1 <= dd <= 31:
             return str(2000 + yy)
 
     # Priority 3: standalone 4-digit year anywhere in name
@@ -521,6 +522,7 @@ def run_analysis(
                         has_transcript="transcript" in lower_sample,
                         prose_frac=pf_c,
                         prompt_role=p_role_c,
+                        cwd=session_info.cwd or "",
                     )
                     apply_codes(rec, tech_patterns, role_patterns, keyword_maps, scoring_weights, marker_window=mw)
                     records.append(rec)

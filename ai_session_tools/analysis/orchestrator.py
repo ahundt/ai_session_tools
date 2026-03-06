@@ -471,11 +471,13 @@ def write_index(
     session_paths: dict[str, list[str]],
     org_dir: Path,
     dimensions: list[dict] | None = None,
+    source_names: list[str] | None = None,
 ) -> None:
     """Write INDEX.md and SESSIONS_FULL.md. Always written regardless of format.
 
     Uses dimensions to generate the Taxonomy section and select preferred link targets.
     min_utility_for_index loaded from scoring_weights (default 20).
+    source_names: list of source names for dynamic header (e.g. ["Claude Code"]).
     """
     sw = load_scoring_weights(org_dir)
     min_utility = int(sw.get("min_utility_for_index", 20))
@@ -484,8 +486,9 @@ def write_index(
     sorted_recs = sorted(records, key=lambda r: r.get("utility", 0), reverse=True)
     all_ranked = [r for r in sorted_recs if r.get("utility", 0) >= min_utility]
 
+    source_label = ", ".join(source_names) if source_names else "AI Session"
     lines = [
-        "# AI Studio Knowledge Base: Integrated Dashboard\n\n",
+        f"# {source_label} Knowledge Base: Integrated Dashboard\n\n",
         "Ranked by utility score. Grounded in Directed Content Analysis "
         "(Hsieh & Shannon, 2005) and Chain-of-Thought scoring (Wei et al., 2022).\n\n",
         "## Hall of Fame: Top Sessions by Utility\n\n",
@@ -680,8 +683,19 @@ def run_orchestration(formats: list[str] | None = None) -> None:
     if "markdown" in active_formats:
         write_taxonomy_markdown(taxonomy, records, org_dir, dimensions=dimensions)
 
+    # Build source_names from source_format values in records
+    _formats_seen = {r.get("source_format", "") for r in records}
+    _source_names: list[str] = []
+    if any(f in _formats_seen for f in ("aistudio_json", "markdown")):
+        _source_names.append("AI Studio")
+    if "gemini_json" in _formats_seen:
+        _source_names.append("Gemini")
+    if "claude_jsonl" in _formats_seen:
+        _source_names.append("Claude Code")
+
     # Index files always written
-    write_index(records, session_paths, org_dir, dimensions=dimensions)
+    write_index(records, session_paths, org_dir, dimensions=dimensions,
+                source_names=_source_names or None)
     write_knowledge_graph(records, org_dir)
     print("Orchestration complete.")
 

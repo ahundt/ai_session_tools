@@ -481,16 +481,37 @@ def _is_skill_injection(data: dict, content: Optional[str], prev_was_slash: bool
     Skill injections are user-role messages immediately following a <command-name>
     message. They typically start with a markdown heading (# Skill Name) and
     contain the full SKILL.md body. They never have their own <command-name> tag.
+
+    Two detection modes:
+    1. prev_was_slash=True: previous user message was a slash command → detect by
+       heading prefix (# ) without own <command-name> tag
+    2. Structural: content matches known SKILL.md patterns regardless of prev_was_slash
+       (catches cases where assistant messages interleave between slash cmd and injection)
     """
-    if not prev_was_slash:
-        return False
     if data.get("type") != "user":
         return False
     if not content:
         return False
     if "<command-name>" in content:
         return False
-    return content.lstrip().startswith("# ") or content.lstrip().startswith("<command-")
+    stripped = content.lstrip()
+    # Mode 1: immediately after slash command
+    if prev_was_slash:
+        if stripped.startswith("# ") or stripped.startswith("<command-"):
+            return True
+    # Mode 2: structural SKILL.md detection — skill bodies contain markdown headings
+    # with slash command references like "# Create New Plan (/ar:plannew)"
+    # and structural sections like "## 1. Foundation" or "### 1.1 Key Principles"
+    if _SKILL_BODY_RE.search(stripped[:500]):
+        return True
+    return False
+
+
+# Compiled pattern for structural skill body detection.
+# Matches: "# Title (/ar:something)" or "# Title (/cr:something)" at start of content.
+_SKILL_BODY_RE = re.compile(
+    r"^#\s+.+\(/(?:ar|cr):[a-z]"
+)
 
 
 class SessionRecoveryEngine:

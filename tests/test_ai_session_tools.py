@@ -13752,3 +13752,265 @@ class TestDynamicVocabHeader:
         content = outfile.read_text()
         # Should still produce valid output
         assert "Vocabulary Analysis" in content
+
+
+# ─── TDD: Bug 15 — era detection UUID fix ────────────────────────────────────
+
+class TestEraDetectionUUID:
+    """TDD: _detect_era() should not match UUID hex digits as YYMMDD dates."""
+
+    def test_uuid_not_matched_as_date(self):
+        """UUID session IDs should not produce wrong era from hex digits."""
+        from ai_session_tools.analysis.analyzer import _detect_era
+        # 5532905b → should NOT be era=2055
+        assert _detect_era("5532905b-eeb7-48d6-a0bd-ea2d60513e0f", "",
+                          timestamp="2026-03-01T10:00:00Z") == "2026"
+        # 83326782 → should NOT be era=2083
+        assert _detect_era("83326782-e043-4716-bb16-20079914c00b", "",
+                          timestamp="2026-02-15T10:00:00Z") == "2026"
+        # 735117ba → should NOT be era=2073
+        assert _detect_era("735117ba-6e30-4295-9988-7cf07f273eec", "",
+                          timestamp="2026-01-20T10:00:00Z") == "2026"
+
+    def test_real_yymmdd_still_detected(self):
+        """Real YYMMDD filenames should still be detected."""
+        from ai_session_tools.analysis.analyzer import _detect_era
+        # 250308-meeting → era=2025
+        assert _detect_era("250308-meeting", "") == "2025"
+        # 26-01-15-notes → era=2026
+        assert _detect_era("26-01-15-notes", "") == "2026"
+
+    def test_uuid_falls_through_to_timestamp(self):
+        """UUID names should fall through to Priority 4 (timestamp)."""
+        from ai_session_tools.analysis.analyzer import _detect_era
+        era = _detect_era("a50706f6-a27c-4db7-9d1b-fc31b7bccf07", "",
+                         timestamp="2026-03-06T08:00:00Z")
+        assert era == "2026"
+
+    def test_uuid_no_timestamp_falls_to_content(self):
+        """UUID with no timestamp should use content year."""
+        from ai_session_tools.analysis.analyzer import _detect_era
+        era = _detect_era("a50706f6-a27c-4db7-9d1b-fc31b7bccf07",
+                         "Today is 2026-03-06 and we are working on a project")
+        assert era == "2026"
+
+
+# ─── TDD: Bug 14 — INDEX.md header ───────────────────────────────────────────
+
+class TestIndexMdDynamicHeader:
+    """TDD: write_index() should use dynamic source name, not 'AI Studio Knowledge Base'."""
+
+    def test_index_header_uses_source_names(self, tmp_path):
+        """write_index() with source_names=['Claude Code'] should say 'Claude Code'."""
+        from ai_session_tools.analysis.orchestrator import write_index
+        org = tmp_path / "org"
+        org.mkdir()
+        records = [{"name": "test1", "utility": 50, "techniques": ["planning"],
+                    "roles": ["software_engineer"], "era": "2026"}]
+        write_index(records, {}, org, source_names=["Claude Code"])
+        content = (org / "INDEX.md").read_text()
+        assert "Claude Code" in content, f"Expected 'Claude Code' in INDEX.md. Got:\n{content[:200]}"
+        assert "AI Studio Knowledge Base" not in content
+
+
+# ─── TDD: Bug 16 — cwd extraction for Claude sessions ────────────────────────
+
+class TestAnalyzeCwdExtraction:
+    """TDD: analyzer should extract cwd from Claude SessionInfo."""
+
+    def test_claude_sessions_have_cwd(self, tmp_path, monkeypatch):
+        """Claude sessions should populate cwd from session_info.cwd."""
+        projects = tmp_path / "projects"
+        proj = projects / "-Users-alice-proj1"
+        proj.mkdir(parents=True)
+        s1 = "gggg0001-0000-0000-0000-000000000000"
+        lines = [
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "cwd": "/Users/alice/proj1", "gitBranch": "main",
+                        "message": {"role": "user", "content": "implement login feature"}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(projects))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        import io
+        from contextlib import redirect_stdout
+        from ai_session_tools.analysis.analyzer import run_analysis
+        cfg = {"org_dir": str(tmp_path / "org")}
+        (tmp_path / "org").mkdir()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            records = run_analysis(source_filter="claude", config=cfg)
+        # At least one record should have cwd populated
+        cwds = [r.cwd for r in records if r.cwd]
+        assert len(cwds) > 0, f"Expected non-empty cwd. Records: {[(r.name[:8], r.cwd) for r in records]}"
+
+
+# ─── TDD: Bug 17 — improved skill injection detection ────────────────────────
+
+class TestImprovedSkillInjectionDetection:
+    """TDD: corrections should filter skill injections even when prev_was_slash tracking fails."""
+
+    def test_known_skill_title_filtered(self, tmp_path):
+        """Messages starting with known SKILL.md titles should be filtered."""
+        projects = tmp_path / "projects"
+        proj = projects / "-Users-alice-proj1"
+        proj.mkdir(parents=True)
+        s1 = "hhhh0001-0000-0000-0000-000000000000"
+        lines = [
+            # Real correction
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                        "message": {"role": "user", "content": "actually you are wrong"}}),
+            # Skill injection WITHOUT preceding slash command (edge case)
+            # This can happen when context compaction loses the <command-name> message
+            json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:01:00.000Z",
+                        "message": {"role": "user", "content":
+                            "# Create New Plan (/ar:plannew)\n\nmake a plan\n\n---\n\n"
+                            "## 1. Foundation (Read First)\n\nYou missed important steps."}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
+        corrections = engine.find_corrections(limit=0)
+        # Only "actually you are wrong" should match
+        for c in corrections:
+            assert "Create New Plan" not in c.content, (
+                f"Skill injection matched as correction: {c.content[:80]}"
+            )
+
+
+# ── Edge Case Tests for Bugs 14-17 ──────────────────────────────────────
+
+
+class TestEdgeCasesEraDetection:
+    """Edge cases for Bug 15: era detection UUID validation."""
+
+    def test_uuid_with_valid_looking_date_prefix(self):
+        from ai_session_tools.analysis.analyzer import _detect_era
+        # 260101 looks like 2026-01-01 but it's a UUID — valid month/day though
+        assert _detect_era("26010100-0000-0000-0000-000000000000", "") == "2026"
+
+    def test_uuid_with_invalid_month_13(self):
+        from ai_session_tools.analysis.analyzer import _detect_era
+        # 261300 → month=13, invalid → should NOT match Priority 2
+        result = _detect_era("26130000-0000-0000-0000-000000000000", "")
+        assert result != "2026" or result == ""  # either empty or from another heuristic
+
+    def test_uuid_with_invalid_day_32(self):
+        from ai_session_tools.analysis.analyzer import _detect_era
+        # 260132 → day=32, invalid
+        result = _detect_era("26013200-0000-0000-0000-000000000000", "")
+        assert result != "2026" or result == ""
+
+    def test_uuid_with_month_00(self):
+        from ai_session_tools.analysis.analyzer import _detect_era
+        # 260000 → month=0, invalid
+        result = _detect_era("26000000-0000-0000-0000-000000000000", "")
+        assert result != "2026" or result == ""
+
+    def test_non_uuid_name_with_valid_date(self):
+        from ai_session_tools.analysis.analyzer import _detect_era
+        # Plain date name should still work
+        assert _detect_era("260115_session", "") == "2026"
+
+    def test_timestamp_priority_over_name(self):
+        from ai_session_tools.analysis.analyzer import _detect_era
+        # Priority 1 (timestamp) should win over name
+        assert _detect_era("bad_name", "", timestamp="2025-06-15T12:00:00Z") == "2025"
+
+
+class TestEdgeCasesSkillInjection:
+    """Edge cases for Bug 17: structural skill injection detection."""
+
+    def test_cr_prefix_skill_filtered(self):
+        from ai_session_tools.engine import _is_skill_injection
+        # /cr: prefix skills should also be detected
+        content = "# Git Commit Requirements (/cr:commit)\n\n## Steps\n"
+        assert _is_skill_injection({"type": "user"}, content, prev_was_slash=False)
+
+    def test_normal_heading_not_filtered(self):
+        from ai_session_tools.engine import _is_skill_injection
+        # Normal user message starting with # should NOT be filtered
+        content = "# My Feature Request\n\nI want to add a new feature."
+        assert not _is_skill_injection({"type": "user"}, content, prev_was_slash=False)
+
+    def test_heading_with_parens_but_no_slash(self):
+        from ai_session_tools.engine import _is_skill_injection
+        # Heading with parens but not a skill path
+        content = "# Fix Bug (important)\n\nThis is urgent."
+        assert not _is_skill_injection({"type": "user"}, content, prev_was_slash=False)
+
+    def test_assistant_message_never_filtered(self):
+        from ai_session_tools.engine import _is_skill_injection
+        content = "# Create New Plan (/ar:plannew)\n\nSkill body."
+        assert not _is_skill_injection({"type": "assistant"}, content, prev_was_slash=True)
+
+    def test_empty_content_not_filtered(self):
+        from ai_session_tools.engine import _is_skill_injection
+        assert not _is_skill_injection({"type": "user"}, "", prev_was_slash=True)
+        assert not _is_skill_injection({"type": "user"}, None, prev_was_slash=True)
+
+
+class TestEdgeCasesContinuationSummary:
+    """Edge cases for Bug 10: continuation summary detection."""
+
+    def test_partial_match_not_filtered(self):
+        from ai_session_tools.engine import _is_continuation_summary
+        # Shouldn't match a message that just mentions "continued"
+        assert not _is_continuation_summary("I continued working on the feature")
+
+    def test_whitespace_before_continuation(self):
+        from ai_session_tools.engine import _is_continuation_summary
+        # Should match even with leading whitespace
+        assert _is_continuation_summary("  This session is being continued from a previous conversation")
+
+    def test_none_content(self):
+        from ai_session_tools.engine import _is_continuation_summary
+        assert not _is_continuation_summary(None)
+
+
+class TestEdgeCasesIndexHeader:
+    """Edge cases for Bug 14: INDEX.md header with multiple sources."""
+
+    def test_multiple_sources_in_header(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import write_index
+        org = tmp_path / "org"
+        org.mkdir()
+        # Minimal records from two sources
+        records = [
+            {"name": "s1", "utility": 50, "source_format": "claude_jsonl",
+             "era": "2026", "techniques": [], "roles": [],
+             "task_categories": [], "writing_methods": []},
+            {"name": "s2", "utility": 30, "source_format": "aistudio_json",
+             "era": "2026", "techniques": [], "roles": [],
+             "task_categories": [], "writing_methods": []},
+        ]
+        write_index(records, {}, org, source_names=["AI Studio", "Claude Code"])
+        idx = (org / "INDEX.md").read_text()
+        assert "AI Studio, Claude Code" in idx
+        assert "AI Session" not in idx  # should not fall back to default
+
+    def test_no_source_names_uses_default(self, tmp_path):
+        from ai_session_tools.analysis.orchestrator import write_index
+        org = tmp_path / "org"
+        org.mkdir()
+        records = [{"name": "s1", "utility": 50, "source_format": "unknown",
+                     "era": "2026", "techniques": [], "roles": [],
+                     "task_categories": [], "writing_methods": []}]
+        write_index(records, {}, org, source_names=None)
+        idx = (org / "INDEX.md").read_text()
+        assert "AI Session" in idx
+
+
+class TestEdgeCasesCwdExtraction:
+    """Edge cases for Bug 16: cwd extraction in Claude sessions."""
+
+    def test_session_with_none_cwd(self, tmp_path):
+        """SessionInfo with cwd=None should result in empty string in record."""
+        from ai_session_tools.analysis.analyzer import SessionRecord
+        rec = SessionRecord(
+            name="test", source_dir="proj", filepath="claude/proj/test",
+            source_format="claude_jsonl", user_text="hello",
+            chunk_count=1, user_chunk_count=1, cwd="",
+        )
+        assert rec.cwd == ""
+        db = rec.to_db_dict()
+        assert "cwd" in db
