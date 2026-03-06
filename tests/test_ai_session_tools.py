@@ -14079,3 +14079,64 @@ class TestEdgeCasesCwdExtraction:
         assert rec.cwd == ""
         db = rec.to_db_dict()
         assert "cwd" in db
+
+
+# ── Bug 18: --format json --output should write JSON to file ─────────────
+
+
+class TestFormatJsonOutputFile:
+    """Bug 18: --format json --output file should write JSON, not Rich table text."""
+
+    def test_corrections_json_output_is_valid_json(self, tmp_path):
+        """--format json --output should write parseable JSON to file."""
+        projects = _make_projects_with_sessions(tmp_path)
+        out_file = tmp_path / "corrections.json"
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "corrections",
+                  "--format", "json", "--output", str(out_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert out_file.exists(), "Output file was not created"
+        content = out_file.read_text()
+        data = json.loads(content)  # Should parse as JSON, not Rich text
+        assert isinstance(data, list)
+
+    def test_corrections_json_stdout_is_parseable(self, tmp_path):
+        """--format json should produce parseable JSON on stdout."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "corrections", "--format", "json"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+
+    def test_search_json_output_is_valid_json(self, tmp_path):
+        """messages search --format json --output should write JSON to file."""
+        projects = _make_projects_with_sessions(tmp_path)
+        out_file = tmp_path / "search.json"
+        # Use "forgot" which matches fixture data with "You forgot"
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "forgot",
+                  "--format", "json", "--output", str(out_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert out_file.exists(), "Output file was not created"
+        content = out_file.read_text()
+        data = json.loads(content)
+        assert isinstance(data, list)
+        assert len(data) > 0
+
+    def test_list_json_stdout_is_parseable(self, tmp_path):
+        """aise list --format json should produce parseable JSON on stdout."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "list", "--format", "json"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert isinstance(data, list)

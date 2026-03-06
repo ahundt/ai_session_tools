@@ -542,8 +542,14 @@ def _render_output(
     fmt: Optional[str],
     spec: "TableSpec",
     empty_msg: str = "No results found",
+    output: Optional[str] = None,
 ) -> None:
-    """Render items in the requested format — eliminates repeated json/csv/table branching."""
+    """Render items in the requested format — eliminates repeated json/csv/table branching.
+
+    Args:
+        output: Optional file path. When set with fmt="json", writes JSON to file
+                instead of stdout. For other formats, writes Rich text to file.
+    """
     if fmt is None:
         fmt = _cfg_default("format", "table")
     if not items:
@@ -559,8 +565,12 @@ def _render_output(
 
     dicts = [_to_dict(x) for x in items]
     if fmt == "json":
-        # Write directly to stdout — bypasses Rich markup rendering + ANSI codes
-        sys.stdout.write(json.dumps(dicts, indent=2) + "\n")
+        json_text = json.dumps(dicts, indent=2) + "\n"
+        # Write to file if --output given, otherwise stdout
+        if output:
+            Path(output).expanduser().write_text(json_text, encoding="utf-8")
+        else:
+            sys.stdout.write(json_text)
         return
     if fmt in ("csv", "plain"):
         for d in dicts:
@@ -572,7 +582,7 @@ def _render_output(
     # When stdout is not a TTY (piped to head, grep, file, etc.), Rich defaults to 80 cols.
     # Use 120 cols instead — prevents column crushing while staying readable in most contexts.
     # sys already imported at cli.py:17; Console already imported at cli.py:24
-    render_console = _get_render_console()
+    render_console = Console(record=True, width=120) if output else _get_render_console()
     # Pre-compute all rows once; used for both column suppression check and row insertion.
     # Escape Rich markup in cell values to prevent MarkupError on content like [/spawn-session].
     all_rows = [[_esc(str(v)) for v in spec.row_fn(d)] for d in dicts]
@@ -600,6 +610,8 @@ def _render_output(
     render_console.print(table)
     if spec.summary_template:
         render_console.print(f"\n[bold]{spec.summary_template.format(n=len(items))}[/bold]")
+    if output:
+        _write_output(render_console, output)
 
 
 def _spec_with_full_uuid(spec: "TableSpec", col_idx: int = 0) -> "TableSpec":
@@ -1600,7 +1612,11 @@ def _do_messages_search(
             _write_output(out_console, output)
             return
         if fmt == "json":
-            sys.stdout.write(json.dumps([r.to_dict() for r in ctx_results], indent=2) + "\n")
+            json_text = json.dumps([r.to_dict() for r in ctx_results], indent=2) + "\n"
+            if output:
+                Path(output).expanduser().write_text(json_text, encoding="utf-8")
+            else:
+                sys.stdout.write(json_text)
             return
         # Flat display: separator + before context + match + after context.
         # truncate=None means no truncation (Python slice [:None] returns full string).
@@ -1639,14 +1655,6 @@ def _do_messages_search(
         return
 
     formatter = MessageFormatter(max_chars=max_chars)
-    if output:
-        # When writing to file, use out_console (record=True) for all output paths
-        # so _write_output can capture the full text.
-        out_console.print(formatter.format_many(results))
-        out_console.print(f"\n[bold]Found {len(results)} messages[/bold]")
-        _write_output(out_console, output)
-        return
-
     if fmt in ("json", "csv", "plain"):
         # truncate=None means no limit (Python [:None] returns full string).
         # JSON format ignores row_fn entirely (uses to_dict() directly) so content
@@ -1670,12 +1678,15 @@ def _do_messages_search(
             ],
             summary_template="Found {n} messages",
         )
-        _render_output(results, fmt, spec)
+        _render_output(results, fmt, spec, output=output)
         return
 
-    render_console = _get_render_console()
+    # Default table format — use recording console if writing to file
+    render_console = Console(record=True, width=120) if output else _get_render_console()
     render_console.print(formatter.format_many(results))
     render_console.print(f"\n[bold]Found {len(results)} messages[/bold]")
+    if output:
+        _write_output(render_console, output)
 
 
 def _do_list_sessions(
@@ -1806,12 +1817,7 @@ def _do_messages_corrections(
         session_id_prefix=session,
     )
     spec = _spec_with_full_uuid(_CORRECTIONS_SPEC) if full_uuid else _CORRECTIONS_SPEC
-    if output:
-        out_console = Console(record=True)
-        for c in corrections:
-            out_console.print(f"[{c.category}] {(c.timestamp or '')[:19]} {c.content[:200]}")
-        _write_output(out_console, output)
-    _render_output(corrections, fmt, spec, "No corrections found")
+    _render_output(corrections, fmt, spec, "No corrections found", output=output)
 
 
 def _do_messages_planning(
