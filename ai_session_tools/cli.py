@@ -3015,14 +3015,8 @@ def slash_list(
     if ids_only:
         _output_ids_only(invocations)
         return
-    if output:
-        out_console = Console(record=True)
-        for inv in invocations:
-            out_console.print(f"{inv.command} {inv.timestamp[:19]} {inv.args}")
-        _write_output(out_console, output)
-        return
     spec = _spec_with_full_uuid(_INVOCATIONS_SPEC, 1) if full_uuid else _INVOCATIONS_SPEC
-    _render_output(invocations, fmt, spec, "No slash command invocations found.")
+    _render_output(invocations, fmt, spec, "No slash command invocations found.", output=output)
 
 
 @slash_app.command("context")
@@ -3094,12 +3088,17 @@ def slash_context(
                 "context_after": [{"type": m.type.value, "timestamp": m.timestamp, "content": m.content} for m in filtered],
             })
         if fmt == "json":
-            console.print_json(data=items)
+            import json as _json2
+            json_text = _json2.dumps(items, indent=2) + "\n"
+            if output:
+                Path(output).expanduser().write_text(json_text, encoding="utf-8")
+            else:
+                sys.stdout.write(json_text)
         else:
             for item in items:
                 console.print(f"{item['timestamp'][:19]}  {item['command']}  {item.get('args', '')}")
-        if output:
-            _write_output(console, output)
+            if output:
+                _write_output(console, output)
         return
     max_chars_val = max_chars if max_chars is not None else _cfg_default("max_chars", 0)
     _render_invocations_with_context(invocations, context_after, engine, output, max_chars=max_chars_val)
