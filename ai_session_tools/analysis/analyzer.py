@@ -105,23 +105,31 @@ def _detect_era(
     """
     _yr4_re = re.compile(r"\b(20\d\d)\b")
 
-    # Priority 1: 4-digit year at start of name
-    m = re.match(r"(20\d\d)", name)
-    if m:
-        return m.group(1)
+    # Skip name-based heuristics for UUIDs — hex digits look like dates/years.
+    # UUID format: 8-4-4-4-12 hex chars (e.g. "86042459-a91b-4d63-9197-ca066e214b02")
+    _is_uuid = bool(re.match(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        name, re.IGNORECASE,
+    ))
 
-    # Priority 2: 2-digit year prefix at start of name (YY-MM-DD or YYMMDD)
-    # Validate month (01-12) and day (01-31) to reject UUID hex digits.
-    m2 = re.match(r"(\d{2})[-]?(\d{2})[-]?(\d{2})", name)
-    if m2:
-        yy, mm, dd = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
-        if 20 <= yy <= 99 and 1 <= mm <= 12 and 1 <= dd <= 31:
-            return str(2000 + yy)
+    if not _is_uuid:
+        # Priority 1: 4-digit year at start of name
+        m = re.match(r"(20\d\d)", name)
+        if m:
+            return m.group(1)
 
-    # Priority 3: standalone 4-digit year anywhere in name
-    m3 = _yr4_re.search(name)
-    if m3:
-        return m3.group(1)
+        # Priority 2: 2-digit year prefix at start of name (YY-MM-DD or YYMMDD)
+        # Validate month (01-12) and day (01-31) to reject UUID hex digits.
+        m2 = re.match(r"(\d{2})[-]?(\d{2})[-]?(\d{2})", name)
+        if m2:
+            yy, mm, dd = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+            if 20 <= yy <= 99 and 1 <= mm <= 12 and 1 <= dd <= 31:
+                return str(2000 + yy)
+
+        # Priority 3: standalone 4-digit year anywhere in name
+        m3 = _yr4_re.search(name)
+        if m3:
+            return m3.group(1)
 
     # Priority 4: authoritative ISO timestamp (Gemini CLI startTime, Claude Code session ts)
     # Do NOT use AI Studio file mtime here — it reflects download date, not creation date.

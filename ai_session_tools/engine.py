@@ -502,16 +502,42 @@ def _is_skill_injection(data: dict, content: Optional[str], prev_was_slash: bool
     # Mode 2: structural SKILL.md detection — skill bodies contain markdown headings
     # with slash command references like "# Create New Plan (/ar:plannew)"
     # and structural sections like "## 1. Foundation" or "### 1.1 Key Principles"
-    if _SKILL_BODY_RE.search(stripped[:500]):
+    if _SKILL_HEADING_RE.search(stripped[:500]):
+        return True
+    # Mode 3: long structured content — SKILL.md/CLAUDE.md bodies start with #/## heading
+    # and contain many ### subsections. Real user corrections are short.
+    if _is_structured_instruction_body(stripped):
         return True
     return False
 
 
 # Compiled pattern for structural skill body detection.
-# Matches: "# Title (/ar:something)" or "# Title (/cr:something)" at start of content.
-_SKILL_BODY_RE = re.compile(
-    r"^#\s+.+\(/(?:ar|cr):[a-z]"
+# Matches skill headings like "# Title (/ar:plannew)" or "# Title (short: /ar:go)".
+_SKILL_HEADING_RE = re.compile(
+    r"^#\s+.+(?:\(/(?:ar|cr):[a-z]|/(?:ar|cr):[a-z][a-z0-9-]*\))"
 )
+
+# Subsection heading pattern for structured instruction detection.
+_SUBSECTION_RE = re.compile(r"^#{2,4}\s+", re.MULTILINE)
+
+
+def _is_structured_instruction_body(content: str) -> bool:
+    """Detect structured instruction bodies (SKILL.md, CLAUDE.md sections).
+
+    Skill/instruction bodies are long, start with a markdown heading (#/##),
+    and contain many subsection headings (###). Real user messages with
+    corrections are short and conversational.
+
+    Heuristic: starts with heading + has 5+ subsection headings + >500 chars.
+    """
+    if len(content) < 500:
+        return False
+    if not content.startswith("#"):
+        return False
+    # Count ## / ### / #### headings in first 5000 chars.
+    # Real skill bodies spread headings across thousands of chars.
+    subsections = len(_SUBSECTION_RE.findall(content[:5000]))
+    return subsections >= 5
 
 
 class SessionRecoveryEngine:

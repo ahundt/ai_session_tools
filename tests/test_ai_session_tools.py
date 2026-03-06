@@ -13794,6 +13794,27 @@ class TestEraDetectionUUID:
                          "Today is 2026-03-06 and we are working on a project")
         assert era == "2026"
 
+    def test_uuid_starting_with_2014_not_matched(self):
+        """UUID starting with '2014' should not match as year 2014."""
+        from ai_session_tools.analysis.analyzer import _detect_era
+        era = _detect_era("20147e4b-fa8e-4e88-9b42-222b7a81c6cb", "",
+                         timestamp="2026-02-10T10:00:00Z")
+        assert era == "2026", f"UUID '20147e4b...' should use timestamp, got era={era}"
+
+    def test_uuid_with_2019_segment_not_matched(self):
+        """UUID with '2019' in second segment should not match as year 2019."""
+        from ai_session_tools.analysis.analyzer import _detect_era
+        era = _detect_era("19df00d2-2019-4095-95c6-b4fce994e942", "",
+                         timestamp="2026-01-15T10:00:00Z")
+        assert era == "2026", f"UUID with '2019' segment should use timestamp, got era={era}"
+
+    def test_uuid_with_valid_yymmdd_not_matched(self):
+        """UUID '86042459' (yy=86 mm=04 dd=24) should skip name-based detection."""
+        from ai_session_tools.analysis.analyzer import _detect_era
+        era = _detect_era("86042459-a91b-4d63-9197-ca066e214b02", "",
+                         timestamp="2026-03-01T10:00:00Z")
+        assert era == "2026", f"UUID '86042459...' should use timestamp, got era={era}"
+
 
 # ─── TDD: Bug 14 — INDEX.md header ───────────────────────────────────────────
 
@@ -13885,8 +13906,12 @@ class TestEdgeCasesEraDetection:
 
     def test_uuid_with_valid_looking_date_prefix(self):
         from ai_session_tools.analysis.analyzer import _detect_era
-        # 260101 looks like 2026-01-01 but it's a UUID — valid month/day though
-        assert _detect_era("26010100-0000-0000-0000-000000000000", "") == "2026"
+        # 260101 looks like 2026-01-01 but it's a UUID — name-based skipped,
+        # so needs timestamp to get correct era
+        assert _detect_era("26010100-0000-0000-0000-000000000000", "",
+                          timestamp="2026-01-01T10:00:00Z") == "2026"
+        # Without timestamp, UUID should not match name as date
+        assert _detect_era("26010100-0000-0000-0000-000000000000", "") == "unknown"
 
     def test_uuid_with_invalid_month_13(self):
         from ai_session_tools.analysis.analyzer import _detect_era
@@ -13925,6 +13950,46 @@ class TestEdgeCasesSkillInjection:
         # /cr: prefix skills should also be detected
         content = "# Git Commit Requirements (/cr:commit)\n\n## Steps\n"
         assert _is_skill_injection({"type": "user"}, content, prev_was_slash=False)
+
+    def test_short_form_skill_filtered(self):
+        from ai_session_tools.engine import _is_skill_injection
+        # "# Title (short: /ar:go)" format should also be detected
+        content = "# Resume Claude automatically when it stops - Autorun Workflow (short: /ar:go)\n\n"
+        assert _is_skill_injection({"type": "user"}, content, prev_was_slash=False)
+
+    def test_structured_instruction_body_filtered(self):
+        from ai_session_tools.engine import _is_skill_injection
+        # Long structured content with many headings (like /commit skill body)
+        content = (
+            "# Git Commit Requirements\n\n"
+            "## Pre-Git Commit Analysis Process\n\n"
+            "### 1. Command Execution\n\n"
+            "- `git status` - see all untracked files\n"
+            "- `git diff --staged` - see exactly what changes will be committed\n"
+            "- `git log -5` - see recent commit messages for style consistency\n\n"
+            "### 2. Complete Change Analysis\n\n"
+            "Must analyze ALL commits and changes that will be included:\n"
+            "- Not just latest commit - analyze entire scope\n"
+            "- Both staged and unstaged changes\n\n"
+            "### 3. Mandatory Regression Check\n\n"
+            "Before writing commit message, review git diff to ensure accuracy.\n\n"
+            "## Pre-Git Commit Structure & Format\n\n"
+            "### 4. Subject Line Format\n\n"
+            "- Use concrete, actionable descriptions of what changed\n"
+            "- Avoid vague terms like improve or enhance\n\n"
+            "### 5. Message Structure\n\n"
+            "- Summary first with concise summary line at top\n"
+            "- Previous behavior description\n"
+            "- What changed with specific details\n"
+        )
+        assert len(content) > 500, f"Test content too short: {len(content)}"
+        assert _is_skill_injection({"type": "user"}, content, prev_was_slash=False)
+
+    def test_short_user_message_not_filtered(self):
+        from ai_session_tools.engine import _is_skill_injection
+        # Short user message with a heading should NOT be filtered
+        content = "# My request\n\nYou forgot to add the test."
+        assert not _is_skill_injection({"type": "user"}, content, prev_was_slash=False)
 
     def test_normal_heading_not_filtered(self):
         from ai_session_tools.engine import _is_skill_injection
