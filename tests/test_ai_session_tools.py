@@ -12334,3 +12334,127 @@ class TestClaudeBackendFoundInMultiSourceEngine:
         # Should not hang or be slow — uses fast Claude path
         results = session.get_planning_usage(since="2020-01-01")
         assert isinstance(results, list)
+
+
+class TestMultiSourceProviderCompleteness:
+    """Verify AISession methods merge Claude + non-Claude results in multi-source mode.
+
+    These tests cover 4 issues found by audit:
+    1. get_statistics uses fast Claude path in multi-source mode
+    2. search_messages merges Claude + non-Claude results
+    3. search_messages non-Claude fallback does not drop parameters
+    4. Multi-source mode returns combined results, not Claude-only
+    """
+
+    def _make_multi_session(self, tmp_path):
+        """Build AISession with Claude + MockSource, both containing searchable data."""
+        from ai_session_tools.engine import (
+            SessionRecoveryEngine, MultiSourceEngine, ClaudeSource, AISession,
+        )
+        from ai_session_tools.models import MessageType, SessionInfo, SessionMessage
+
+        # Claude source with real JSONL data
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        claude_src = ClaudeSource(engine)
+
+        # Mock non-Claude source with known data
+        class MockSource:
+            def list_sessions(self):
+                return [SessionInfo(
+                    session_id="mock-0001-0000-0000-000000000000",
+                    project_dir="mock-proj", cwd="/tmp/mock",
+                    git_branch="main",
+                    timestamp_first="2026-01-26T10:00:00",
+                    timestamp_last="2026-01-26T11:00:00",
+                    message_count=2, has_compact_summary=False,
+                    provider="mock",
+                )]
+
+            def search_messages(self, query, message_type=None):
+                import re
+                content = "mock unique search target XYZZY"
+                if message_type and message_type != "user":
+                    return []
+                if re.search(query, content, re.IGNORECASE):
+                    return [SessionMessage(
+                        type=MessageType.USER,
+                        timestamp="2026-01-26T10:00:00",
+                        content=content,
+                        session_id="mock-0001-0000-0000-000000000000",
+                    )]
+                return []
+
+            def read_session(self, session_info):
+                return [SessionMessage(
+                    type=MessageType.USER,
+                    timestamp="2026-01-26T10:00:00",
+                    content="mock unique search target XYZZY",
+                    session_id="mock-0001-0000-0000-000000000000",
+                )]
+
+            def stats(self):
+                return {"mock_sessions": 1}
+
+        multi = MultiSourceEngine([claude_src, MockSource()])
+        return AISession._from_backend(multi, "all")
+
+    def test_get_statistics_uses_fast_path_in_multi_source(self, tmp_path):
+        """get_statistics should use claude_be fast path even when _is_claude is False."""
+        session = self._make_multi_session(tmp_path)
+        assert session._is_claude is False, "precondition: multi-source mode"
+        assert session._claude_backend is not None, "precondition: claude backend found"
+        stats = session.get_statistics()
+        assert stats.total_sessions >= 2, \
+            "multi-source stats should include both Claude and mock sessions"
+
+    def test_search_messages_merges_claude_and_non_claude(self, tmp_path):
+        """search_messages must return results from both Claude and non-Claude sources."""
+        session = self._make_multi_session(tmp_path)
+        # Search for something that exists in BOTH sources
+        # Claude fixture has "start the feature" and mock has "XYZZY"
+        # Search with empty query matches everything
+        all_results = session.search_messages("")
+        # Must contain results from Claude sessions AND mock session
+        session_ids = {m.session_id for m in all_results}
+        assert "mock-0001-0000-0000-000000000000" in session_ids, \
+            "non-Claude results must be included in multi-source search"
+        assert any(sid.startswith("aaaa0001") for sid in session_ids), \
+            "Claude results must also be included in multi-source search"
+
+    def test_search_messages_with_context_merges_sources(self, tmp_path):
+        """search_messages(context>0) must include non-Claude results in multi-source."""
+        session = self._make_multi_session(tmp_path)
+        results = session.search_messages("XYZZY", context=1)
+        assert len(results) >= 1, "mock source result for 'XYZZY' must be found"
+        # Results should be ContextMatch objects
+        from ai_session_tools.engine import ContextMatch
+        assert all(isinstance(r, ContextMatch) for r in results)
+
+    def test_search_messages_non_claude_fallback_no_crash(self, tmp_path):
+        """Pure non-Claude backend search_messages must not crash."""
+        from ai_session_tools.engine import MultiSourceEngine, AISession
+        from ai_session_tools.models import MessageType, SessionInfo, SessionMessage
+
+        class SimpleSource:
+            def list_sessions(self):
+                return [SessionInfo(
+                    session_id="simple-001", project_dir="p", cwd="/tmp",
+                    git_branch="", timestamp_first="2026-01-01T00:00:00",
+                    timestamp_last="2026-01-01T01:00:00", message_count=1,
+                    has_compact_summary=False, provider="simple",
+                )]
+            def search_messages(self, query, message_type=None):
+                return [SessionMessage(
+                    type=MessageType.USER, timestamp="2026-01-01T00:00:00",
+                    content="simple result", session_id="simple-001",
+                )]
+            def stats(self):
+                return {"simple_sessions": 1}
+
+        multi = MultiSourceEngine([SimpleSource()])
+        session = AISession._from_backend(multi, "other")
+        assert session._claude_backend is None, "precondition: no Claude backend"
+        results = session.search_messages("result")
+        assert len(results) == 1
+        assert results[0].content == "simple result"

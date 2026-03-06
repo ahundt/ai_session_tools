@@ -2453,9 +2453,26 @@ class AISession:
         """
         use_context = context > 0 or context_before >= 0 or context_after >= 0
         claude_be = self._claude_backend
+
+        # Collect non-Claude results when in multi-source mode.
+        # Non-Claude sources don't support tool/since/session_id/exclude_compaction
+        # so we only pass query + message_type.
+        def _non_claude_results() -> list[SessionMessage]:
+            if not isinstance(self._backend, MultiSourceEngine):
+                return []
+            results: list[SessionMessage] = []
+            for src in self._backend._sources:
+                if isinstance(src, ClaudeSource):
+                    continue  # handled by claude_be
+                try:
+                    results.extend(src.search_messages(query, message_type))
+                except Exception:  # noqa: BLE001
+                    pass
+            return results
+
         if use_context:
             if claude_be:
-                return claude_be.search_messages_with_context(
+                claude_results = claude_be.search_messages_with_context(
                     query, context,
                     context_before=context_before,
                     context_after=context_after,
@@ -2465,7 +2482,15 @@ class AISession:
                     since=since,
                     session_id=session_id,
                 )
-            # Non-Claude: context window not available; wrap plain results as ContextMatch
+                # Merge non-Claude results as ContextMatch (no context window available)
+                non_claude = _non_claude_results()
+                if non_claude:
+                    claude_results.extend(
+                        ContextMatch(match=m, context_before=[], context_after=[])
+                        for m in non_claude
+                    )
+                return claude_results
+            # Pure non-Claude: context window not available; wrap plain results as ContextMatch
             # so callers always receive list[ContextMatch] when context>0 (consistent API).
             if tool:
                 from rich.console import Console as _Console
@@ -2476,12 +2501,18 @@ class AISession:
             plain = self._backend.search_messages(query, message_type)
             return [ContextMatch(match=m, context_before=[], context_after=[]) for m in plain]
         if claude_be:
-            return claude_be.search_messages(
+            claude_results = claude_be.search_messages(
                 query, message_type, tool,
                 exclude_compaction=exclude_compaction,
                 since=since,
                 session_id=session_id,
             )
+            # Merge non-Claude results in multi-source mode
+            non_claude = _non_claude_results()
+            if non_claude:
+                claude_results.extend(non_claude)
+                claude_results.sort(key=lambda m: m.timestamp or "", reverse=True)
+            return claude_results
         if tool:
             from rich.console import Console
             Console(stderr=True).print(
@@ -2564,6 +2595,7 @@ class AISession:
         """Return session statistics. Default since=None, until=None: no date restriction."""
         claude_be = self._claude_backend
         if claude_be and self._is_claude:
+            # Direct Claude-only mode: fast path via SessionRecoveryEngine.get_statistics
             return claude_be.get_statistics(since=since, until=until)
         # Non-Claude or multi-source backends: aggregate stats.
         if since or until:
