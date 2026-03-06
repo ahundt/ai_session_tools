@@ -96,7 +96,9 @@ from .models import (
     CorrectionMatch,
     FileVersion,
     MessageType,
-    PlanningCommandCount,
+    SlashCommandCount,
+    PlanningCommandCount,  # backward-compat alias for SlashCommandCount
+    SlashCommandRecord,
     SessionAnalysis,
     SessionFile,
     SessionInfo,
@@ -145,7 +147,9 @@ __all__ = [
     "SessionAnalysis",
     "FileVersion",
     "CorrectionMatch",
-    "PlanningCommandCount",
+    "SlashCommandCount",
+    "PlanningCommandCount",  # backward-compat alias for SlashCommandCount
+    "SlashCommandRecord",
     "ContextMatch",
     "MessageType",
     # --- Config ---

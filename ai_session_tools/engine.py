@@ -33,7 +33,9 @@ from .models import (
     FileVersion,
     FilterSpec,
     MessageType,
-    PlanningCommandCount,
+    SlashCommandCount,
+    PlanningCommandCount,  # backward-compat alias for SlashCommandCount
+    SlashCommandRecord,
     SessionAnalysis,
     SessionFile,
     SessionInfo,
@@ -246,7 +248,7 @@ _parse_date_input = parse_date_input
 #: Regex to auto-discover slash commands that START a user message.
 #: Matches e.g. "/ar:plannew", "/commit", "/help" — not file paths or URLs.
 #: Used when analyze_planning_usage() is called with commands=None (discovery mode).
-_SLASH_CMD_DISCOVERY_RE = re.compile(r"^/(\w[\w:.-]*)")
+_SLASH_CMD_DISCOVERY_RE = re.compile(r"^/(\w[\w:.-]*)(?=\s|$)")
 
 #: System message patterns to filter from export
 _EXPORT_FILTER_PATTERNS = (
@@ -282,6 +284,93 @@ def _passes_date_filter(ts: str, since: Optional[str], until: Optional[str]) -> 
     if until and ts > until:
         return False
     return True
+
+
+def _path_stat_iso(path: Path) -> tuple:
+    """Return (mtime_iso, birthtime_iso) from a single stat() call.
+
+    One stat() call yields both timestamps. birthtime is platform-specific:
+    - macOS/BSD: st_birthtime (true creation time)
+    - Windows:   st_ctime    (creation time; Windows st_ctime semantics differ from POSIX)
+    - Linux:     None        (st_birthtime unavailable; st_ctime = inode change time, not creation)
+
+    Both values are 19-char UTC ISO strings or None on unavailability/OSError.
+    None means "cannot determine" — callers treat as "do not skip" to avoid false exclusions.
+    Used by _iter_all_jsonl for the combined since/until mtime+birthtime pre-filter.
+    """
+    import sys as _sys
+    try:
+        s = path.stat()
+
+        def _to_iso(ts: float) -> str:
+            return datetime.datetime.fromtimestamp(
+                ts, tz=datetime.timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%S")
+
+        mtime_iso = _to_iso(s.st_mtime)
+        bt = getattr(s, "st_birthtime", None)       # macOS/BSD: true creation time
+        if bt is None and _sys.platform == "win32":
+            bt = s.st_ctime                          # Windows: ctime = creation time
+        # Linux: bt stays None (st_ctime = inode change time, wrong semantics)
+        birthtime_iso = _to_iso(bt) if bt is not None else None
+        return mtime_iso, birthtime_iso
+    except OSError:
+        return None, None
+
+
+def _path_mtime_iso(path: Path) -> Optional[str]:
+    """Return a file's mtime as a 19-char UTC ISO string, or None on OSError.
+
+    Backward-compatible wrapper around _path_stat_iso. New code should use
+    _path_stat_iso to get both mtime and birthtime in a single stat() call.
+    """
+    mtime_iso, _ = _path_stat_iso(path)
+    return mtime_iso
+
+
+def _read_first_timestamp(path: Path, max_lines: int = 10) -> Optional[str]:
+    """Return the first valid timestamp from a JSONL file, reading at most max_lines.
+
+    Reads only until a timestamp is found — typically 1 line, at most a few KB.
+    Used for the until pre-filter: if first_ts > until, the entire file can be
+    skipped without reading 100MB+ of content.
+
+    Returns None on OSError or if no timestamp found within max_lines.
+    Callers treat None as "cannot determine" — do not skip (conservative).
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for _ in range(max_lines):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ts = _json_loads(line).get("timestamp", "")
+                    if ts:
+                        return ts[:19]  # normalize to 19-char ISO
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    continue
+    except OSError:
+        pass
+    return None
+
+
+def _is_compaction(data: dict, content: Optional[str]) -> bool:
+    """Return True if this JSONL record is a compaction summary message.
+
+    Detects compaction via two signals:
+    1. isCompactSummary=True field on the raw record (Claude Code flag).
+    2. Content starts with "This session is being continued" (canonical prefix).
+
+    Guards against None content — some JSONL records have missing/null text.
+    Module-level so it can be reused by search_messages and search_messages_with_context.
+    """
+    return bool(data.get("isCompactSummary")) or (content or "").startswith(
+        "This session is being continued"
+    )
 
 
 class SessionRecoveryEngine:
@@ -329,27 +418,88 @@ class SessionRecoveryEngine:
     # ── Private JSONL iteration helpers ──────────────────────────────────────
 
     def _iter_all_jsonl(
-        self, project_filter: Optional[str] = None
+        self,
+        project_filter: Optional[str] = None,
+        session_id_prefix: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
     ):
-        """Yield (project_dir_name, jsonl_path) for every session across all projects.
+        """Yield (project_dir_name, jsonl_path, skip_until_check) for every session.
 
         Handles missing directory gracefully. All multi-session scanning methods
         use this to avoid duplicating the glob + filter scaffolding.
+
+        Performance optimizations (avoid reading 100MB+ JSONL files):
+        - since:  mtime < since → skip file (no I/O; mtime = last message timestamp).
+        - until:  first_ts > until → skip file (1-line read; see two-stage design below).
+          Fast path: birthtime <= until (macOS st_birthtime / Windows st_ctime) → yield
+          without reading the first line (file created before until, can't be entirely too new).
+          Verify path: birthtime unavailable (Linux) or birthtime > until (possible sync-reset
+          on synced/restored machines where birthtime is reset to transfer time) → read first
+          line to confirm. mtime is preserved by sync tools; birthtime is not.
+        - skip_until_check (3rd yield value): True when mtime < until, meaning ALL records
+          are before until — callers skip the per-record ts > until check for the whole file.
+
+        Args:
+            project_filter:    Substring to match project_dir name. None = all projects.
+            session_id_prefix: If set, only yield files whose stem starts with this prefix.
+            since:             mtime pre-filter cutoff. Accepts parse_date_input formats.
+            until:             first-line pre-filter cutoff. Accepts parse_date_input formats.
+
+        Yields:
+            (project_dir_name: str, jsonl_path: Path, skip_until_check: bool)
         """
         if not self.projects_dir.exists():
             return
+        # Normalize since/until once — handles raw relative ("14d") and ISO from CLI.
+        since_iso: Optional[str] = None
+        if since:
+            try:
+                _s = parse_date_input(since, "start")
+                since_iso = _s[0] if isinstance(_s, tuple) else _s
+            except (ValueError, AttributeError, TypeError):
+                pass  # invalid since → no mtime pre-filter; per-record filter still applies
+        until_iso: Optional[str] = None
+        if until:
+            try:
+                _u = parse_date_input(until, "end")
+                until_iso = _u[1] if isinstance(_u, tuple) else _u
+            except (ValueError, AttributeError, TypeError):
+                pass  # invalid until → no first-line pre-filter; per-record filter still applies
         for project_dir in self.projects_dir.glob("*"):
             if not project_dir.is_dir():
                 continue
             if project_filter:
                 pf_raw = project_filter.lower()
                 pf_norm = pf_raw.replace("_", "-")        # ai_session_tools → ai-session-tools
-                decoded = self.extract_project_name(project_dir.name).lower()  # "ai-session-tools"
-                encoded = project_dir.name.lower()         # "-Users-athundt--claude-ai-session-tools"
+                decoded = self.extract_project_name(project_dir.name).lower()
+                encoded = project_dir.name.lower()
                 if pf_norm not in encoded and pf_raw not in decoded and pf_norm not in decoded:
                     continue
             for jsonl_file in project_dir.glob("*.jsonl"):
-                yield project_dir.name, jsonl_file
+                # Session scope filter
+                if session_id_prefix and not jsonl_file.stem.startswith(session_id_prefix):
+                    continue
+                # One stat() call for both mtime and birthtime
+                mtime_iso, birthtime_iso = _path_stat_iso(jsonl_file)
+                # since: mtime < since → all messages too old → skip (no I/O)
+                if since_iso and mtime_iso and not _passes_date_filter(mtime_iso, since_iso, None):
+                    continue
+                # until: skip file if all messages are after until
+                if until_iso:
+                    if birthtime_iso is not None and birthtime_iso <= until_iso:
+                        # File created before until → can't be entirely too new → yield
+                        pass
+                    else:
+                        # No reliable birthtime (Linux) OR birthtime > until (possible
+                        # sync-reset: birthtime reset to transfer time on synced machines).
+                        # Verify with first-line read — cheap vs skipping a valid 100MB file.
+                        first_ts = _read_first_timestamp(jsonl_file)
+                        if first_ts is not None and first_ts > until_iso:
+                            continue  # confirmed: all messages after until → skip
+                # Per-record hint: mtime < until → all records ≤ mtime < until
+                skip_until_check = bool(until_iso and mtime_iso and mtime_iso < until_iso)
+                yield project_dir.name, jsonl_file, skip_until_check
 
     def _find_session_files(self, session_id: str) -> List[tuple]:
         """Return all (jsonl_path, project_dir_name) tuples for the given session ID prefix.
@@ -359,7 +509,7 @@ class SessionRecoveryEngine:
         so callers that need a single session can use matches[0].
         """
         matches = []
-        for project_dir_name, jsonl_path in self._iter_all_jsonl():
+        for project_dir_name, jsonl_path, _ in self._iter_all_jsonl():
             if jsonl_path.stem.startswith(session_id):
                 try:
                     mtime = jsonl_path.stat().st_mtime
@@ -781,6 +931,9 @@ class SessionRecoveryEngine:
         query: str,
         message_type: Optional[str] = None,
         tool: Optional[str] = None,
+        exclude_compaction: bool = False,
+        since: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> List[SessionMessage]:
         """Search for messages across all sessions.
 
@@ -811,12 +964,18 @@ class SessionRecoveryEngine:
         is_literal = not query or re.escape(query) == query
         query_lower = query.lower() if (is_literal and query) else None
         # Heuristic: message_type value must appear in the raw JSON line (no false negatives).
-        msg_type_hint = f'"{message_type}"' if message_type else None
+        # "slash" and "compaction" are derived values (content-based), not literal JSONL fields —
+        # they both come from "user" records, so pre-filter on "user" for those two.
+        _RAW_TYPE_MAP = {"slash": "user", "compaction": "user"}
+        _raw_type = _RAW_TYPE_MAP.get(message_type, message_type) if message_type else None
+        msg_type_hint = f'"{_raw_type}"' if _raw_type else None
         tool_lower = tool.lower() if tool else None
 
         messages: List[SessionMessage] = []
 
-        for _project_dir_name, jsonl_file in self._iter_all_jsonl():
+        for _project_dir_name, jsonl_file, _ in self._iter_all_jsonl(
+            session_id_prefix=session_id, since=since
+        ):
             try:
                 with open(jsonl_file, encoding="utf-8", errors="replace") as f:
                     for line in f:
@@ -833,8 +992,20 @@ class SessionRecoveryEngine:
                                 continue
                             data = _json_loads(line)
                             msg_type = data.get("type", "").lower()
+                            content = self._extract_content(data)
 
-                            if message_type and msg_type != message_type.lower():
+                            # Extended type filter: slash and compaction are content-based
+                            if message_type == "slash":
+                                if msg_type != "user" or "<command-name>" not in (content or ""):
+                                    continue
+                            elif message_type == "compaction":
+                                if not _is_compaction(data, content):
+                                    continue
+                            elif message_type:
+                                if msg_type != message_type.lower():
+                                    continue
+
+                            if exclude_compaction and _is_compaction(data, content):
                                 continue
 
                             if tool is not None:
@@ -859,8 +1030,7 @@ class SessionRecoveryEngine:
                                             ))
                                             break  # one match per message line
                             else:
-                                # Original behavior: extract text content only
-                                content = self._extract_content(data)
+                                # content already extracted above for type/compaction filtering
                                 if content and (not pattern or pattern.search(content)):
                                     messages.append(
                                         SessionMessage(
@@ -894,7 +1064,7 @@ class SessionRecoveryEngine:
             List of SessionInfo, sorted by timestamp_first descending (newest first).
         """
         sessions: List[SessionInfo] = []
-        for project_dir_name, jsonl_file in self._iter_all_jsonl(project_filter):
+        for project_dir_name, jsonl_file, _ in self._iter_all_jsonl(project_filter, since=since):
             session_id = jsonl_file.stem
             cwd, git_branch = "", ""
             ts_first, ts_last = "", ""
@@ -968,7 +1138,9 @@ class SessionRecoveryEngine:
             for cat, kws in _patterns
         ]
         results: List[CorrectionMatch] = []
-        for project_dir_name, jsonl_file in self._iter_all_jsonl(project_filter):
+        for project_dir_name, jsonl_file, skip_until_check in self._iter_all_jsonl(
+            project_filter, since=since, until=until
+        ):
             try:
                 with open(jsonl_file, encoding="utf-8", errors="replace") as f:
                     for line in f:
@@ -986,7 +1158,9 @@ class SessionRecoveryEngine:
                                 continue
                             if since and ts and ts < since:
                                 continue
-                            if until and ts and ts > until:
+                            # skip_until_check=True: mtime < until → all records guaranteed
+                            # before until, so the per-record check can be skipped.
+                            if not skip_until_check and until and ts and ts > until:
                                 continue
                             content = self._extract_content(data)
                             if not content:
@@ -1016,7 +1190,8 @@ class SessionRecoveryEngine:
         project_filter: Optional[str] = None,
         since: Optional[str] = None,   # canonical; --after is a hidden alias
         until: Optional[str] = None,   # canonical; --before is a hidden alias
-    ) -> List[PlanningCommandCount]:
+        return_invocations: bool = False,
+    ) -> "List[SlashCommandCount] | List[SlashCommandRecord]":
         """Count slash command usage across all sessions, sorted by frequency.
 
         Two modes depending on whether ``commands`` is provided:
@@ -1032,13 +1207,17 @@ class SessionRecoveryEngine:
             word-boundary anchors for precision.
 
         Args:
-            commands:       Regex patterns to match (pattern mode). ``None`` = auto-discover.
-            project_filter: Substring to match project_dir. None = all projects.
-            since:          Only messages >= this timestamp (ISO prefix).
-            until:          Only messages <= this timestamp (ISO prefix).
+            commands:           Regex patterns to match (pattern mode). ``None`` = auto-discover.
+            project_filter:     Substring to match project_dir. None = all projects.
+            since:              Only messages >= this timestamp (ISO prefix).
+            until:              Only messages <= this timestamp (ISO prefix).
+            return_invocations: When True, return List[SlashCommandRecord] (individual records
+                                sorted by timestamp) instead of List[PlanningCommandCount] (aggregated
+                                counts). Discovery mode only — pattern mode is unchanged.
 
         Returns:
-            List of PlanningCommandCount, sorted by count descending.
+            List[PlanningCommandCount] sorted by count descending (default), or
+            List[SlashCommandRecord] sorted by timestamp when return_invocations=True.
         """
         discovery_mode = commands is None
         # Pattern mode only: compile provided patterns
@@ -1050,7 +1229,10 @@ class SessionRecoveryEngine:
         counts: Dict[str, int] = defaultdict(int)
         session_ids_by_cmd: Dict[str, set] = defaultdict(set)
         project_dirs_by_cmd: Dict[str, set] = defaultdict(set)
-        for project_dir_name, jsonl_file in self._iter_all_jsonl(project_filter):
+        invocations_list: List = []
+        for project_dir_name, jsonl_file, skip_until_check in self._iter_all_jsonl(
+            project_filter, since=since, until=until
+        ):
             try:
                 with open(jsonl_file, encoding="utf-8", errors="replace") as f:
                     for line in f:
@@ -1069,7 +1251,9 @@ class SessionRecoveryEngine:
                                 continue
                             if since and ts and ts < since:
                                 continue
-                            if until and ts and ts > until:
+                            # skip_until_check=True: mtime < until → all records guaranteed
+                            # before until, so per-record check can be skipped.
+                            if not skip_until_check and until and ts and ts > until:
                                 continue
                             content = self._extract_content(data)
                             if not content:
@@ -1083,6 +1267,15 @@ class SessionRecoveryEngine:
                                     counts[cmd] += 1
                                     session_ids_by_cmd[cmd].add(session_id)
                                     project_dirs_by_cmd[cmd].add(project_dir_name)
+                                    if return_invocations:
+                                        args = content.lstrip()[len(cmd):].strip()
+                                        invocations_list.append(SlashCommandRecord(
+                                            command=cmd,
+                                            args=args,
+                                            session_id=session_id,
+                                            timestamp=ts,
+                                            project_dir=project_dir_name,
+                                        ))
                             else:
                                 for cmd, regex in compiled:
                                     if regex.search(content):
@@ -1093,9 +1286,12 @@ class SessionRecoveryEngine:
                             continue
             except OSError:
                 continue
+        if return_invocations and discovery_mode:
+            invocations_list.sort(key=lambda x: x.timestamp)
+            return invocations_list
         if discovery_mode:
             result = [
-                PlanningCommandCount(
+                SlashCommandCount(
                     command=cmd,
                     count=counts[cmd],
                     session_ids=sorted(session_ids_by_cmd[cmd]),
@@ -1105,7 +1301,7 @@ class SessionRecoveryEngine:
             ]
         else:
             result = [
-                PlanningCommandCount(
+                SlashCommandCount(
                     # Normalize display name: strip trailing \b regex suffix
                     command=re.sub(r"\\b$", "", cmd),
                     count=counts[cmd],
@@ -1139,7 +1335,7 @@ class SessionRecoveryEngine:
                 content_snippet (str, first snippet_chars chars), found_in_current (bool)
         """
         results: List[dict] = []
-        for project_dir_name, jsonl_file in self._iter_all_jsonl():
+        for project_dir_name, jsonl_file, _ in self._iter_all_jsonl():
             try:
                 with open(jsonl_file, encoding="utf-8", errors="replace") as f:
                     for line in f:
@@ -1412,8 +1608,13 @@ class SessionRecoveryEngine:
         self,
         query: str,
         context: int = 3,
+        context_before: int = -1,
+        context_after: int = -1,
         message_type: Optional[str] = None,
         tool: Optional[str] = None,
+        exclude_compaction: bool = False,
+        since: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> List[ContextMatch]:
         """Search messages and return each match with surrounding context messages.
 
@@ -1438,7 +1639,9 @@ class SessionRecoveryEngine:
 
         results: List[ContextMatch] = []
 
-        for _project_dir_name, jsonl_file in self._iter_all_jsonl():
+        for _project_dir_name, jsonl_file, _ in self._iter_all_jsonl(
+            session_id_prefix=session_id, since=since
+        ):
             # Buffer ALL messages from this file (needed for context window).
             # NOTE: message_type filter is intentionally NOT applied here — the buffer
             # must include all adjacent messages so context windows can span different
@@ -1486,13 +1689,25 @@ class SessionRecoveryEngine:
             # Find matches and collect context windows.
             # message_type filter applied here (not in buffer loop) so context windows
             # include chronologically adjacent messages of any type.
+            nb = context_before if context_before >= 0 else context
+            na = context_after if context_after >= 0 else context
             for i, msg in enumerate(all_msgs):
                 msg_type_str = msg.type.value if hasattr(msg.type, "value") else str(msg.type)
-                if message_type and msg_type_str != message_type.lower():
+                # Extended type filter: slash/compaction are content-based
+                if message_type == "slash":
+                    if msg_type_str != "user" or "<command-name>" not in (msg.content or ""):
+                        continue
+                elif message_type == "compaction":
+                    if not (msg.content or "").startswith("This session is being continued"):
+                        continue
+                elif message_type:
+                    if msg_type_str != message_type.lower():
+                        continue
+                if exclude_compaction and (msg.content or "").startswith("This session is being continued"):
                     continue
                 if not pattern or pattern.search(msg.content):
-                    ctx_before = all_msgs[max(0, i - context): i]
-                    ctx_after = all_msgs[i + 1: i + 1 + context]
+                    ctx_before = all_msgs[max(0, i - nb): i]
+                    ctx_after = all_msgs[i + 1: i + 1 + na]
                     results.append(ContextMatch(
                         match=msg,
                         context_before=ctx_before,
@@ -2157,26 +2372,44 @@ class AISession:
         query: str,
         *,
         context: int = 0,
+        context_before: int = -1,
+        context_after: int = -1,
         message_type: str | None = None,
         tool: str | None = None,
+        exclude_compaction: bool = False,
+        since: str | None = None,
+        session_id: str | None = None,
     ) -> list[SessionMessage] | list[ContextMatch]:
         """Search messages across all configured AI session sources.
 
         Args:
-            query:        Text or regex pattern to match in message content.
-            context:      Number of surrounding messages to include per match (default 0).
-                          When >0, returns list[ContextMatch]; when 0, returns list[SessionMessage].
-            message_type: Filter by "user", "assistant", or "system". Default: all types.
-            tool:         (Claude-only) Filter to messages containing a specific tool call.
+            query:             Text or regex pattern to match in message content.
+            context:           Symmetric surrounding messages per match (default 0).
+                               When >0 (or context_before/after set), returns list[ContextMatch].
+            context_before:    Override before-side of context window. -1 = use ``context``.
+            context_after:     Override after-side of context window. -1 = use ``context``.
+            message_type:      Filter by message type: user, assistant, tool, slash, compaction.
+            tool:              (Claude-only) Filter to messages containing a specific tool call.
+            exclude_compaction: Exclude compaction summary messages from results.
+            since:             Only messages from sessions with mtime >= this ISO timestamp.
+            session_id:        Scope to one session ID or prefix.
 
         Returns:
-            list[SessionMessage] when context=0 (default).
-            list[ContextMatch]   when context>0 (each match wrapped with before/after messages).
+            list[SessionMessage] when context=0 and no context_before/after (default).
+            list[ContextMatch]   when context>0 or context_before/after are set.
         """
-        if context > 0:
+        use_context = context > 0 or context_before >= 0 or context_after >= 0
+        if use_context:
             if self._is_claude:
                 return self._backend.search_messages_with_context(
-                    query, context, message_type, tool
+                    query, context,
+                    context_before=context_before,
+                    context_after=context_after,
+                    message_type=message_type,
+                    tool=tool,
+                    exclude_compaction=exclude_compaction,
+                    since=since,
+                    session_id=session_id,
                 )
             # Non-Claude: context window not available; wrap plain results as ContextMatch
             # so callers always receive list[ContextMatch] when context>0 (consistent API).
@@ -2189,7 +2422,12 @@ class AISession:
             plain = self._backend.search_messages(query, message_type)
             return [ContextMatch(match=m, context_before=[], context_after=[]) for m in plain]
         if self._is_claude:
-            return self._backend.search_messages(query, message_type, tool)
+            return self._backend.search_messages(
+                query, message_type, tool,
+                exclude_compaction=exclude_compaction,
+                since=since,
+                session_id=session_id,
+            )
         if tool:
             from rich.console import Console
             Console(stderr=True).print(
@@ -2455,23 +2693,27 @@ class AISession:
         since: str | None = None,
         until: str | None = None,
         limit: int | None = None,
-    ) -> list[PlanningCommandCount]:
+        return_invocations: bool = False,
+    ) -> "list[SlashCommandCount] | list[SlashCommandRecord]":
         """Count slash command usage across sessions.
 
         For Claude Code sessions: fast direct JSONL scan.
         For AI Studio / Gemini CLI sessions: uses get_sessions() + get_messages() API.
-        Both return list[PlanningCommandCount] sorted by count descending.
+        Both return list[SlashCommandCount] sorted by count descending (default).
 
         Args:
-            commands:       Filter to specific command strings. Default None = all.
-            project_filter: Filter to sessions in projects matching this substring.
-            since:          Only count commands from sessions after this date.
-            until:          Only count commands from sessions before this date.
-            limit:          Max number of results. Default: config.defaults.limit or 50.
-                            0 = all results.
+            commands:           Filter to specific command strings. Default None = all.
+            project_filter:     Filter to sessions in projects matching this substring.
+            since:              Only count commands from sessions after this date.
+            until:              Only count commands from sessions before this date.
+            limit:              Max number of results. Default: config.defaults.limit or 50.
+                                0 = all results.
+            return_invocations: When True, return List[SlashCommandRecord] (individual records
+                                sorted by timestamp) instead of aggregated counts.
 
         Returns:
-            list[PlanningCommandCount] sorted by count descending.
+            list[SlashCommandCount] sorted by count descending (default).
+            list[SlashCommandRecord] sorted by timestamp when return_invocations=True.
         """
         if limit is None:
             limit = _engine_cfg_default("limit", 50)
@@ -2481,6 +2723,7 @@ class AISession:
                 project_filter=project_filter,
                 since=since,
                 until=until,
+                return_invocations=return_invocations,
             )
             return results[:limit] if limit else results
         # Generic fallback: iterate sessions + messages
@@ -2535,7 +2778,7 @@ class AISession:
         if not counts:
             return []
         results = [
-            PlanningCommandCount(
+            SlashCommandCount(
                 command=cmd,
                 count=cnt,
                 session_ids=sorted(session_ids_by_cmd[cmd]),

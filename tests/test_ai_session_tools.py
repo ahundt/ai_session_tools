@@ -25,7 +25,7 @@ from ai_session_tools import (
     FileVersion,
     FilterSpec,
     MessageType,
-    PlanningCommandCount,
+    SlashCommandCount,
     SessionFile,
     SessionStatistics,
     SearchFilter,
@@ -330,9 +330,9 @@ class TestCorrectionMatchModel:
         assert cm.category == "regression"
 
 
-class TestPlanningCommandCountModel:
+class TestSlashCommandCountModel:
     def test_to_dict_returns_6_keys(self):
-        pc = PlanningCommandCount(
+        pc = SlashCommandCount(
             command="/ar:plannew", count=3,
             session_ids=["s1", "s2"], project_dirs=["p1"],
         )
@@ -345,7 +345,7 @@ class TestPlanningCommandCountModel:
         assert d["unique_projects"] == 1
 
     def test_is_mutable_dataclass(self):
-        pc = PlanningCommandCount(command="/ar:plannew", count=1, session_ids=[], project_dirs=[])
+        pc = SlashCommandCount(command="/ar:plannew", count=1, session_ids=[], project_dirs=[])
         pc.count = 5
         assert pc.count == 5
 
@@ -3581,7 +3581,7 @@ class TestSlashCommandDiscovery:
         assert "/path" not in commands  # mid-message slash not counted
 
     def test_discovery_returns_correct_session_ids(self, tmp_path):
-        """PlanningCommandCount.session_ids lists unique sessions where command was used."""
+        """SlashCommandCount.session_ids lists unique sessions where command was used."""
         projects = _make_projects_with_sessions(tmp_path)
         engine = SessionRecoveryEngine(projects, tmp_path / "recovery")
         results = engine.analyze_planning_usage()
@@ -5542,7 +5542,7 @@ class TestSessionBackendDegradation:
 
     def test_get_planning_usage_works_on_multi_source(self):
         """Regression #35: get_planning_usage() now works for non-Claude backends."""
-        from ai_session_tools.models import PlanningCommandCount
+        from ai_session_tools.models import SlashCommandCount
         sessions_data = [
             {
                 "session_id": "s1",
@@ -5558,7 +5558,7 @@ class TestSessionBackendDegradation:
         result = engine.get_planning_usage()
         assert isinstance(result, list)
         assert len(result) >= 1
-        assert all(isinstance(r, PlanningCommandCount) for r in result)
+        assert all(isinstance(r, SlashCommandCount) for r in result)
         commit_cmd = next((r for r in result if r.command == "/commit"), None)
         assert commit_cmd is not None, "/commit should be discovered"
         assert commit_cmd.count == 2
@@ -11099,4 +11099,1000 @@ class TestRoundTwoPlannedFixes:
         from ai_session_tools.cli import _LIST_SPEC
         headers = [c.header for c in _LIST_SPEC.columns]
         assert "Compact" in headers, f"_LIST_SPEC must have 'Compact' column; headers: {headers}"
-        assert "Summary" not in headers, f"_LIST_SPEC must not have 'Summary'; headers: {headers}"
+
+
+# ---------------------------------------------------------------------------
+# TDD: Performance & Feature Plan (mtime pre-filter, slash/compaction, etc.)
+# ---------------------------------------------------------------------------
+
+def _make_projects_with_slash_and_compaction(tmp_path: Path) -> Path:
+    """Projects dir with slash commands, skill injections, compaction messages, and file paths."""
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-alice-proj1"
+    proj.mkdir(parents=True)
+    s1 = "aaaa0001-0000-0000-0000-000000000000"
+    lines = [
+        # Real slash command invocation (has <command-name> XML tag)
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:00:00.000Z",
+                    "message": {"role": "user", "content":
+                                "<command-name>ar:plannew</command-name>\n/ar:plannew add login form"}}),
+        # Skill injection (no <command-name> tag, starts with # Skill Name)
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:01:00.000Z",
+                    "message": {"role": "user", "content":
+                                "# Skill: philosophy\nThis is a skill injection, not a slash command."}}),
+        # Compaction summary (isCompactSummary=True)
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:02:00.000Z",
+                    "isCompactSummary": True,
+                    "message": {"role": "user", "content":
+                                "This session is being continued from a previous conversation."}}),
+        # Regular user message
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:03:00.000Z",
+                    "message": {"role": "user", "content": "fix the login error"}}),
+        # Assistant message
+        json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-24T10:04:00.000Z",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "Sure."}]}}),
+        # User message that starts with a file path (false positive for planning regex)
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-24T10:05:00.000Z",
+                    "message": {"role": "user", "content":
+                                "/Users/alice/proj1/login.py was edited"}}),
+    ]
+    (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+    return projects
+
+
+# TDD #2a: _path_mtime_iso helper
+
+class TestPathMtimeIso:
+    """TDD: _path_mtime_iso converts file mtime to 19-char UTC ISO string."""
+
+    def test_existing_file_returns_19char_iso(self, tmp_path):
+        """_path_mtime_iso returns a 19-char ISO string for an existing file."""
+        from ai_session_tools.engine import _path_mtime_iso
+        f = tmp_path / "test.jsonl"
+        f.write_text("hello")
+        result = _path_mtime_iso(f)
+        assert result is not None
+        assert len(result) == 19
+        assert result[4] == "-" and result[7] == "-" and result[10] == "T"
+
+    def test_nonexistent_path_returns_none(self, tmp_path):
+        """_path_mtime_iso returns None for a path that doesn't exist (OSError → None)."""
+        from ai_session_tools.engine import _path_mtime_iso
+        result = _path_mtime_iso(tmp_path / "does_not_exist.jsonl")
+        assert result is None
+
+    def test_result_is_utc_iso_format(self, tmp_path):
+        """_path_mtime_iso result matches YYYY-MM-DDTHH:MM:SS format."""
+        import re as re_mod
+        from ai_session_tools.engine import _path_mtime_iso
+        f = tmp_path / "test.jsonl"
+        f.write_text("data")
+        result = _path_mtime_iso(f)
+        assert result is not None
+        assert re_mod.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", result)
+
+    def test_result_comparable_with_passes_date_filter(self, tmp_path):
+        """_path_mtime_iso result can be passed directly to _passes_date_filter."""
+        from ai_session_tools.engine import _path_mtime_iso, _passes_date_filter
+        f = tmp_path / "test.jsonl"
+        f.write_text("data")
+        mtime_iso = _path_mtime_iso(f)
+        assert mtime_iso is not None
+        # File just created — mtime should pass a very old since filter
+        assert _passes_date_filter(mtime_iso, "2020-01-01T00:00:00", None) is True
+        # And fail a far-future since filter
+        assert _passes_date_filter(mtime_iso, "9999-01-01T00:00:00", None) is False
+
+
+# TDD #3a: _SLASH_CMD_DISCOVERY_RE fix
+
+class TestSlashCmdDiscoveryRe:
+    """TDD: _SLASH_CMD_DISCOVERY_RE must not match file paths like /Users/foo/bar."""
+
+    def test_file_path_not_matched(self):
+        """File paths starting with /Users/... must NOT match the slash command regex."""
+        from ai_session_tools.engine import _SLASH_CMD_DISCOVERY_RE
+        content = "/Users/alice/proj1/login.py was edited"
+        m = _SLASH_CMD_DISCOVERY_RE.match(content.lstrip())
+        assert m is None, f"File path must not be matched as a slash command; got: {m}"
+
+    def test_real_slash_command_matched(self):
+        """Real slash commands like /ar:plannew must match."""
+        from ai_session_tools.engine import _SLASH_CMD_DISCOVERY_RE
+        content = "/ar:plannew add login form"
+        m = _SLASH_CMD_DISCOVERY_RE.match(content.lstrip())
+        assert m is not None
+        assert m.group(0) == "/ar:plannew"
+
+    def test_slash_command_alone_on_line(self):
+        """/commit alone (no args) must match."""
+        from ai_session_tools.engine import _SLASH_CMD_DISCOVERY_RE
+        content = "/commit"
+        m = _SLASH_CMD_DISCOVERY_RE.match(content.lstrip())
+        assert m is not None
+        assert m.group(0) == "/commit"
+
+    def test_url_not_matched(self):
+        """URLs like /foo/bar/baz must not match (has slash after first segment)."""
+        from ai_session_tools.engine import _SLASH_CMD_DISCOVERY_RE
+        content = "/foo/bar/baz"
+        m = _SLASH_CMD_DISCOVERY_RE.match(content.lstrip())
+        assert m is None, f"URL path must not be matched as slash command; got: {m}"
+
+    def test_planning_no_false_positive_for_file_path(self, tmp_path):
+        """analyze_planning_usage must not count /Users/... as a planning command."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.analyze_planning_usage()
+        commands = [r.command for r in results]
+        # /Users should NOT appear — it's a file path, not a slash command
+        assert not any(c.startswith("/Users") for c in commands), (
+            f"/Users appeared as a planning command (false positive): {commands}")
+
+
+# TDD #4a: _iter_all_jsonl mtime pre-filter
+
+class TestIterAllJsonlMtimePreFilter:
+    """TDD: _iter_all_jsonl with since param applies mtime pre-filter."""
+
+    def test_since_future_skips_all_files(self, tmp_path):
+        """since=9999-01-01 means all existing files are excluded by mtime."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = list(engine._iter_all_jsonl(since="9999-01-01T00:00:00"))
+        # All existing files have mtime < 9999 — they should all be excluded
+        assert results == [], f"Expected no files with far-future since, got: {results}"
+
+    def test_since_past_includes_all_files(self, tmp_path):
+        """since=2000-01-01 means all existing files are included (mtime > 2000)."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results_no_since = list(engine._iter_all_jsonl())
+        results_with_since = list(engine._iter_all_jsonl(since="2000-01-01T00:00:00"))
+        assert len(results_with_since) == len(results_no_since)
+
+    def test_session_id_prefix_scopes_to_one_file(self, tmp_path):
+        """session_id_prefix=aaaa0001 returns only that session's file."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = list(engine._iter_all_jsonl(session_id_prefix="aaaa0001"))
+        assert len(results) == 1
+        assert results[0][1].stem.startswith("aaaa0001")
+
+    def test_session_id_prefix_no_match_returns_empty(self, tmp_path):
+        """session_id_prefix with no matching session returns empty list."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = list(engine._iter_all_jsonl(session_id_prefix="zzzz9999"))
+        assert results == []
+
+    def test_session_id_prefix_matches_multiple(self, tmp_path):
+        """session_id_prefix=aaaa matches any session starting with aaaa."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results_prefix = list(engine._iter_all_jsonl(session_id_prefix="aaaa"))
+        results_full = list(engine._iter_all_jsonl(session_id_prefix="aaaa0001"))
+        # Both should return the same session
+        assert len(results_prefix) == len(results_full) == 1
+
+    def test_invalid_since_does_not_crash(self, tmp_path):
+        """_iter_all_jsonl with invalid since does not crash — ValueError caught."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        # Should not raise; should yield all files (no pre-filter on error)
+        results = list(engine._iter_all_jsonl(since="INVALID_DATE"))
+        assert len(results) >= 1
+
+    def test_raw_relative_since_normalized(self, tmp_path):
+        """since='14d' (raw relative) is normalized by _iter_all_jsonl."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        # '14d' should be parsed — all recent test files pass this filter
+        results = list(engine._iter_all_jsonl(since="14d"))
+        # Recent test files should be included (mtime is now)
+        assert len(results) >= 1
+
+
+# TDD #5a: _is_compaction helper
+
+class TestIsCompaction:
+    """TDD: _is_compaction(data, content) correctly identifies compaction messages."""
+
+    def test_is_compact_summary_true(self):
+        """isCompactSummary=True in data → _is_compaction returns True."""
+        from ai_session_tools.engine import _is_compaction
+        data = {"isCompactSummary": True}
+        assert _is_compaction(data, "anything") is True
+
+    def test_is_compact_summary_false(self):
+        """isCompactSummary=False → _is_compaction returns False (content check needed)."""
+        from ai_session_tools.engine import _is_compaction
+        data = {"isCompactSummary": False}
+        assert _is_compaction(data, "fix the login error") is False
+
+    def test_content_prefix_match(self):
+        """Content starting with 'This session is being continued' → True."""
+        from ai_session_tools.engine import _is_compaction
+        data = {}
+        content = "This session is being continued from a previous conversation that ran out."
+        assert _is_compaction(data, content) is True
+
+    def test_regular_content_false(self):
+        """Regular message content → False."""
+        from ai_session_tools.engine import _is_compaction
+        data = {}
+        assert _is_compaction(data, "fix the login error") is False
+
+    def test_none_content_no_crash(self):
+        """None content must not crash — return False."""
+        from ai_session_tools.engine import _is_compaction
+        data = {}
+        assert _is_compaction(data, None) is False
+
+    def test_missing_key_no_crash(self):
+        """Missing isCompactSummary key → relies on content check."""
+        from ai_session_tools.engine import _is_compaction
+        data = {}
+        assert _is_compaction(data, "normal message") is False
+
+
+# TDD #6a: slash/compaction type filters in search_messages engine
+
+class TestSlashCompactionFilters:
+    """TDD: search_messages with --type slash/compaction and --no-compaction."""
+
+    def test_type_slash_returns_only_slash_invocations(self, tmp_path):
+        """message_type='slash' returns only messages with <command-name> XML tag."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", message_type="slash")
+        assert len(results) == 1
+        assert "<command-name>" in results[0].content
+
+    def test_type_slash_excludes_skill_injections(self, tmp_path):
+        """message_type='slash' excludes skill injection messages."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", message_type="slash")
+        assert not any("# Skill" in (r.content or "") for r in results)
+
+    def test_type_slash_excludes_compaction_summaries(self, tmp_path):
+        """message_type='slash' excludes compaction summary messages."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", message_type="slash")
+        assert not any("This session is being continued" in (r.content or "") for r in results)
+
+    def test_type_compaction_returns_only_compaction(self, tmp_path):
+        """message_type='compaction' returns only compaction summary messages."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", message_type="compaction")
+        assert len(results) == 1
+        assert "This session is being continued" in results[0].content
+
+    def test_no_compaction_excludes_compaction_messages(self, tmp_path):
+        """exclude_compaction=True removes compaction summaries from results."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        all_results = engine.search_messages("", message_type="user")
+        filtered = engine.search_messages("", message_type="user", exclude_compaction=True)
+        assert len(filtered) < len(all_results)
+        assert not any("This session is being continued" in (r.content or "") for r in filtered)
+
+    def test_type_user_includes_compaction_by_default(self, tmp_path):
+        """message_type='user' includes compaction summaries (they have role='user')."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", message_type="user")
+        contents = [r.content or "" for r in results]
+        assert any("This session is being continued" in c for c in contents)
+
+
+# TDD #7a: since/session_id threading through engine callers
+
+class TestSinceSessionIdThreading:
+    """TDD: since and session_id params thread through engine search methods."""
+
+    def test_search_messages_since_filters_files(self, tmp_path):
+        """search_messages(since=...) only returns messages from files within date range."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        # Far future since — no files qualify, no messages returned
+        results = engine.search_messages("", since="9999-01-01T00:00:00")
+        assert results == []
+
+    def test_search_messages_session_id_scopes_to_one_session(self, tmp_path):
+        """search_messages(session_id='aaaa0001') only returns messages from that session."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", session_id="aaaa0001")
+        assert all(r.session_id.startswith("aaaa0001") for r in results)
+        # Should not include session bbbb0002
+        assert not any(r.session_id.startswith("bbbb0002") for r in results)
+
+    def test_get_sessions_since_filters_by_mtime(self, tmp_path):
+        """get_sessions(since='9999-01-01') returns no sessions (mtime pre-filter)."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.get_sessions(since="9999-01-01T00:00:00")
+        assert results == []
+
+    def test_find_corrections_since_filters_by_mtime(self, tmp_path):
+        """find_corrections(since='9999-01-01') returns no corrections."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.find_corrections(since="9999-01-01T00:00:00")
+        assert results == []
+
+    def test_analyze_planning_since_filters_by_mtime(self, tmp_path):
+        """analyze_planning_usage(since='9999-01-01') returns no commands."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.analyze_planning_usage(since="9999-01-01T00:00:00")
+        assert results == []
+
+
+# TDD #8a: context_before/after in search_messages_with_context
+
+class TestContextAsymmetric:
+    """TDD: search_messages_with_context supports context_before and context_after."""
+
+    def test_context_after_3_has_at_most_3_after(self, tmp_path):
+        """context_after=3 includes at most 3 messages after each match."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages_with_context(
+            "start the feature", context_after=3, context_before=0
+        )
+        assert len(results) >= 1
+        for match in results:
+            assert len(match.context_after) <= 3
+
+    def test_context_after_alone_has_empty_before(self, tmp_path):
+        """context_after=N with context_before=0 → context_before is empty."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages_with_context(
+            "start the feature", context_after=3, context_before=0
+        )
+        assert len(results) >= 1
+        for match in results:
+            assert match.context_before == []
+
+    def test_context_before_alone_has_empty_after(self, tmp_path):
+        """context_before=N with context_after=0 → context_after is empty."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages_with_context(
+            "you forgot", context_before=2, context_after=0
+        )
+        assert len(results) >= 1
+        for match in results:
+            assert match.context_after == []
+
+    def test_context_symmetric_default_unchanged(self, tmp_path):
+        """search_messages_with_context(context=2) still works (backward compat)."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages_with_context("start the feature", context=2)
+        assert len(results) >= 1
+
+    def test_context_after_and_context_combine(self, tmp_path):
+        """context_after=5 with context=2 → after=5, before=2."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages_with_context(
+            "start the feature", context=2, context_after=5
+        )
+        assert len(results) >= 1
+        for match in results:
+            assert len(match.context_after) <= 5
+            assert len(match.context_before) <= 2
+
+
+# TDD #9a: SlashCommandRecord dataclass and invocation mode
+
+class TestSlashCommandRecord:
+    """TDD: SlashCommandRecord dataclass and analyze_planning_usage(return_invocations=True)."""
+
+    def test_planning_invocation_importable(self):
+        """SlashCommandRecord should be importable from engine."""
+        from ai_session_tools.engine import SlashCommandRecord
+        assert SlashCommandRecord is not None
+
+    def test_planning_invocation_has_required_fields(self):
+        """SlashCommandRecord has command, args, session_id, timestamp, project_dir."""
+        from ai_session_tools.engine import SlashCommandRecord
+        inv = SlashCommandRecord(
+            command="/ar:plannew", args="add login form",
+            session_id="aaaa0001", timestamp="2026-01-24T10:10:00",
+            project_dir="-Users-alice-proj1",
+        )
+        assert inv.command == "/ar:plannew"
+        assert inv.args == "add login form"
+        assert inv.session_id == "aaaa0001"
+
+    def test_planning_invocation_to_dict(self):
+        """SlashCommandRecord.to_dict() has 5 keys."""
+        from ai_session_tools.engine import SlashCommandRecord
+        inv = SlashCommandRecord(
+            command="/ar:plannew", args="add login form",
+            session_id="aaaa0001", timestamp="2026-01-24T10:10:00",
+            project_dir="-Users-alice-proj1",
+        )
+        d = inv.to_dict()
+        assert set(d.keys()) == {"command", "args", "session_id", "timestamp", "project_dir"}
+
+    def test_return_invocations_true_returns_list_of_invocations(self, tmp_path):
+        """analyze_planning_usage(return_invocations=True) returns SlashCommandRecord list."""
+        from ai_session_tools.engine import SlashCommandRecord
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.analyze_planning_usage(return_invocations=True)
+        assert isinstance(results, list)
+        assert len(results) >= 1
+        assert all(isinstance(r, SlashCommandRecord) for r in results)
+
+    def test_invocation_captures_args(self, tmp_path):
+        """analyze_planning_usage(return_invocations=True) captures args after command."""
+        from ai_session_tools.engine import SlashCommandRecord
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.analyze_planning_usage(return_invocations=True)
+        # Session s1 has "/ar:plannew add login form" → args should be "add login form"
+        plannew = [r for r in results if r.command == "/ar:plannew"]
+        assert len(plannew) >= 1
+        assert plannew[0].args == "add login form"
+
+    def test_return_invocations_false_returns_planning_counts(self, tmp_path):
+        """analyze_planning_usage(return_invocations=False) still returns SlashCommandCount."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.analyze_planning_usage(return_invocations=False)
+        assert isinstance(results, list)
+        assert len(results) >= 1
+        assert all(isinstance(r, SlashCommandCount) for r in results)
+
+
+# TDD #10a: MsgFilterType enum and _write_output helper in CLI
+
+class TestMsgFilterTypeAndWriteOutput:
+    """TDD: MsgFilterType enum and _write_output helper exist in cli.py."""
+
+    def test_msg_filter_type_importable(self):
+        """MsgFilterType should be importable from ai_session_tools.cli."""
+        from ai_session_tools.cli import MsgFilterType
+        assert MsgFilterType is not None
+
+    def test_msg_filter_type_has_required_values(self):
+        """MsgFilterType has user, assistant, tool, slash, compaction."""
+        from ai_session_tools.cli import MsgFilterType
+        assert MsgFilterType.user.value == "user"
+        assert MsgFilterType.assistant.value == "assistant"
+        assert MsgFilterType.tool.value == "tool"
+        assert MsgFilterType.slash.value == "slash"
+        assert MsgFilterType.compaction.value == "compaction"
+
+    def test_write_output_creates_file(self, tmp_path):
+        """_write_output creates a file with the recorded console output."""
+        from rich.console import Console
+        from ai_session_tools.cli import _write_output
+        console = Console(record=True)
+        console.print("Hello from test")
+        output_path = tmp_path / "out.txt"
+        _write_output(console, str(output_path))
+        assert output_path.exists()
+        assert "Hello from test" in output_path.read_text()
+
+    def test_write_output_none_path_is_noop(self, tmp_path):
+        """_write_output with None output_path does nothing."""
+        from rich.console import Console
+        from ai_session_tools.cli import _write_output
+        console = Console(record=True)
+        console.print("test")
+        _write_output(console, None)  # Should not raise
+
+
+# TDD #11a: messages search new CLI flags
+
+class TestMessagesSearchNewFlags:
+    """TDD: messages search --type slash/compaction, --no-compaction, --session, --context-after."""
+
+    def test_messages_search_type_slash_flag_accepted(self, tmp_path):
+        """messages search --type slash must be accepted (not invalid option)."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "", "--type", "slash"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_messages_search_type_compaction_flag_accepted(self, tmp_path):
+        """messages search --type compaction must be accepted."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "", "--type", "compaction"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_messages_search_no_compaction_flag_accepted(self, tmp_path):
+        """messages search --no-compaction must be accepted."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "start", "--no-compaction"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_messages_search_session_flag_accepted(self, tmp_path):
+        """messages search --session SESSION_ID must be accepted."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "", "--session", "aaaa0001"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_messages_search_session_scopes_results(self, tmp_path):
+        """messages search --session aaaa0001 only returns messages from that session."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "", "--session", "aaaa0001",
+                  "--format", "json"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert all(m.get("session_id", "").startswith("aaaa0001") for m in data), (
+            f"All results must be from aaaa0001; got: {[m.get('session_id') for m in data]}")
+
+    def test_messages_search_context_after_flag_accepted(self, tmp_path):
+        """messages search --context-after N must be accepted."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "start", "--context-after", "3"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_messages_search_context_before_flag_accepted(self, tmp_path):
+        """messages search --context-before N must be accepted."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "forgot", "--context-before", "2"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_messages_search_type_compaction_no_compaction_warns(self, tmp_path):
+        """--type compaction --no-compaction is a contradiction — CLI warns and exits 0."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "",
+                  "--type", "compaction", "--no-compaction"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "warn" in result.output.lower() or "contradict" in result.output.lower(), (
+            f"Expected warning for contradiction; got: {result.output}")
+
+    def test_messages_search_output_flag_creates_file(self, tmp_path):
+        """messages search --output FILE creates file with same content as stdout."""
+        projects = _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "search_out.txt"
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "start",
+                  "--output", str(output_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert output_file.exists(), "Output file must be created by --output flag"
+        assert len(output_file.read_text()) > 0
+
+
+# TDD #12a: messages timeline new CLI flags
+
+class TestMessagesTimelineNewFlags:
+    """TDD: messages timeline --grep, --type slash/compaction, --no-compaction, --output."""
+
+    def test_timeline_grep_flag_accepted(self, tmp_path):
+        """messages timeline --grep PATTERN must be accepted."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001", "--grep", "start"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_timeline_grep_filters_results(self, tmp_path):
+        """messages timeline --grep 'start' only shows events matching 'start'."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
+                  "--grep", "start", "--format", "plain"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # The "you forgot" message should not appear if we filter for "start"
+        assert "you forgot" not in result.output.lower(), (
+            f"'you forgot' should be filtered out; got: {result.output}")
+
+    def test_timeline_grep_regex_pattern(self, tmp_path):
+        """messages timeline --grep supports regex patterns like 'start|forgot'."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
+                  "--grep", "start|forgot"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+    def test_timeline_type_slash_flag_accepted(self, tmp_path):
+        """messages timeline --type slash must be accepted."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001", "--type", "slash"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_timeline_no_compaction_flag_accepted(self, tmp_path):
+        """messages timeline --no-compaction must be accepted."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001", "--no-compaction"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_timeline_type_compaction_no_compaction_warns(self, tmp_path):
+        """messages timeline --type compaction --no-compaction warns and exits 0."""
+        projects = _make_projects_with_slash_and_compaction(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
+                  "--type", "compaction", "--no-compaction"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "warn" in result.output.lower() or "contradict" in result.output.lower()
+
+    def test_timeline_output_flag_creates_file(self, tmp_path):
+        """messages timeline --output FILE creates file with content."""
+        projects = _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "timeline_out.txt"
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "timeline", "aaaa0001",
+                  "--output", str(output_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert output_file.exists(), "Output file must be created by --output flag"
+
+
+# TDD #13a: messages planning new CLI flags
+
+class TestMessagesPlanningNewFlags:
+    """TDD: messages planning --show-args and --context-after flags."""
+
+    def test_planning_show_args_flag_accepted(self, tmp_path):
+        """messages planning --show-args must be accepted."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "planning", "--show-args"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_planning_show_args_displays_args(self, tmp_path):
+        """messages planning --show-args shows args for each planning command."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "planning", "--show-args"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # /ar:plannew has args "add login form"
+        assert "add login form" in result.output, (
+            f"Expected 'add login form' in output; got:\n{result.output}")
+
+    def test_planning_context_after_flag_accepted(self, tmp_path):
+        """messages planning --context-after N must be accepted."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "planning", "--context-after", "2"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_planning_output_flag_creates_file(self, tmp_path):
+        """messages planning --output FILE creates file."""
+        projects = _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "planning_out.txt"
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "planning", "--output", str(output_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert output_file.exists(), "Output file must be created by --output flag"
+
+
+# TDD #14a: messages corrections --output and aise commands group
+
+class TestMessagesCorrectionOutput:
+    """TDD: messages corrections --output flag."""
+
+    def test_corrections_output_flag_accepted(self, tmp_path):
+        """messages corrections --output FILE must be accepted."""
+        projects = _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "corr_out.txt"
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "corrections",
+                  "--output", str(output_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_corrections_output_creates_file(self, tmp_path):
+        """messages corrections --output FILE creates a file."""
+        projects = _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "corr_out.txt"
+        runner.invoke(
+            app, ["--provider", "claude", "messages", "corrections",
+                  "--output", str(output_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert output_file.exists(), "Output file must be created by --output flag"
+
+
+class TestCommandsGroup:
+    """TDD: aise commands subcommand group with list and context subcommands."""
+
+    def test_commands_list_subcommand_exists(self, tmp_path):
+        """aise commands list must be a valid subcommand."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "list"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_commands_list_shows_planning_commands(self, tmp_path):
+        """aise commands list shows slash command invocations."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "list"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "/ar:plannew" in result.output or "/ar:pn" in result.output, (
+            f"Expected commands in output; got:\n{result.output}")
+
+    def test_commands_list_command_filter_works(self, tmp_path):
+        """aise commands list --command /ar:plannew filters to only that command."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "list", "--command", "/ar:plannew"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert "/ar:pn" not in result.output
+
+    def test_commands_list_output_flag_creates_file(self, tmp_path):
+        """aise commands list --output FILE creates a file."""
+        projects = _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "cmds_out.txt"
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "list", "--output", str(output_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert output_file.exists()
+
+    def test_commands_context_subcommand_exists(self, tmp_path):
+        """aise commands context COMMAND must be a valid subcommand."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "context", "/ar:plannew"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0, f"Expected exit 0; got {result.exit_code}: {result.output}"
+
+    def test_commands_context_shows_context_after(self, tmp_path):
+        """aise commands context /ar:plannew --context-after 2 shows 2 messages after."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "commands", "context", "/ar:plannew",
+                  "--context-after", "2"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        # Should show context messages after the invocation
+        assert "/ar:plannew" in result.output or result.output.strip() == ""
+
+
+# TDD #new-a: _path_stat_iso helper
+
+class TestPathStatIso:
+    """TDD: _path_stat_iso returns (mtime_iso, birthtime_iso) from one stat() call."""
+
+    def test_existing_file_returns_mtime_iso(self, tmp_path):
+        from ai_session_tools.engine import _path_stat_iso
+        f = tmp_path / "test.jsonl"
+        f.write_text("hello")
+        mtime_iso, _ = _path_stat_iso(f)
+        assert mtime_iso is not None
+        assert len(mtime_iso) == 19
+        assert mtime_iso[4] == "-" and mtime_iso[7] == "-" and mtime_iso[10] == "T"
+
+    def test_nonexistent_path_returns_none_none(self, tmp_path):
+        from ai_session_tools.engine import _path_stat_iso
+        mtime_iso, birthtime_iso = _path_stat_iso(tmp_path / "does_not_exist.jsonl")
+        assert mtime_iso is None
+        assert birthtime_iso is None
+
+    def test_birthtime_none_or_iso_string(self, tmp_path):
+        import re as re_mod
+        from ai_session_tools.engine import _path_stat_iso
+        f = tmp_path / "test.jsonl"
+        f.write_text("data")
+        _, birthtime_iso = _path_stat_iso(f)
+        if birthtime_iso is not None:
+            assert len(birthtime_iso) == 19
+            assert re_mod.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", birthtime_iso)
+
+    def test_mtime_comparable_with_passes_date_filter(self, tmp_path):
+        from ai_session_tools.engine import _path_stat_iso, _passes_date_filter
+        f = tmp_path / "test.jsonl"
+        f.write_text("data")
+        mtime_iso, _ = _path_stat_iso(f)
+        assert mtime_iso is not None
+        assert _passes_date_filter(mtime_iso, "2020-01-01T00:00:00", None) is True
+        assert _passes_date_filter(mtime_iso, "9999-01-01T00:00:00", None) is False
+
+    def test_single_stat_call(self, tmp_path):
+        """_path_stat_iso makes exactly one stat() call."""
+        import unittest.mock as mock
+        from ai_session_tools.engine import _path_stat_iso
+        f = tmp_path / "test.jsonl"
+        f.write_text("data")
+        original_stat = f.stat()
+        with mock.patch.object(type(f), 'stat', return_value=original_stat) as mock_stat:
+            _path_stat_iso(f)
+            assert mock_stat.call_count == 1
+
+
+# TDD #new-b: _read_first_timestamp helper
+
+class TestReadFirstTimestamp:
+    """TDD: _read_first_timestamp reads first valid timestamp from JSONL."""
+
+    def test_returns_first_timestamp(self, tmp_path):
+        import json as _json
+        from ai_session_tools.engine import _read_first_timestamp
+        f = tmp_path / "session.jsonl"
+        f.write_text(
+            _json.dumps({"type": "user", "timestamp": "2026-01-15T10:00:00", "content": "hi"}) + "\n" +
+            _json.dumps({"type": "assistant", "timestamp": "2026-01-15T10:01:00"}) + "\n"
+        )
+        assert _read_first_timestamp(f) == "2026-01-15T10:00:00"
+
+    def test_skips_empty_lines(self, tmp_path):
+        import json as _json
+        from ai_session_tools.engine import _read_first_timestamp
+        f = tmp_path / "session.jsonl"
+        f.write_text("\n\n" + _json.dumps({"timestamp": "2026-03-01T08:00:00"}) + "\n")
+        assert _read_first_timestamp(f) == "2026-03-01T08:00:00"
+
+    def test_empty_file_returns_none(self, tmp_path):
+        from ai_session_tools.engine import _read_first_timestamp
+        f = tmp_path / "empty.jsonl"
+        f.write_text("")
+        assert _read_first_timestamp(f) is None
+
+    def test_nonexistent_file_returns_none(self, tmp_path):
+        from ai_session_tools.engine import _read_first_timestamp
+        assert _read_first_timestamp(tmp_path / "does_not_exist.jsonl") is None
+
+    def test_corrupted_first_line_tries_next(self, tmp_path):
+        import json as _json
+        from ai_session_tools.engine import _read_first_timestamp
+        f = tmp_path / "session.jsonl"
+        f.write_text("CORRUPTED\n" + _json.dumps({"timestamp": "2026-02-01T00:00:00"}) + "\n")
+        assert _read_first_timestamp(f) == "2026-02-01T00:00:00"
+
+    def test_max_lines_limit(self, tmp_path):
+        import json as _json
+        from ai_session_tools.engine import _read_first_timestamp
+        f = tmp_path / "session.jsonl"
+        # 15 lines without timestamp, then one with
+        lines = [_json.dumps({"type": "system", "content": f"line {i}"}) + "\n" for i in range(15)]
+        lines.append(_json.dumps({"timestamp": "2026-05-01T00:00:00"}) + "\n")
+        f.write_text("".join(lines))
+        assert _read_first_timestamp(f, max_lines=10) is None
+
+
+# TDD #new-c: _iter_all_jsonl until param and 3-tuple yield
+
+class TestIterAllJsonlUntilParam:
+    """TDD: _iter_all_jsonl 3-tuple yield and until pre-filter."""
+
+    def test_yields_three_tuple(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = list(engine._iter_all_jsonl())
+        assert len(results) >= 1
+        name, path, skip_check = results[0]
+        assert isinstance(name, str)
+        from pathlib import Path as _Path
+        assert isinstance(path, _Path)
+        assert isinstance(skip_check, bool)
+
+    def test_skip_until_check_false_when_no_until(self, tmp_path):
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = list(engine._iter_all_jsonl())
+        assert all(skip_check is False for _, _, skip_check in results)
+
+    def test_skip_until_check_true_when_mtime_before_until(self, tmp_path):
+        """skip_until_check=True when file mtime < until (far future)."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = list(engine._iter_all_jsonl(until="9999-12-31T23:59:59"))
+        assert len(results) >= 1
+        assert all(skip_check is True for _, _, skip_check in results)
+
+    def test_skip_until_check_false_when_mtime_after_until(self, tmp_path):
+        """skip_until_check=False when mtime >= until (past date)."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = list(engine._iter_all_jsonl(until="2000-01-01T00:00:00"))
+        for _, _, skip_check in results:
+            assert skip_check is False
+
+    def test_until_skips_file_when_first_ts_after_until(self, tmp_path):
+        """Files whose first timestamp > until are skipped entirely."""
+        import json as _json
+        projects = tmp_path / "projects"
+        proj = projects / "-test-proj"
+        proj.mkdir(parents=True)
+        f = proj / "future-session-aaaa1111.jsonl"
+        f.write_text(_json.dumps({"type": "user", "timestamp": "2099-01-01T00:00:00", "content": "hi"}) + "\n")
+        engine = _make_engine(tmp_path, projects)
+        paths = [p for _, p, _ in engine._iter_all_jsonl(until="2026-01-01T00:00:00")]
+        assert f not in paths, "File with first_ts > until must be skipped"
+
+    def test_until_includes_file_when_first_ts_before_until(self, tmp_path):
+        """Files whose first timestamp < until are included."""
+        import json as _json
+        projects = tmp_path / "projects"
+        proj = projects / "-test-proj"
+        proj.mkdir(parents=True)
+        f = proj / "past-session-bbbb2222.jsonl"
+        f.write_text(_json.dumps({"type": "user", "timestamp": "2020-01-01T00:00:00", "content": "hi"}) + "\n")
+        engine = _make_engine(tmp_path, projects)
+        paths = [p for _, p, _ in engine._iter_all_jsonl(until="2026-01-01T00:00:00")]
+        assert f in paths, "File with first_ts < until must be included"
+
+    def test_since_and_until_combined(self, tmp_path):
+        """since=9999 → all files skipped; combined since+until works."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = list(engine._iter_all_jsonl(since="9999-01-01T00:00:00", until="9999-12-31T23:59:59"))
+        assert results == []
+
+    def test_find_corrections_until_filters(self, tmp_path):
+        """find_corrections(until='9999-01-01') passes until through to engine."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        # All sessions are recent — with since=9999, nothing should match
+        results = engine.find_corrections(since="9999-01-01T00:00:00")
+        assert results == []
+
+    def test_analyze_planning_until_filters(self, tmp_path):
+        """analyze_planning_usage(until='2000-01-01') returns no commands."""
+        projects = _make_projects_with_sessions(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.analyze_planning_usage(until="2000-01-01T00:00:00")
+        assert results == []

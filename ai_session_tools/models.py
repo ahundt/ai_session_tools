@@ -724,10 +724,10 @@ class CorrectionMatch:
 
 
 @dataclass
-class PlanningCommandCount:
-    """Usage count for one planning command across all sessions."""
+class SlashCommandCount:
+    """Usage count for one slash command across all sessions."""
 
-    command: str           # e.g. "/ar:plannew"
+    command: str           # e.g. "/ar:plannew", "/commit", "/plan"
     count: int
     session_ids: List[str]   # unique sessions where this command appeared
     project_dirs: List[str]  # unique project dirs where this command appeared
@@ -740,6 +740,30 @@ class PlanningCommandCount:
             "unique_projects": len(self.project_dirs),
             "session_ids": self.session_ids,
             "project_dirs": self.project_dirs,
+        }
+
+
+# Backward-compatible alias — deprecated; use SlashCommandCount.
+PlanningCommandCount = SlashCommandCount
+
+
+@dataclass
+class SlashCommandRecord:
+    """A single slash command invocation with args and session location."""
+
+    command: str       # e.g. "/ar:plannew", "/commit", "/plan"
+    args: str          # text after the command token (stripped)
+    session_id: str
+    timestamp: str
+    project_dir: str
+
+    def to_dict(self) -> dict:
+        return {
+            "command": self.command,
+            "args": self.args,
+            "session_id": self.session_id,
+            "timestamp": self.timestamp,
+            "project_dir": self.project_dir,
         }
 
 

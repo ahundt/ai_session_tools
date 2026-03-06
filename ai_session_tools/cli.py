@@ -16,6 +16,7 @@ import re as _re
 import shutil
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Callable as _Callable, List, Optional, Set
 
@@ -175,10 +176,16 @@ def source_callback(ctx: typer.Context) -> None:
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
 
+slash_app = typer.Typer(
+    help="Search and inspect slash command invocations across sessions.",
+)
+
 app.add_typer(files_app, name="files", rich_help_panel="Domain Groups")
 app.add_typer(messages_app, name="messages", rich_help_panel="Domain Groups")
 app.add_typer(export_app, name="export", rich_help_panel="Domain Groups")
 app.add_typer(tools_app, name="tools", rich_help_panel="Domain Groups")
+app.add_typer(slash_app, name="commands", rich_help_panel="Domain Groups")  # 'commands' = slash commands
+app.add_typer(slash_app, name="slash", rich_help_panel="Domain Groups")     # 'slash' alias
 app.add_typer(config_app, name="config", rich_help_panel="Configuration")
 app.add_typer(source_app, name="source", rich_help_panel="Source Management")
 
@@ -703,6 +710,43 @@ _OPT_MAX_CHARS = typer.Option(
     None, "--max-chars",
     help="Truncate content to this many characters. 0 = full. Default: 0 (or config 'defaults.max_chars')",
 )
+
+#: Output file tee option — write output to FILE in addition to stdout.
+_OPT_OUTPUT = typer.Option(
+    None, "--output", "-o",
+    help="Write output to FILE in addition to stdout (tee). Example: --output ~/audit.txt",
+)
+
+
+class MsgFilterType(str, Enum):
+    """CLI filter enum for --type on messages search and messages timeline.
+
+    Named MsgFilterType (not MessageType) to avoid collision with models.MessageType
+    which has USER/ASSISTANT/SYSTEM values used at the data layer.
+    """
+    user = "user"
+    assistant = "assistant"
+    tool = "tool"
+    slash = "slash"           # real slash command invocations (<command-name> XML tag); Claude-only
+    compaction = "compaction" # context-compaction summary messages; Claude-only
+
+
+def _write_output(console: Console, output_path: Optional[str]) -> None:
+    """If output_path given, write recorded console output to file (tee helper)."""
+    if output_path:
+        text = console.export_text(clear=False)
+        Path(output_path).expanduser().write_text(text, encoding="utf-8")
+
+
+def _is_compaction_content(content: Optional[str]) -> bool:
+    """Return True if content looks like a context-compaction summary message.
+
+    Checks the string prefix used in compaction summaries. The isCompactSummary
+    JSON field is checked separately in engine.py; this helper covers the CLI layer
+    where only the content string is available (e.g., timeline event objects).
+    Guards against None content.
+    """
+    return (content or "").startswith("This session is being continued")
 
 
 def _cfg_default(key: str, fallback):
@@ -1407,15 +1451,20 @@ def _do_messages_search(
     fmt: Optional[str] = None,
     tool: Optional[str] = None,
     context: int = 0,
+    context_before: int = -1,
+    context_after: int = -1,
+    exclude_compaction: bool = False,
+    session: Optional[str] = None,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
     full_uuid: bool = False,
+    output: Optional[str] = None,
 ) -> None:
     """Search messages across all sessions. When context > 0, each result includes
     up to ``context`` surrounding messages from the same session file.
 
-    When since/until are given, only sessions whose timestamp_first falls in
-    the specified range are searched (pre-filtering via engine.get_sessions).
+    Since/until and session are threaded into the engine's _iter_all_jsonl via
+    search_messages() — no redundant get_sessions() pre-scan needed.
     """
     if max_chars is None:
         max_chars = _cfg_default("max_chars", 0)
@@ -1423,21 +1472,31 @@ def _do_messages_search(
         fmt = _cfg_default("format", "table")
     tag = f" [tool: {tool}]" if tool else ""
 
-    # Pre-filter to sessions in the date range when requested
-    valid_session_ids: Optional[set] = None
-    if since or until:
-        sessions = engine.get_sessions(since=since, until=until)
-        valid_session_ids = {s.session_id for s in sessions}
+    # Resolve effective before/after context window.
+    # --context-after alone → before=0, after=N (most common slash audit pattern).
+    # --context N alone → symmetric (existing behavior unchanged).
+    eff_before = context_before if context_before >= 0 else (0 if context_after >= 0 else context)
+    eff_after  = context_after  if context_after  >= 0 else context
 
-    if context > 0:
+    use_context = eff_before > 0 or eff_after > 0
+
+    if use_context:
         ctx_results = engine.search_messages(
-            query, context=context, message_type=message_type, tool=tool
+            query,
+            context=max(eff_before, eff_after),  # engine uses symmetric; we slice after
+            context_before=eff_before,
+            context_after=eff_after,
+            message_type=message_type,
+            exclude_compaction=exclude_compaction,
+            tool=tool,
+            since=since,
+            session_id=session,
         )
-        if valid_session_ids is not None:
-            ctx_results = [r for r in ctx_results if r.match.session_id in valid_session_ids]
         ctx_results = ctx_results[:limit or None]
+        out_console = Console(record=bool(output))
         if not ctx_results:
-            console.print(f"[yellow]No messages match query{tag}[/yellow]")
+            out_console.print(f"[yellow]No messages match query{tag}[/yellow]")
+            _write_output(out_console, output)
             return
         if fmt == "json":
             sys.stdout.write(json.dumps([r.to_dict() for r in ctx_results], indent=2) + "\n")
@@ -1446,25 +1505,42 @@ def _do_messages_search(
         # truncate=None means no truncation (Python slice [:None] returns full string).
         truncate = max_chars if max_chars > 0 else None
         for cm in ctx_results:
-            console.print(f"[dim]{'─' * 60}[/dim]")
+            out_console.print(f"[dim]{'─' * 60}[/dim]")
             for m in cm.context_before:
-                console.print(f"[dim][{m.type.value}] {m.timestamp[:19]}[/dim]")
-                console.print(f"[dim]{m.content[:truncate]}[/dim]\n")
-            console.print(f"[bold cyan][{cm.match.type.value}] {cm.match.timestamp[:19]}[/bold cyan]")
-            console.print(f"{cm.match.content[:truncate]}\n")
+                out_console.print(f"[dim][{m.type.value}] {m.timestamp[:19]}[/dim]")
+                out_console.print(f"[dim]{m.content[:truncate]}[/dim]\n")
+            out_console.print(f"[bold cyan][{cm.match.type.value}] {cm.match.timestamp[:19]}[/bold cyan]")
+            out_console.print(f"{cm.match.content[:truncate]}\n")
             for m in cm.context_after:
-                console.print(f"[dim][{m.type.value}] {m.timestamp[:19]}[/dim]")
-                console.print(f"[dim]{m.content[:truncate]}[/dim]\n")
-        console.print(f"\n[bold]Found {len(ctx_results)} matches{tag} (context ±{context})[/bold]")
+                out_console.print(f"[dim][{m.type.value}] {m.timestamp[:19]}[/dim]")
+                out_console.print(f"[dim]{m.content[:truncate]}[/dim]\n")
+        out_console.print(f"\n[bold]Found {len(ctx_results)} matches{tag}[/bold]")
+        _write_output(out_console, output)
         return
 
-    all_results = engine.search_messages(query, message_type=message_type, tool=tool)
-    if valid_session_ids is not None:
-        all_results = [m for m in all_results if m.session_id in valid_session_ids]
+    all_results = engine.search_messages(
+        query,
+        message_type=message_type,
+        exclude_compaction=exclude_compaction,
+        tool=tool,
+        since=since,
+        session_id=session,
+    )
     results = all_results[:limit or None]
 
+    out_console = Console(record=bool(output))
     if not results:
-        console.print(f"[yellow]No messages match query{tag}[/yellow]")
+        out_console.print(f"[yellow]No messages match query{tag}[/yellow]")
+        _write_output(out_console, output)
+        return
+
+    formatter = MessageFormatter(max_chars=max_chars)
+    if output:
+        # When writing to file, use out_console (record=True) for all output paths
+        # so _write_output can capture the full text.
+        out_console.print(formatter.format_many(results))
+        out_console.print(f"\n[bold]Found {len(results)} messages[/bold]")
+        _write_output(out_console, output)
         return
 
     if fmt in ("json", "csv", "plain"):
@@ -1493,7 +1569,6 @@ def _do_messages_search(
         _render_output(results, fmt, spec)
         return
 
-    formatter = MessageFormatter(max_chars=max_chars)
     render_console = _get_render_console()
     render_console.print(formatter.format_many(results))
     render_console.print(f"\n[bold]Found {len(results)} messages[/bold]")
@@ -1598,6 +1673,7 @@ def _do_messages_corrections(
     fmt: str = "table",
     pattern_overrides: Optional[List[str]] = None,
     full_uuid: bool = False,
+    output: Optional[str] = None,
 ) -> None:
     """Find user corrections across sessions.
 
@@ -1624,6 +1700,11 @@ def _do_messages_corrections(
         limit=limit, patterns=patterns,
     )
     spec = _spec_with_full_uuid(_CORRECTIONS_SPEC) if full_uuid else _CORRECTIONS_SPEC
+    if output:
+        out_console = Console(record=True)
+        for c in corrections:
+            out_console.print(f"[{c.category}] {(c.timestamp or '')[:19]} {c.content[:200]}")
+        _write_output(out_console, output)
     _render_output(corrections, fmt, spec, "No corrections found")
 
 
@@ -1634,14 +1715,20 @@ def _do_messages_planning(
     until: Optional[str] = None,   # canonical; before= is a hidden alias
     fmt: str = "table",
     commands_raw: Optional[str] = None,
+    show_args: bool = False,
+    context_after: int = 0,
+    output: Optional[str] = None,
 ) -> None:
     """Show planning command usage.
 
     Priority for command list: CLI --commands > config file > built-in defaults.
 
     Args:
-        commands_raw: Raw --commands option value (CSV or bracketed list).
-                      When provided, replaces config/defaults entirely.
+        commands_raw:  Raw --commands option value (CSV or bracketed list).
+                       When provided, replaces config/defaults entirely.
+        show_args:     When True, switch to per-invocation output with args.
+        context_after: When > 0, show N messages after each invocation.
+        output:        Write output to FILE in addition to stdout (tee).
     """
     if commands_raw:
         # CLI flag — highest priority
@@ -1655,10 +1742,39 @@ def _do_messages_planning(
         else:
             # Built-in defaults — lowest priority (engine uses DEFAULT_PLANNING_COMMANDS)
             commands = None
+    # --show-args or --context-after > 0: switch to per-invocation mode
+    if show_args or context_after > 0:
+        invocations = engine.get_planning_usage(
+            project_filter=project, since=since, until=until,
+            commands=commands, return_invocations=True,
+        )
+        out_console = Console(record=bool(output))
+        if not invocations:
+            out_console.print("[yellow]No planning command invocations found[/yellow]")
+            _write_output(out_console, output)
+            return
+        for inv in invocations:
+            out_console.print(f"[bold cyan]{inv.command}[/bold cyan] [dim]{inv.timestamp[:19]}[/dim] [blue]{inv.session_id[:8]}[/blue]")
+            if show_args and inv.args:
+                out_console.print(f"  [dim]args:[/dim] {inv.args}")
+            if context_after > 0:
+                messages = engine.get_messages(inv.session_id)
+                after_msgs = [m for m in messages if (m.timestamp or "") > inv.timestamp][:context_after]
+                for m in after_msgs:
+                    out_console.print(f"  [dim][{m.type.value}] {(m.timestamp or '')[:19]}[/dim]")
+                    out_console.print(f"  [dim]{(m.content or '')[:200]}[/dim]")
+        out_console.print(f"\n[bold]Found {len(invocations)} invocations[/bold]")
+        _write_output(out_console, output)
+        return
     results = engine.get_planning_usage(
         project_filter=project, since=since, until=until,
         commands=commands,
     )
+    if output:
+        out_console = Console(record=True)
+        for r in results:
+            out_console.print(f"{r.command}: {r.count}")
+        _write_output(out_console, output)
     _render_output(results, fmt, _PLANNING_SPEC, "No planning commands found")
 
 
@@ -1737,16 +1853,42 @@ def _do_messages_timeline(
     message_type: Optional[str] = None,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
+    grep: Optional[str] = None,
+    exclude_compaction: bool = False,
+    output: Optional[str] = None,
 ) -> None:
     """Show chronological event timeline for a session."""
     events = engine.get_session_timeline(session_id, preview_chars=preview_chars)
-    if message_type:
+    any_filter_active = bool(message_type or grep or exclude_compaction or since or until)
+    has_events_before_filter = bool(events)
+    # --type filter (extended to include slash and compaction)
+    if message_type == "slash":
+        events = [e for e in events if "<command-name>" in (e.get("content") or "")]
+    elif message_type == "compaction":
+        events = [e for e in events if _is_compaction_content(e.get("content"))]
+    elif message_type:
         events = [e for e in events if e.get("type") == message_type]
+    # --no-compaction post-filter (applies after --type)
+    if exclude_compaction:
+        events = [e for e in events if not _is_compaction_content(e.get("content"))]
     if since:
         events = [e for e in events if (e.get("timestamp") or "") >= since]
     if until:
         events = [e for e in events if (e.get("timestamp") or "") <= until]
+    # --grep post-filter (case-insensitive regex; fallback to literal on invalid regex)
+    if grep:
+        try:
+            grep_re = _re.compile(grep, _re.IGNORECASE)
+            events = [e for e in events if grep_re.search(e.get("content") or "")]
+        except _re.error:
+            err_console.print(f"[yellow]Warning:[/yellow] --grep pattern is not valid regex; falling back to literal substring match.")
+            grep_lower = grep.lower()
+            events = [e for e in events if grep_lower in (e.get("content") or "").lower()]
     if not events:
+        if any_filter_active and has_events_before_filter:
+            # Session exists and has events, but all were filtered out — exit 0
+            console.print("[yellow]No events match the given filters.[/yellow]")
+            return
         # Distinguish "session file not found" from "session has no user/assistant events"
         # Cross-backend session existence check: use _find_session_files() for Claude,
         # fall back to get_messages() for multi-source backends (AISession).
@@ -1762,6 +1904,16 @@ def _do_messages_timeline(
                 f"[yellow]Session {session_id!r} exists but has no user/assistant events.[/yellow]"
             )
         raise typer.Exit(code=1)
+    if output:
+        out_console = Console(record=True)
+        # Use plain/message format for file output since _render_output uses global console.
+        for e in events:
+            ts = (e.get("timestamp") or "")[:19]
+            etype = e.get("type") or ""
+            content = e.get("content") or ""
+            out_console.print(f"[dim][{etype}] {ts}[/dim]")
+            out_console.print(content)
+        _write_output(out_console, output)
     _render_output(events, fmt, _TIMELINE_SPEC, "No events found")
 
 
@@ -2304,7 +2456,10 @@ def _messages_search_cmd(
     provider: Optional[str] = _OPT_PROVIDER,
     query: Optional[str] = typer.Argument(None, help="Text to search for in messages. Use quotes for multi-word queries."),
     query_opt: Optional[str] = typer.Option(None, "--query", "-q", hidden=True),
-    message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
+    message_type: Optional[MsgFilterType] = typer.Option(
+        None, "--type", "-t",
+        help="Filter by message type: user, assistant, tool, slash (real slash command invocations only, identified by <command-name> XML tag), compaction (context-compaction summaries). Typer shows valid values automatically.",
+    ),
     limit: int = typer.Option(0, "--limit", help="Max messages to return. 0 = unlimited (default)"),
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
@@ -2316,37 +2471,66 @@ def _messages_search_cmd(
         0, "--context", "-c",
         help="Include N messages before and after each match (from the same session). Default: 0.",
     ),
+    context_before: int = typer.Option(
+        -1, "--context-before",
+        help="Show N messages before each match. Overrides --context for the before-side. 0 = no before context. Default (-1): uses --context value.",
+    ),
+    context_after: int = typer.Option(
+        -1, "--context-after",
+        help="Show N messages after each match. Overrides --context for the after-side. 0 = no after context. Default (-1): uses --context value.",
+    ),
+    exclude_compaction: bool = typer.Option(
+        False, "--no-compaction",
+        help="Exclude context-compaction summary messages from results. Most useful with --type user. Redundant with --type slash. Contradicts --type compaction (warns, returns 0 results).",
+    ),
+    session: Optional[str] = typer.Option(
+        None, "--session",
+        help="Scope search to one session ID or prefix. Find IDs via 'aise list'.",
+    ),
     since:  Optional[str] = _OPT_SINCE,
     until:  Optional[str] = _OPT_UNTIL,
     when:   Optional[str] = _OPT_WHEN,
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
     full_uuid: bool = _OPT_FULL_UUID,
+    output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """Search conversation messages across all configured session sources.
 
     Accessible as both 'messages search' and 'messages find' (aliases).
 
     Examples:
-        aise messages search "authentication"                   # all messages
-        aise messages search "critique" --type user             # user turns only
-        aise messages search "step by step" --type assistant    # AI turns only
-        aise messages find "error"                              # find is an alias
-        aise messages search "*" --tool Write                   # all Write tool calls
-        aise messages search "error" --context 3               # show surrounding messages
-        aise messages search "error" --since 2026-01-01        # sessions since Jan 1
-        aise messages search "error" --when 202X               # sessions in the 2020s decade
+        aise messages search "authentication"                         # all messages
+        aise messages search "critique" --type user                   # user turns only
+        aise messages search "step by step" --type assistant          # AI turns only
+        aise messages find "error"                                    # find is an alias
+        aise messages search "*" --tool Write                         # all Write tool calls
+        aise messages search "error" --context 3                      # show surrounding messages
+        aise messages search "" --type slash --context-after 5        # slash commands + trailing context
+        aise messages search "" --type user --no-compaction           # typed user messages only
+        aise messages search "" --type compaction --since 14d         # inspect compacted content
+        aise messages search "error" --session 83326782               # scope to one session
+        aise messages search "error" --since 2026-01-01               # sessions since Jan 1
+        aise messages search "error" --when 202X                      # sessions in the 2020s decade
     """
     q = query or query_opt
+    msg_type_str = message_type.value if message_type else None
+    # Contradiction check: --type compaction --no-compaction → empty result
+    if message_type == MsgFilterType.compaction and exclude_compaction:
+        err_console.print("[yellow]Warning:[/yellow] --type compaction --no-compaction contradicts itself. Returning 0 results.")
+        raise typer.Exit(0)
     # Get backend from composition root (ctx.obj injected by app_callback)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
-    _do_messages_search(engine, q or "", message_type, limit, max_chars, fmt,
-                        tool=tool, context=context, since=since, until=until,
-                        full_uuid=full_uuid)
+    _do_messages_search(engine, q or "", msg_type_str, limit, max_chars, fmt,
+                        tool=tool, context=context,
+                        context_before=context_before, context_after=context_after,
+                        exclude_compaction=exclude_compaction, session=session,
+                        since=since, until=until,
+                        full_uuid=full_uuid, output=output)
 
 
 _register_alias(messages_app, _messages_search_cmd, "search", "find")
@@ -2410,6 +2594,7 @@ def messages_corrections(
         ),
     ),
     full_uuid: bool = _OPT_FULL_UUID,
+    output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """Find user messages where corrections were given to Claude.
 
@@ -2427,6 +2612,7 @@ def messages_corrections(
         aise messages corrections --format json
         aise messages corrections --pattern 'regression:you deleted' --pattern 'regression:you removed'
         aise messages corrections --pattern 'oops:nono' --pattern 'oops:that.s wrong'
+        aise messages corrections --output ~/corrections.txt
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
@@ -2434,7 +2620,7 @@ def messages_corrections(
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
     _do_messages_corrections(engine, project, since, until, limit, fmt,
-                              pattern_overrides=pattern, full_uuid=full_uuid)
+                              pattern_overrides=pattern, full_uuid=full_uuid, output=output)
 
 
 @messages_app.command("planning")
@@ -2457,6 +2643,15 @@ def messages_planning(
             "Example: --commands '/ar:plannew,/ar:pn,/myplanning,/plan'"
         ),
     ),
+    show_args: bool = typer.Option(
+        False, "--show-args",
+        help="Show the argument text passed to each slash command invocation (e.g. for '/ar:plannew fix auth', shows 'fix auth'). Switches to per-invocation output instead of count summary.",
+    ),
+    context_after: int = typer.Option(
+        0, "--context-after",
+        help="For each slash command invocation, show N messages that followed it. Implies --show-args. Default: 0 (count summary only).",
+    ),
+    output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """Show slash-command usage frequency across all sessions.
 
@@ -2477,13 +2672,16 @@ def messages_planning(
         aise messages planning --format json
         aise messages planning --commands '/ar:plannew,/ar:pn'
         aise messages planning --commands '/mycommand,/mc,/plan,/p'
+        aise messages planning --show-args --since 14d           # show args per invocation
+        aise messages planning --context-after 3 --since 14d    # show 3 messages after each
     """
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     since, until = _normalize_date_range(since, until, when, after, before)
-    _do_messages_planning(engine, project, since, until, fmt, commands_raw=commands)
+    _do_messages_planning(engine, project, since, until, fmt, commands_raw=commands,
+                          show_args=show_args, context_after=context_after, output=output)
 
 
 @messages_app.command("inspect")
@@ -2519,12 +2717,24 @@ def messages_timeline(
         150, "--preview-chars",
         help="Max characters to show in content preview column. Default: 150",
     ),
-    message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' events. Default: both."),
+    message_type: Optional[MsgFilterType] = typer.Option(
+        None, "--type", "-t",
+        help="Show only events of this type: user, assistant, tool, slash (real slash command invocations via <command-name> XML tag), compaction (context-compaction summaries). Default: all.",
+    ),
+    grep: Optional[str] = typer.Option(
+        None, "--grep",
+        help="Show only events whose content matches this pattern (case-insensitive regex, re.search). Applied after --type filtering. Simple substring patterns work as-is.",
+    ),
+    exclude_compaction: bool = typer.Option(
+        False, "--no-compaction",
+        help="Exclude context-compaction summary events. Most useful with --type user. Contradicts --type compaction (warns, returns 0 results).",
+    ),
     since: Optional[str] = _OPT_SINCE,
     until: Optional[str] = _OPT_UNTIL,
     when: Optional[str] = _OPT_WHEN,
     after: Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
+    output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """Show a chronological timeline of user/assistant events for a session.
 
@@ -2535,16 +2745,153 @@ def messages_timeline(
         aise messages timeline ab841016
         aise messages timeline ab841016 --format json
         aise messages timeline ab841016 --preview-chars 80
-        aise messages timeline ab841016 --type assistant    # AI turns only
-        aise messages timeline ab841016 --since 14:00       # events after 2pm
+        aise messages timeline ab841016 --type assistant        # AI turns only
+        aise messages timeline ab841016 --type slash            # slash command invocations
+        aise messages timeline ab841016 --type compaction       # compaction summary events
+        aise messages timeline ab841016 --type user --no-compaction  # typed user messages only
+        aise messages timeline ab841016 --grep "plannew"        # events mentioning plannew
+        aise messages timeline ab841016 --since 14:00           # events after 2pm
+        aise messages timeline ab841016 --output ~/timeline.txt # save to file
     """
+    # Contradiction check: --type compaction --no-compaction → empty result
+    if message_type == MsgFilterType.compaction and exclude_compaction:
+        err_console.print("[yellow]Warning:[/yellow] --type compaction --no-compaction contradicts itself. Returning 0 results.")
+        raise typer.Exit(0)
+    msg_type_str = message_type.value if message_type else None
     since, until = _normalize_date_range(since, until, when, after, before)
     engine = _resolve_engine(ctx, provider)
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     _do_messages_timeline(engine, session_id, fmt, preview_chars=preview_chars,
-                          message_type=message_type, since=since, until=until)
+                          message_type=msg_type_str, since=since, until=until,
+                          grep=grep, exclude_compaction=exclude_compaction,
+                          output=output)
+
+
+# ── aise commands / aise slash subcommand group ──────────────────────────────
+# Lists and inspects slash command invocations across all sessions.
+# 'commands' and 'slash' are both registered as group names (aliases).
+
+
+@slash_app.command("list")
+def slash_list(
+    ctx: typer.Context,
+    provider: Optional[str] = _OPT_PROVIDER,
+    command: Optional[str] = typer.Option(
+        None, "--command",
+        help="Filter to invocations matching this pattern (substring or regex). Default: all slash commands.",
+    ),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
+    fmt:    Optional[str] = _OPT_FORMAT,
+    output: Optional[str] = _OPT_OUTPUT,
+) -> None:
+    """List every slash command invocation across all sessions.
+
+    Each row shows the command, args, timestamp, session ID, and project.
+    Use --command to filter to a specific command or regex pattern.
+
+    Examples:
+        aise commands list                                      # all slash commands
+        aise commands list --command /ar:plannew                # only /ar:plannew
+        aise commands list --since 14d --output ~/cmds.txt      # last 14 days, save to file
+        aise slash list                                         # same via alias
+    """
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    # Use return_invocations=True to get per-invocation SlashCommandRecord list
+    invocations = engine.get_planning_usage(
+        since=since, until=until, return_invocations=True,
+    )
+    # Filter by --command pattern if given
+    if command:
+        try:
+            cmd_re = _re.compile(command, _re.IGNORECASE)
+            invocations = [inv for inv in invocations if cmd_re.search(inv.command)]
+        except _re.error:
+            invocations = [inv for inv in invocations if command.lower() in inv.command.lower()]
+    out_console = Console(record=bool(output))
+    if not invocations:
+        out_console.print("[yellow]No slash command invocations found.[/yellow]")
+        _write_output(out_console, output)
+        return
+    for inv in invocations:
+        out_console.print(
+            f"[bold cyan]{inv.command}[/bold cyan] "
+            f"[dim]{inv.timestamp[:19]}[/dim] "
+            f"[blue]{inv.session_id[:8]}[/blue] "
+            f"[dim]{inv.project_dir}[/dim]"
+        )
+        if inv.args:
+            out_console.print(f"  [dim]{inv.args}[/dim]")
+    out_console.print(f"\n[bold]Found {len(invocations)} invocations[/bold]")
+    _write_output(out_console, output)
+
+
+@slash_app.command("context")
+def slash_context(
+    ctx: typer.Context,
+    command: str = typer.Argument(..., help="Slash command to look up (e.g. /ar:plannew, /commit)."),
+    provider: Optional[str] = _OPT_PROVIDER,
+    context_after: int = typer.Option(
+        5, "--context-after", "-n",
+        help="Number of messages to show after each invocation. Default: 5.",
+    ),
+    since:  Optional[str] = _OPT_SINCE,
+    until:  Optional[str] = _OPT_UNTIL,
+    when:   Optional[str] = _OPT_WHEN,
+    after:  Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
+    output: Optional[str] = _OPT_OUTPUT,
+) -> None:
+    """For each invocation of COMMAND, show what followed it.
+
+    Shows the N messages that came after each slash command invocation,
+    useful for reviewing the AI's response to a planning or task command.
+
+    Examples:
+        aise commands context /ar:plannew
+        aise commands context /ar:plannew --context-after 10
+        aise commands context /commit --since 14d --output ~/commit-context.txt
+        aise slash context /plan --since 7d
+    """
+    engine = _resolve_engine(ctx, provider)
+    if not engine:
+        err_console.print("[red]Internal error: engine not initialized[/red]")
+        raise typer.Exit(code=1)
+    since, until = _normalize_date_range(since, until, when, after, before)
+    invocations = engine.get_planning_usage(
+        since=since, until=until, return_invocations=True,
+    )
+    # Filter to the requested command (substring or literal match)
+    try:
+        cmd_re = _re.compile(command, _re.IGNORECASE)
+        invocations = [inv for inv in invocations if cmd_re.search(inv.command)]
+    except _re.error:
+        invocations = [inv for inv in invocations if command.lower() in inv.command.lower()]
+    out_console = Console(record=bool(output))
+    if not invocations:
+        out_console.print(f"[yellow]No invocations of {command!r} found.[/yellow]")
+        _write_output(out_console, output)
+        return
+    for inv in invocations:
+        out_console.print(f"\n[bold cyan]{inv.command}[/bold cyan] [dim]{inv.timestamp[:19]}[/dim] [blue]{inv.session_id[:8]}[/blue]")
+        if inv.args:
+            out_console.print(f"  [dim]args:[/dim] {inv.args}")
+        messages = engine.get_messages(inv.session_id)
+        after_msgs = [m for m in messages if (m.timestamp or "") > inv.timestamp][:context_after]
+        for m in after_msgs:
+            out_console.print(f"  [dim][{m.type.value}] {(m.timestamp or '')[:19]}[/dim]")
+            out_console.print(f"  [dim]{(m.content or '')[:300]}[/dim]")
+    out_console.print(f"\n[bold]Found {len(invocations)} invocations[/bold]")
+    _write_output(out_console, output)
 
 
 #: Supported content extraction types for ``messages extract``.
