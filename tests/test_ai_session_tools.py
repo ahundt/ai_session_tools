@@ -14,18 +14,53 @@ Tests cover:
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
-# Suppress ALL Rich ANSI escape codes in CLI help output during tests.
-# NO_COLOR=1 removes color but preserves bold/dim/italic ANSI sequences.
-# TTY_COMPATIBLE=0 tells Rich the output device cannot handle escape sequences.
-# Both must be set before any Rich/Typer imports to take effect.
+# Suppress Rich color output during tests. NO_COLOR=1 removes color but
+# Rich 14.x still emits ANSI for bold/dim/italic styles. CleanCliRunner
+# below strips all remaining ANSI sequences from output automatically.
 os.environ.setdefault("NO_COLOR", "1")
-os.environ.setdefault("TTY_COMPATIBLE", "0")
 
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner as _BaseCliRunner
+
+# Regex matching all ANSI escape sequences: CSI (e.g. \x1b[1;2;36m),
+# OSC (e.g. \x1b]...\x07), and two-char escapes (e.g. \x1b(B).
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-B0-2]")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove all ANSI escape sequences from text."""
+    return _ANSI_RE.sub("", text)
+
+
+class CliRunner(_BaseCliRunner):
+    """CliRunner that strips ANSI escape codes from result.output.
+
+    Rich 14.x emits ANSI style codes (bold, dim, italic) even with
+    NO_COLOR=1 set.  This breaks assertions like ``"--since" in output``
+    because Rich splits flag names across escape boundaries, e.g.
+    ``\\x1b[1;2;36m-\\x1b[0m\\x1b[1;2;36m-since\\x1b[0m``.
+
+    Stripping ANSI from the result is the only approach that is robust
+    across all Rich versions, CI platforms, and terminal configurations.
+    """
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("env", {"NO_COLOR": "1"})
+        super().__init__(**kwargs)
+
+    def invoke(self, *args, **kwargs):
+        result = super().invoke(*args, **kwargs)
+        # Strip ANSI from the raw bytes so the .output property returns clean text.
+        # Result.output is a @property that decodes output_bytes, so we clean the source.
+        if result.output_bytes:
+            clean = _ANSI_RE.sub("", result.output_bytes.decode("utf-8", "replace"))
+            object.__setattr__(result, "output_bytes", clean.encode("utf-8"))
+        return result
+
 
 from ai_session_tools import (
     ContextMatch,
@@ -44,7 +79,7 @@ from ai_session_tools import (
 )
 from ai_session_tools.cli import app
 
-runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+runner = CliRunner()
 
 
 @pytest.fixture
@@ -1714,7 +1749,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["search", "--help"])
         assert result.exit_code == 0
         assert "search" in result.output.lower() or "pattern" in result.output.lower()
@@ -1724,7 +1759,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["files", "--help"])
         assert result.exit_code == 0
 
@@ -1733,7 +1768,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["messages", "--help"])
         assert result.exit_code == 0
 
@@ -1742,7 +1777,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
         assert "pattern" in result.output.lower()
@@ -1752,7 +1787,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["messages", "search", "--help"])
         assert result.exit_code == 0
         assert "query" in result.output.lower()
@@ -1762,7 +1797,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["messages", "get", "--help"])
         assert result.exit_code == 0
         assert "session" in result.output.lower()
@@ -1772,7 +1807,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["extract", "--help"])
         assert result.exit_code == 0
         # Positional arg appears as NAME or name in help, not as --name flag
@@ -1784,7 +1819,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
         assert "session" in result.output.lower()
@@ -1794,7 +1829,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["stats", "--help"])
         assert result.exit_code == 0
 
@@ -1803,7 +1838,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["messages", "search", "--help"])
         assert result.exit_code == 0
         assert "max-chars" in result.output.lower()
@@ -1813,7 +1848,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
         assert "--since" in result.output
@@ -1825,7 +1860,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
         assert "include-sessions" in result.output.lower()
@@ -1836,7 +1871,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
         assert "include-extensions" in result.output.lower()
@@ -1846,7 +1881,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
         assert "max-chars" in result.output.lower()
@@ -1856,7 +1891,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
         assert "format" in result.output.lower()
@@ -2767,7 +2802,7 @@ class TestClaudeDirCliFlag:
         # Create minimal structure so search doesn't crash
         (tmp_path / "projects").mkdir()
         (tmp_path / "recovery").mkdir()
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["--claude-dir", str(tmp_path), "files", "search"])
         # Should use tmp_path as claude dir; engine.projects_dir should be tmp_path/projects
         # The command should succeed (exit 0) or show "No files found"
@@ -3016,7 +3051,7 @@ class TestPositionalArgExtract:
 
         import ai_session_tools.cli as cli_module
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         # Set up tmp recovery dir
         recovery = _make_recovery_dir(tmp_path)
         import os
@@ -3046,7 +3081,7 @@ class TestPositionalArgExtract:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["extract", "--help"])
         assert result.exit_code == 0
         assert "--name" not in result.output
@@ -3059,7 +3094,7 @@ class TestPositionalArgHistory:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner(env={"NO_COLOR": "1", "TTY_COMPATIBLE": "0"})
+        runner = CliRunner()
         result = runner.invoke(app, ["files", "history", "--help"])
         assert result.exit_code == 0
         assert "--name" not in result.output
