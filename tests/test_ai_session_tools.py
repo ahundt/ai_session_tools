@@ -1746,9 +1746,6 @@ class TestCLIDualOrdering:
 
     def test_cli_has_search_command(self):
         """CLI app has 'search' command."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["search", "--help"])
         assert result.exit_code == 0
@@ -1756,27 +1753,18 @@ class TestCLIDualOrdering:
 
     def test_cli_has_files_group(self):
         """CLI app has 'files' command group."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "--help"])
         assert result.exit_code == 0
 
     def test_cli_has_messages_group(self):
         """CLI app has 'messages' command group."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["messages", "--help"])
         assert result.exit_code == 0
 
     def test_cli_files_search_exists(self):
         """'ais files search' route exists."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
@@ -1784,9 +1772,6 @@ class TestCLIDualOrdering:
 
     def test_cli_messages_search_exists(self):
         """'ais messages search' route exists."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["messages", "search", "--help"])
         assert result.exit_code == 0
@@ -1794,9 +1779,6 @@ class TestCLIDualOrdering:
 
     def test_cli_messages_get_exists(self):
         """'ais messages get' route exists."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["messages", "get", "--help"])
         assert result.exit_code == 0
@@ -1804,9 +1786,6 @@ class TestCLIDualOrdering:
 
     def test_cli_extract_positional_name(self):
         """'extract' uses a positional NAME argument (not --name/-n)."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["extract", "--help"])
         assert result.exit_code == 0
@@ -1816,9 +1795,6 @@ class TestCLIDualOrdering:
 
     def test_cli_get_command_exists(self):
         """Root 'get' command exists."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
@@ -1826,18 +1802,12 @@ class TestCLIDualOrdering:
 
     def test_cli_stats_command_exists(self):
         """Root 'stats' command exists."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["stats", "--help"])
         assert result.exit_code == 0
 
     def test_cli_search_has_max_chars_for_messages(self):
         """'search messages' or 'messages search' should have --max-chars option."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["messages", "search", "--help"])
         assert result.exit_code == 0
@@ -1845,9 +1815,6 @@ class TestCLIDualOrdering:
 
     def test_cli_search_files_has_datetime_flags(self):
         """File search should have --since, --until, --when flags (--after/--before are hidden aliases)."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
@@ -1857,9 +1824,6 @@ class TestCLIDualOrdering:
 
     def test_cli_search_files_has_session_flags(self):
         """File search should have --include-sessions and --exclude-sessions."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
@@ -1868,9 +1832,6 @@ class TestCLIDualOrdering:
 
     def test_cli_search_files_uses_include_extensions(self):
         """File search should use --include-extensions (not --include-types)."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
@@ -1878,9 +1839,6 @@ class TestCLIDualOrdering:
 
     def test_cli_get_has_max_chars(self):
         """'get' command should have --max-chars option."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
@@ -1888,9 +1846,6 @@ class TestCLIDualOrdering:
 
     def test_cli_get_has_format(self):
         """'get' command should have --format option."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
@@ -2794,9 +2749,6 @@ class TestClaudeDirCliFlag:
     """--claude-dir CLI flag takes precedence over CLAUDE_CONFIG_DIR env var."""
 
     def test_claude_dir_flag_used_as_base(self, tmp_path, monkeypatch):
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         monkeypatch.delenv("AI_SESSION_TOOLS_PROJECTS", raising=False)
         monkeypatch.delenv("AI_SESSION_TOOLS_RECOVERY", raising=False)
         # Create minimal structure so search doesn't crash
@@ -3047,10 +2999,7 @@ class TestPositionalArgExtract:
     """CLI extract command uses positional NAME argument."""
 
     def test_positional_name_works(self, tmp_path):
-        from typer.testing import CliRunner
-
         import ai_session_tools.cli as cli_module
-        from ai_session_tools.cli import app
         runner = CliRunner()
         # Set up tmp recovery dir
         recovery = _make_recovery_dir(tmp_path)
@@ -3078,9 +3027,6 @@ class TestPositionalArgExtract:
 
     def test_no_name_flag_accepted(self):
         """--name flag should no longer be accepted."""
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["extract", "--help"])
         assert result.exit_code == 0
@@ -3091,9 +3037,6 @@ class TestPositionalArgHistory:
     """CLI history command uses positional NAME argument."""
 
     def test_history_help_shows_positional(self):
-        from typer.testing import CliRunner
-
-        from ai_session_tools.cli import app
         runner = CliRunner()
         result = runner.invoke(app, ["files", "history", "--help"])
         assert result.exit_code == 0
