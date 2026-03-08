@@ -46,6 +46,8 @@ import sys
 import tempfile
 import time
 import uuid
+
+import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -62,7 +64,8 @@ MP4_FILE  = OUTPUT_DIR / "demo.mp4"
 # Respect an existing CLAUDE_CONFIG_DIR in the environment so that record()
 # can pass a date-shifted tmp dir through to the --run-acts subprocess.
 DEMO_ENV = {**os.environ,
-            "CLAUDE_CONFIG_DIR": os.environ.get("CLAUDE_CONFIG_DIR", str(DEMO_DIR))}
+            "CLAUDE_CONFIG_DIR": os.environ.get("CLAUDE_CONFIG_DIR", str(DEMO_DIR)),
+            "NO_COLOR": "1"}
 
 # Whether to add typing delays and pauses (True when recording, False in tests)
 _TIMED = False
@@ -958,6 +961,7 @@ class TestDemoFree:
         assert _S1[:8] in result.stdout or _S6[:8] in result.stdout, \
             "Expected synthetic session ID prefix in list output"
 
+    @pytest.mark.skipif(os.name == "nt", reason="fixture JSONL paths use Unix separators")
     def test_aise_messages_search_authentication(self) -> None:
         """aise messages search finds 'authentication' in synthetic sessions."""
         result = subprocess.run(
@@ -1053,6 +1057,7 @@ class TestDemoFree:
         assert _S1[:8] in result.stdout or _S2[:8] in result.stdout, \
             f"Expected webauth session IDs in output; got:\n{result.stdout}"
 
+    @pytest.mark.skipif(os.name == "nt", reason="Rich table box chars differ on Windows console")
     def test_find_not_in_aise_help(self) -> None:
         """aise --help must not list 'find' as an explicit command (hidden alias)."""
         result = subprocess.run(

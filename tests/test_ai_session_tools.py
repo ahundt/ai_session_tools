@@ -2676,6 +2676,7 @@ class TestExtractFallback:
 
 # ── New TDD Tests: Part 0 — Project dir naming and session filtering ──────────
 
+@pytest.mark.skipif(os.name == "nt", reason="Unix path encoding; drive letters differ on Windows")
 class TestProjectDirName:
     """_project_dir_name() converts path to Claude project dir name."""
 
@@ -4634,6 +4635,7 @@ class TestGetVersionsGlobEscape:
             f"Expected 1 version for 'data[0].py', got {len(versions)}"
         )
 
+    @pytest.mark.skipif(os.name == "nt", reason="'?' is illegal in Windows filenames")
     def test_filename_with_question_mark_does_not_crash(self, tmp_path):
         """get_versions('file?.py') should not treat '?' as glob wildcard."""
         recovery = tmp_path / "recovery"
@@ -6086,6 +6088,7 @@ class TestOrchestratorTaxonomy:
         make_symlink(str(src), link)
         assert link.parent.is_dir()
 
+    @pytest.mark.skipif(os.name == "nt", reason="cross-mount relative symlinks fail on Windows")
     def test_make_symlink_nonexistent_source_still_creates_link(self, tmp_path):
         from ai_session_tools.analysis.orchestrator import make_symlink
         link = tmp_path / "subdir" / "link.txt"
