@@ -51,6 +51,13 @@ import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Strip ANSI escape sequences from subprocess output (Rich may emit them).
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-B0-2]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 DEMO_DIR = Path(__file__).parent / "aise-demo"
@@ -961,7 +968,6 @@ class TestDemoFree:
         assert _S1[:8] in result.stdout or _S6[:8] in result.stdout, \
             "Expected synthetic session ID prefix in list output"
 
-    @pytest.mark.skipif(os.name == "nt", reason="fixture JSONL paths use Unix separators")
     def test_aise_messages_search_authentication(self) -> None:
         """aise messages search finds 'authentication' in synthetic sessions."""
         result = subprocess.run(
@@ -969,9 +975,10 @@ class TestDemoFree:
              "--provider", "claude"],
             env=DEMO_ENV, capture_output=True, text=True,
         )
-        assert result.returncode == 0, f"search failed: {result.stderr}"
+        assert result.returncode == 0, \
+            f"search failed (rc={result.returncode}):\n{_strip_ansi(result.stderr)}"
         # The word "authentication" appears in sessions S1, S2, S6
-        assert "authentication" in result.stdout.lower(), \
+        assert "authentication" in _strip_ansi(result.stdout).lower(), \
             "Expected 'authentication' in search results"
 
     def test_aise_files_search_python(self) -> None:
@@ -1057,15 +1064,16 @@ class TestDemoFree:
         assert _S1[:8] in result.stdout or _S2[:8] in result.stdout, \
             f"Expected webauth session IDs in output; got:\n{result.stdout}"
 
-    @pytest.mark.skipif(os.name == "nt", reason="Rich table box chars differ on Windows console")
     def test_find_not_in_aise_help(self) -> None:
         """aise --help must not list 'find' as an explicit command (hidden alias)."""
         result = subprocess.run(
             ["aise", "--help"], env=DEMO_ENV, capture_output=True, text=True,
         )
-        assert result.returncode == 0
-        assert not re.search(r"[│\s]\s*find\s{2,}", result.stdout), \
-            f"'find' must be hidden alias, not listed in aise --help:\n{result.stdout}"
+        stdout = _strip_ansi(result.stdout)
+        assert result.returncode == 0, \
+            f"aise --help failed (rc={result.returncode}):\n{_strip_ansi(result.stderr)}"
+        assert not re.search(r"[│\s]\s*find\s{2,}", stdout), \
+            f"'find' must be hidden alias, not listed in aise --help:\n{stdout}"
 
     def test_aise_list_full_uuid(self) -> None:
         """aise list --full-uuid shows full 36-char UUIDs for synthetic sessions."""

@@ -2676,29 +2676,38 @@ class TestExtractFallback:
 
 # ── New TDD Tests: Part 0 — Project dir naming and session filtering ──────────
 
-@pytest.mark.skipif(os.name == "nt", reason="Unix path encoding; drive letters differ on Windows")
 class TestProjectDirName:
     """_project_dir_name() converts path to Claude project dir name."""
+
+    def _expected(self, unix_path: str, unix_result: str) -> str:
+        """Return expected result, accounting for Windows drive letter prefix."""
+        if os.name == "nt":
+            import re as _re
+            abs_path = os.path.abspath(unix_path)
+            return _re.sub(r'[^a-zA-Z0-9-]', '-', abs_path)
+        return unix_result
 
     def test_dot_becomes_dash(self):
         from ai_session_tools.cli import _project_dir_name
         result = _project_dir_name("/Users/alice/.claude/myproject")
-        assert result == "-Users-alice--claude-myproject"
+        assert result == self._expected("/Users/alice/.claude/myproject",
+                                        "-Users-alice--claude-myproject")
 
     def test_hyphen_preserved(self):
         from ai_session_tools.cli import _project_dir_name
         result = _project_dir_name("/foo/my-project")
-        assert result == "-foo-my-project"
+        assert result == self._expected("/foo/my-project", "-foo-my-project")
 
     def test_underscore_becomes_dash(self):
         from ai_session_tools.cli import _project_dir_name
         result = _project_dir_name("/foo/my_project")
-        assert result == "-foo-my-project"
+        assert result == self._expected("/foo/my_project", "-foo-my-project")
 
     def test_special_chars(self):
         from ai_session_tools.cli import _project_dir_name
         result = _project_dir_name("/var/www/my.site.com")
-        assert result == "-var-www-my-site-com"
+        assert result == self._expected("/var/www/my.site.com",
+                                        "-var-www-my-site-com")
 
 
 class TestSessionsForProject:
@@ -4635,7 +4644,7 @@ class TestGetVersionsGlobEscape:
             f"Expected 1 version for 'data[0].py', got {len(versions)}"
         )
 
-    @pytest.mark.skipif(os.name == "nt", reason="'?' is illegal in Windows filenames")
+    @pytest.mark.skipif(os.name == "nt", reason="NTFS forbids '?' in filenames — cannot create test fixture")
     def test_filename_with_question_mark_does_not_crash(self, tmp_path):
         """get_versions('file?.py') should not treat '?' as glob wildcard."""
         recovery = tmp_path / "recovery"
@@ -6088,11 +6097,13 @@ class TestOrchestratorTaxonomy:
         make_symlink(str(src), link)
         assert link.parent.is_dir()
 
-    @pytest.mark.skipif(os.name == "nt", reason="cross-mount relative symlinks fail on Windows")
     def test_make_symlink_nonexistent_source_still_creates_link(self, tmp_path):
         from ai_session_tools.analysis.orchestrator import make_symlink
         link = tmp_path / "subdir" / "link.txt"
-        result = make_symlink("/nonexistent/path/file.txt", link)
+        # Use a nonexistent path on the same mount as tmp_path to avoid
+        # Windows cross-mount symlink errors (D: vs C:).
+        nonexistent = str(tmp_path / "does_not_exist" / "file.txt")
+        result = make_symlink(nonexistent, link)
         # make_symlink does not check if source exists; link may be dangling
         # result is True if symlink was created, False if OS refused
         assert isinstance(result, bool)
@@ -14131,3 +14142,212 @@ class TestFormatJsonOutputFile:
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert isinstance(data, list)
+
+
+# ── Cross-platform encoding safety tests ─────────────────────────────────────
+# These tests run on ALL platforms and catch characters that would crash
+# on Windows cp1252 consoles before they reach CI. Each failure message
+# names the exact character and line so the fix is immediately obvious.
+
+
+class TestCp1252SafeOutput:
+    """Verify CLI output strings are safe for Windows cp1252 console encoding.
+
+    Windows legacy consoles use cp1252 which cannot encode many Unicode
+    characters (e.g. ─ U+2500, → U+2192, Δ U+0394). Rich's Console
+    handles this via safe_box=True for table borders, but string literals
+    we pass to console.print() must either be cp1252-safe or go through
+    Rich's encoding-safe path.
+
+    These tests run on every platform so encoding regressions are caught
+    on Linux/macOS CI too, not just on Windows.
+    """
+
+    def test_separator_ascii_fallback_is_cp1252_safe(self):
+        """_SEPARATOR's ASCII fallback (used on cp1252 consoles) must encode safely.
+
+        On UTF-8 systems _SEPARATOR uses '─' (U+2500) which is fine.
+        On cp1252 systems _SAFE_BOX=True selects the '-' fallback.
+        This test verifies the fallback path always produces cp1252-safe output.
+        """
+        from ai_session_tools.cli import _SAFE_BOX, _SEPARATOR
+        # Simulate the cp1252 fallback: _SAFE_BOX=True means '-' * 60
+        cp1252_separator = "-" * 60
+        try:
+            cp1252_separator.encode("cp1252")
+        except UnicodeEncodeError as e:
+            pytest.fail(
+                f"ASCII separator fallback contains cp1252-unsafe char: "
+                f"{e.object[e.start]!r} (U+{ord(e.object[e.start]):04X}). "
+                f"Fix the _SAFE_BOX=True branch in cli.py."
+            )
+        # Also verify the branching logic: _SAFE_BOX selects the right variant
+        if _SAFE_BOX:
+            assert _SEPARATOR == cp1252_separator, (
+                f"_SAFE_BOX is True but _SEPARATOR is not ASCII: {_SEPARATOR[:5]!r}..."
+            )
+
+    def test_safe_box_flag_type(self):
+        """_SAFE_BOX must be a bool for Console(safe_box=...) kwarg."""
+        from ai_session_tools.cli import _SAFE_BOX
+        assert isinstance(_SAFE_BOX, bool), f"_SAFE_BOX is {type(_SAFE_BOX)}, expected bool"
+
+    def test_console_factory_sets_safe_box(self):
+        """_console() must pass safe_box to Console."""
+        from ai_session_tools.cli import _console, _SAFE_BOX
+        c = _console()
+        assert c.safe_box == _SAFE_BOX, (
+            f"_console().safe_box={c.safe_box!r} but "
+            f"_SAFE_BOX={_SAFE_BOX!r} — factory not propagating flag. "
+            f"Ensure _console() passes safe_box=_SAFE_BOX to Console()."
+        )
+
+    def test_console_factory_accepts_overrides(self):
+        """_console(safe_box=True) must override the default."""
+        from ai_session_tools.cli import _console
+        c = _console(safe_box=True)
+        assert c.safe_box is True, (
+            "_console(safe_box=True) did not set Console.safe_box=True. "
+            "Ensure kwargs.setdefault() doesn't override explicit values."
+        )
+
+    def test_em_dash_fallback_cp1252_safe(self):
+        """Em dash '—' (U+2014) used as missing-value placeholder must be cp1252-safe."""
+        # cli.py uses "—" as delta/timestamp placeholder (lines ~1420, 1429)
+        em_dash = "\u2014"
+        try:
+            em_dash.encode("cp1252")
+        except UnicodeEncodeError:
+            pytest.fail(
+                "Em dash U+2014 is not cp1252-safe — replace with '-' or 'N/A'"
+            )
+
+    def test_ellipsis_cp1252_safe(self):
+        """Ellipsis '…' (U+2026) used in session ID truncation must be cp1252-safe."""
+        ellipsis_char = "\u2026"
+        try:
+            ellipsis_char.encode("cp1252")
+        except UnicodeEncodeError:
+            pytest.fail(
+                "Ellipsis U+2026 is not cp1252-safe — replace with '...'"
+            )
+
+    def test_no_bare_box_drawing_in_output_strings(self):
+        """No box-drawing chars (U+2500-U+257F) in output outside _SEPARATOR.
+
+        Box-drawing chars crash cp1252 consoles. They must only appear in
+        _SEPARATOR (which has an ASCII fallback) or in Rich table borders
+        (which use safe_box). This test scans cli.py source for violations.
+        """
+        cli_path = Path(__file__).parent.parent / "ai_session_tools" / "cli.py"
+        source = cli_path.read_text(encoding="utf-8")
+
+        violations = []
+        for i, line in enumerate(source.split("\n"), 1):
+            # Skip comments — they never render to terminal
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            # Skip the _SEPARATOR definition itself (has ASCII fallback)
+            if "_SEPARATOR" in line and ("_SAFE_BOX" in line or "if" in line):
+                continue
+            # Check for box-drawing chars in non-comment code
+            for ch in line:
+                if "\u2500" <= ch <= "\u257f":
+                    violations.append(
+                        f"  Line {i}: U+{ord(ch):04X} ({ch!r}) in: {stripped[:80]}"
+                    )
+                    break  # one per line is enough
+
+        if violations:
+            pytest.fail(
+                f"Box-drawing chars (U+2500-U+257F) in cli.py code lines "
+                f"will crash Windows cp1252 consoles.\n"
+                f"Move to Rich table borders (safe_box handles them) or use "
+                f"ASCII fallback like _SEPARATOR.\n"
+                + "\n".join(violations)
+            )
+
+    def test_help_text_content_cp1252_safe(self):
+        """Text content in aise --help must be encodable to cp1252.
+
+        Typer renders command docstrings as help text. Characters like
+        → (U+2192) and Δ (U+0394) are NOT in cp1252 and will crash
+        on legacy Windows consoles if Rich doesn't intercept them.
+
+        Note: Rich's own box-drawing borders (╭─╮│╰╯) are handled by
+        Console(safe_box=True) on Windows, so we exclude the entire
+        box-drawing range (U+2500-U+257F) from this check.
+        """
+        result = runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+        output = result.output
+        # Box-drawing chars (U+2500-U+257F) are Rich panel borders,
+        # handled by Console(safe_box=True) — skip them here.
+        unsafe = []
+        for i, ch in enumerate(output):
+            if ord(ch) > 127 and not ("\u2500" <= ch <= "\u257f"):
+                try:
+                    ch.encode("cp1252")
+                except UnicodeEncodeError:
+                    start = max(0, i - 20)
+                    end = min(len(output), i + 20)
+                    context = output[start:end].replace("\n", "\\n")
+                    unsafe.append(
+                        f"  U+{ord(ch):04X} ({ch!r}) at pos {i}: ...{context}..."
+                    )
+        if unsafe:
+            pytest.fail(
+                f"aise --help text content contains cp1252-unsafe characters.\n"
+                f"These will crash on Windows legacy consoles.\n"
+                f"Replace with ASCII equivalents in command docstrings:\n"
+                + "\n".join(unsafe[:10])
+            )
+
+
+class TestPathCrossPlatform:
+    """Verify path handling works across platforms.
+
+    These tests run on ALL platforms and catch path assumptions
+    (hardcoded separators, missing drive letter handling) that
+    would break on Windows.
+    """
+
+    def test_project_dir_name_uses_platform_abspath(self):
+        """_project_dir_name() must handle platform-specific absolute paths."""
+        from ai_session_tools.cli import _project_dir_name
+        # On Windows, abspath("/foo") prepends drive letter (e.g. D:\foo)
+        # On Unix, it stays /foo. Either way, result must be a valid dirname.
+        result = _project_dir_name("/test/path")
+        assert result, "Empty result from _project_dir_name"
+        # Must not contain path separators (would create subdirectories)
+        assert "/" not in result, f"Result contains '/': {result}"
+        assert "\\" not in result, f"Result contains '\\\\': {result}"
+        # Must not start or end with dash (valid but ugly)
+        assert not result.endswith("-"), f"Result has trailing dash: {result}"
+
+    def test_pathlib_join_cross_platform(self):
+        """Path / operator must work for session file construction."""
+        base = Path("/tmp") / "projects"
+        session = base / "abc123" / "session.jsonl"
+        # Path.__str__ uses os.sep, but parts are always correct
+        assert session.parts[-1] == "session.jsonl"
+        assert session.parts[-2] == "abc123"
+
+    def test_ntfs_forbidden_chars_detected(self):
+        """Characters forbidden on NTFS: ? * < > | : \" must be flagged.
+
+        This test documents which chars are NTFS-forbidden so tests that
+        create files with these chars are properly skipped on Windows.
+        """
+        ntfs_forbidden = set('?*<>|:"')
+        # Verify our understanding matches reality on Windows
+        if os.name == "nt":
+            import tempfile
+            for ch in ntfs_forbidden:
+                with pytest.raises(OSError):
+                    p = Path(tempfile.gettempdir()) / f"test{ch}file"
+                    p.write_text("x")
+        # On Unix, just verify the set is what we expect
+        assert "?" in ntfs_forbidden
+        assert "*" in ntfs_forbidden

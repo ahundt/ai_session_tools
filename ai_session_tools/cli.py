@@ -190,8 +190,20 @@ app.add_typer(slash_app, name="slash", rich_help_panel="Domain Groups")     # 's
 app.add_typer(config_app, name="config", rich_help_panel="Configuration")
 app.add_typer(source_app, name="source", rich_help_panel="Source Management")
 
-console = Console()
-err_console = Console(stderr=True)
+# On Windows with legacy cp1252 console, Unicode box-drawing chars (e.g. ─)
+# crash Rich. Detect once at import time and use ASCII-safe alternatives.
+_SAFE_BOX = bool(sys.stdout.encoding and "utf" not in sys.stdout.encoding.lower())
+_SEPARATOR = "-" * 60 if _SAFE_BOX else "─" * 60
+
+
+def _console(**kwargs) -> Console:
+    """Create a Console with platform-safe defaults (ASCII box chars on Windows cp1252)."""
+    kwargs.setdefault("safe_box", _SAFE_BOX)
+    return Console(**kwargs)
+
+
+console = _console()
+err_console = _console(stderr=True)
 
 
 def _get_render_console() -> Console:
@@ -208,7 +220,7 @@ def _get_render_console() -> Console:
         width = os.get_terminal_size(2).columns  # stderr fd when stdout is piped
     except OSError:
         width = 120
-    return Console(width=width)
+    return _console(width=width)
 
 
 # ── aise source CRUD commands ──────────────────────────────────────────────
@@ -582,7 +594,7 @@ def _render_output(
     # When stdout is not a TTY (piped to head, grep, file, etc.), Rich defaults to 80 cols.
     # Use 120 cols instead — prevents column crushing while staying readable in most contexts.
     # sys already imported at cli.py:17; Console already imported at cli.py:24
-    render_console = Console(record=True, width=120) if output else _get_render_console()
+    render_console = _console(record=True, width=120) if output else _get_render_console()
     # Pre-compute all rows once; used for both column suppression check and row insertion.
     # Escape Rich markup in cell values to prevent MarkupError on content like [/spawn-session].
     all_rows = [[_esc(str(v)) for v in spec.row_fn(d)] for d in dicts]
@@ -792,7 +804,7 @@ def _render_invocations_with_context(
     Used by both `messages planning --context-after` and `commands context`.
     """
     truncate = max_chars if max_chars > 0 else None
-    out_console = Console(record=bool(output))
+    out_console = _console(record=bool(output))
     if not invocations:
         out_console.print("[yellow]No invocations found.[/yellow]")
         _write_output(out_console, output)
@@ -839,7 +851,7 @@ def _cfg_default(key: str, fallback):
     """Read user preference from config 'defaults' section, returning fallback if absent.
 
     Lazy-imports config to avoid circular imports and import-time side effects.
-    Config key: 'defaults' → {key: value}
+    Config key: 'defaults' -> {key: value}
     Example: {"defaults": {"format": "json", "max_chars": 500, "provider": "claude"}}
     """
     from ai_session_tools.config import get_config_section  # lazy: config imported later in file
@@ -866,7 +878,7 @@ def _normalize_date_range(
     from ai_session_tools.engine import _parse_date_input
 
     def _fail(label: str, exc: Exception) -> None:
-        Console(stderr=True).print(f"[red]{label}: {exc}[/red]")
+        _console(stderr=True).print(f"[red]{label}: {exc}[/red]")
         raise typer.Exit(1) from exc
 
     resolved_after: Optional[str] = None
@@ -910,7 +922,7 @@ def _normalize_date_range(
             _fail("--until", exc)
             return None, None
         if isinstance(result, tuple):
-            Console(stderr=True).print(
+            _console(stderr=True).print(
                 "[red]--until: interval syntax (A/B) not supported here; use --since A/B[/red]"
             )
             raise typer.Exit(1)
@@ -918,7 +930,7 @@ def _normalize_date_range(
 
     # Warn if the range is inverted (after > before) — no sessions will match.
     if resolved_after and resolved_before and resolved_after > resolved_before:
-        Console(stderr=True).print(
+        _console(stderr=True).print(
             f"[yellow]Warning: --since/--after ({resolved_after[:10]}) is later than "
             f"--until/--before ({resolved_before[:10]}); the date range is inverted and "
             "no sessions will match.[/yellow]"
@@ -1149,7 +1161,7 @@ def _get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] 
 # ── Shared helper functions ───────────────────────────────────────────────────
 
 def _parse_session_set(s: Optional[str]) -> Set[str]:
-    """Parse comma-separated session IDs string to set. Empty string or None → empty set."""
+    """Parse comma-separated session IDs string to set. Empty string or None -> empty set."""
     if not s:
         return set()
     return {x.strip() for x in s.split(",") if x.strip()}
@@ -1173,11 +1185,11 @@ def _parse_list_input(raw: str) -> List[str]:
 
     Examples::
 
-        "a,b,c"                         → ["a", "b", "c"]         (CSV)
-        '["/ar:pn", "/ar:pr"]'          → ["/ar:pn", "/ar:pr"]    (JSON)
-        "['/ar:pn', '/ar:pr']"          → ["/ar:pn", "/ar:pr"]    (Python literal)
-        '[/ar:pn, "/ar:pr"]'            → ["/ar:pn", "/ar:pr"]    (CSV with brackets)
-        "/path/to/list.json"            → contents parsed above   (file path)
+        "a,b,c"                         -> ["a", "b", "c"]         (CSV)
+        '["/ar:pn", "/ar:pr"]'          -> ["/ar:pn", "/ar:pr"]    (JSON)
+        "['/ar:pn', '/ar:pr']"          -> ["/ar:pn", "/ar:pr"]    (Python literal)
+        '[/ar:pn, "/ar:pr"]'            -> ["/ar:pn", "/ar:pr"]    (CSV with brackets)
+        "/path/to/list.json"            -> contents parsed above   (file path)
 
     Empty items (trailing commas, whitespace-only) are always discarded.
     """
@@ -1227,9 +1239,9 @@ def _project_dir_name(path: str) -> str:
     Source: Claude Code TypeScript source, getProjectPath() in utils/path.ts
 
     Examples:
-        /Users/alice/.claude          → -Users-alice--claude
-        /Users/me/my_project          → -Users-me-my-project
-        /var/www/my.site.com/public   → -var-www-my-site-com-public
+        /Users/alice/.claude          -> -Users-alice--claude
+        /Users/me/my_project          -> -Users-me-my-project
+        /var/www/my.site.com/public   -> -var-www-my-site-com-public
     """
     abs_path = os.path.abspath(path)
     return _re.sub(r'[^a-zA-Z0-9-]', '-', abs_path)
@@ -1292,7 +1304,7 @@ def _version_src_path(engine: "AISession", v: FileVersion) -> Path:
 def _resolve_output_path(target: Path) -> Path:
     """Return target path; if it already exists, append .recovered[_N] before the extension.
 
-    Examples: cli.py → cli.recovered.py → cli.recovered_1.py → cli.recovered_2.py → …
+    Examples: cli.py -> cli.recovered.py -> cli.recovered_1.py -> cli.recovered_2.py -> …
     """
     if not target.exists():
         return target
@@ -1583,8 +1595,8 @@ def _do_messages_search(
     tag = f" [tool: {tool}]" if tool else ""
 
     # Resolve effective before/after context window.
-    # --context-after alone → before=0, after=N (most common slash audit pattern).
-    # --context N alone → symmetric (existing behavior unchanged).
+    # --context-after alone -> before=0, after=N (most common slash audit pattern).
+    # --context N alone -> symmetric (existing behavior unchanged).
     eff_before = context_before if context_before >= 0 else (0 if context_after >= 0 else context)
     eff_after  = context_after  if context_after  >= 0 else context
 
@@ -1606,7 +1618,7 @@ def _do_messages_search(
             after_timestamp=after_timestamp,
         )
         ctx_results = ctx_results[:limit or None]
-        out_console = Console(record=bool(output))
+        out_console = _console(record=bool(output))
         if not ctx_results:
             out_console.print(f"[yellow]No messages match query{tag}[/yellow]")
             _write_output(out_console, output)
@@ -1622,7 +1634,7 @@ def _do_messages_search(
         # truncate=None means no truncation (Python slice [:None] returns full string).
         truncate = max_chars if max_chars > 0 else None
         for cm in ctx_results:
-            out_console.print(f"[dim]{'─' * 60}[/dim]")
+            out_console.print(f"[dim]{_SEPARATOR}[/dim]")
             for m in cm.context_before:
                 out_console.print(f"[dim][{m.type.value}] {m.timestamp[:19]}[/dim]")
                 out_console.print(f"[dim]{m.content[:truncate]}[/dim]\n")
@@ -1648,7 +1660,7 @@ def _do_messages_search(
     )
     results = all_results[:limit or None]
 
-    out_console = Console(record=bool(output))
+    out_console = _console(record=bool(output))
     if not results:
         out_console.print(f"[yellow]No messages match query{tag}[/yellow]")
         _write_output(out_console, output)
@@ -1682,7 +1694,7 @@ def _do_messages_search(
         return
 
     # Default table format — use recording console if writing to file
-    render_console = Console(record=True, width=120) if output else _get_render_console()
+    render_console = _console(record=True, width=120) if output else _get_render_console()
     render_console.print(formatter.format_many(results))
     render_console.print(f"\n[bold]Found {len(results)} messages[/bold]")
     if output:
@@ -1717,15 +1729,15 @@ def _parse_pattern_options(raw: List[str]) -> List[tuple]:
     Examples::
         # Repeatable flags (standard):
         --pattern "skip_step:you missed" --pattern "skip_step:you forgot"
-        → [("skip_step", ["you missed", "you forgot"])]
+        -> [("skip_step", ["you missed", "you forgot"])]
 
         # Single bracketed-list value (also accepted):
         --pattern '["skip_step:you missed", "skip_step:you forgot"]'
-        → [("skip_step", ["you missed", "you forgot"])]
+        -> [("skip_step", ["you missed", "you forgot"])]
 
         # Config file list (same format as bracketed value items):
         ["regression:you deleted", "skip_step:you forgot"]
-        → [("regression", ["you deleted"]), ("skip_step", ["you forgot"])]
+        -> [("regression", ["you deleted"]), ("skip_step", ["you forgot"])]
 
     Raises:
         typer.BadParameter: If any entry lacks the required "CATEGORY:REGEX" format.
@@ -1769,10 +1781,10 @@ def _parse_commands_option(raw: Optional[str]) -> Optional[List[str]]:
 
     Examples::
         "/ar:plannew,/ar:pn,/mycommand"
-        → ["/ar:plannew", "/ar:pn", "/mycommand"]
+        -> ["/ar:plannew", "/ar:pn", "/mycommand"]
 
         '["/ar:plannew", "/ar:pn"]'
-        → ["/ar:plannew", "/ar:pn"]
+        -> ["/ar:plannew", "/ar:pn"]
     """
     if not raw:
         return None
@@ -1874,7 +1886,7 @@ def _do_messages_planning(
             commands=commands, return_invocations=True,
         )
         if output:
-            out_console = Console(record=True)
+            out_console = _console(record=True)
             for inv in invocations:
                 out_console.print(f"{inv.command} {inv.timestamp[:19]} {inv.args}")
             _write_output(out_console, output)
@@ -1887,7 +1899,7 @@ def _do_messages_planning(
         commands=commands,
     )
     if output:
-        out_console = Console(record=True)
+        out_console = _console(record=True)
         for r in results:
             out_console.print(f"{r.command}: {r.count}")
         _write_output(out_console, output)
@@ -2032,7 +2044,7 @@ def _do_messages_timeline(
             )
         raise typer.Exit(code=1)
     if output:
-        out_console = Console(record=True)
+        out_console = _console(record=True)
         # Use plain/message format for file output since _render_output uses global console.
         for e in events:
             ts = (e.get("timestamp") or "")[:19]
@@ -2181,11 +2193,11 @@ def _do_search(  # noqa: C901
         )
         raise typer.Exit(1)
 
-    # Normalize "tools" domain → "messages" after validation
+    # Normalize "tools" domain -> "messages" after validation
     if domain == "tools":
         domain = "messages"
 
-    # Validate domain (after "tools"→"messages" normalization)
+    # Validate domain (after "tools"->"messages" normalization)
     if domain is not None and domain not in ("files", "messages"):
         typer.echo(
             f"Error: domain must be 'files', 'messages', or 'tools', got {domain!r}.\n"
@@ -2361,8 +2373,8 @@ def export_recent(
     """Export all sessions from the last N days to a single markdown file.
 
     Examples:
-        aise export recent                            # last 7 days → stdout
-        aise export recent 14 --output week2.md       # last 14 days → file
+        aise export recent                            # last 7 days -> stdout
+        aise export recent 14 --output week2.md       # last 14 days -> file
         aise export recent --project myproject        # filter by project
     """
     engine = _resolve_engine(ctx, provider)
@@ -2472,8 +2484,8 @@ def files_extract(
 
     Examples:
         aise files history cli.py                        # see all versions first
-        aise files extract cli.py                        # latest → stdout
-        aise files extract cli.py --version 2            # v2 → stdout
+        aise files extract cli.py                        # latest -> stdout
+        aise files extract cli.py --version 2            # v2 -> stdout
         aise files extract cli.py > cli.py               # redirect to file
         aise files extract cli.py | pbcopy               # pipe to clipboard
         aise files extract cli.py --restore              # restore to original path
@@ -2507,7 +2519,7 @@ def files_history(
 ) -> None:
     """Show version history of a source file from Claude Code session data. Read-only by default.
 
-    Displays a table of all recorded versions (version number, line count, Δlines, timestamp,
+    Displays a table of all recorded versions (version number, line count, delta-lines, timestamp,
     session ID). READ-ONLY — no files are written unless you use --export or --stdout.
 
     SOURCE FILES ONLY: shows history of files Claude wrote/edited, not the session JSONL files.
@@ -2662,7 +2674,7 @@ def _messages_search_cmd(
     msg_type_str = message_type.value if message_type else None
     # fixed_strings is the inverse of regex: literal by default, regex opt-in
     fixed_strings = not regex
-    # Contradiction check: --type compaction --no-compaction → empty result
+    # Contradiction check: --type compaction --no-compaction -> empty result
     if message_type == MsgFilterType.compaction and exclude_compaction:
         err_console.print("[yellow]Warning:[/yellow] --type compaction --no-compaction contradicts itself. Returning 0 results.")
         raise typer.Exit(0)
@@ -2938,7 +2950,7 @@ def messages_timeline(
         aise messages timeline ab841016 --since 14:00           # events after 2pm
         aise messages timeline ab841016 --output ~/timeline.txt # save to file
     """
-    # Contradiction check: --type compaction --no-compaction → empty result
+    # Contradiction check: --type compaction --no-compaction -> empty result
     if message_type == MsgFilterType.compaction and exclude_compaction:
         err_console.print("[yellow]Warning:[/yellow] --type compaction --no-compaction contradicts itself. Returning 0 results.")
         raise typer.Exit(0)
@@ -3249,7 +3261,7 @@ _register_alias(tools_app, _tools_search_cmd, "search", "find")
 def dates_reference() -> None:
     """Show full date/time format reference for --since, --until, and --when flags."""
     from rich.markdown import Markdown
-    Console().print(Markdown("""\
+    _console().print(Markdown("""\
 # Date/Time Format Reference
 
 All date flags (`--since`, `--until`, `--when`) accept the following formats:
@@ -3813,7 +3825,7 @@ def config_init(
 
 # ── Analysis pipeline configuration ──────────────────────────────────────────
 
-# Pipeline stage mapping: stage name → module path
+# Pipeline stage mapping: stage name -> module path
 _PIPELINE_STEPS = {
     "instruction-history": "ai_session_tools.analysis.extract",
     "analyze":             "ai_session_tools.analysis.analyzer",
@@ -3822,7 +3834,7 @@ _PIPELINE_STEPS = {
     "vocab":               "ai_session_tools.analysis.vocab",
 }
 
-# Pipeline dependencies: stage → (required_predecessor_stage, required_file)
+# Pipeline dependencies: stage -> (required_predecessor_stage, required_file)
 _STEP_DEPS = {
     "graph":    ("analyze", "session_db.json"),
     "organize": ("graph",   "SESSION_GRAPH.json"),
@@ -3942,16 +3954,16 @@ def cmd_analyze(
         ),
     ),
 ) -> None:
-    """Run the full analysis pipeline: qualitative coding → graph → taxonomy symlinks.
+    """Run the full analysis pipeline: qualitative coding -> graph -> taxonomy symlinks.
 
     Runs the full pipeline automatically. Stages are skipped when inputs
     have not changed since the last run (idempotent).
 
     Full pipeline (in order):
-      1. analyze   → session_db.json + VOCABULARY_ANALYSIS.md
-      2. graph     → SESSION_GRAPH.json
-      3. organize  → symlinks + INDEX.md + SESSIONS_FULL.md
-      (instruction-history → USER_INSTRUCTIONS_CLEAN.md if gemini_org_task_session configured)
+      1. analyze   -> session_db.json + VOCABULARY_ANALYSIS.md
+      2. graph     -> SESSION_GRAPH.json
+      3. organize  -> symlinks + INDEX.md + SESSIONS_FULL.md
+      (instruction-history -> USER_INSTRUCTIONS_CLEAN.md if gemini_org_task_session configured)
 
     Re-run one stage with --step (advanced):
         aise analyze --step analyze
