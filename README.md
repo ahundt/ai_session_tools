@@ -30,6 +30,9 @@ JSON and dig through dozens of folders.
 | Read all messages from one session | `aise get ab841016` |
 | Find user correction messages | `aise messages corrections` |
 | Count slash command usage | `aise messages planning` |
+| List slash command invocations with metadata | `aise commands list --since 14d` |
+| See context after a slash command | `aise commands context /ar:plannew` |
+| Pipe session IDs for composable workflows | `aise list --ids-only \| xargs ...` |
 | Export one session to markdown | `aise export session ab841016` |
 | Export recent sessions to markdown | `aise export recent 7 --output week.md` |
 | Manage session source directories | `aise source list` / `aise source add <path>` |
@@ -43,15 +46,17 @@ Works as a CLI tool (`aise`) and as an importable Python library (`from ai_sessi
 
 [autorun](https://github.com/ahundt/autorun) is a Claude Code plugin that adds
 slash commands, hooks, and autonomous task workflows to your editor.  It ships
-with a built-in `/ar:claude-session-tools` skill that exposes `aise` as a
+with a built-in `/ar:ai-session-tools` skill (also available as
+`/ar:claude-session-tools` for backward compatibility) that exposes `aise` as a
 first-class Claude Code command, so you can search and recover session history
 without leaving the editor or switching to a terminal.
 
 **What the integration adds:**
 
-- `/ar:claude-session-tools`: natural-language skill. Describe what you want
-  (`"find the auth bug I fixed last week"`, `"show recent Python files"`) and
-  Claude runs the appropriate `aise` commands and surfaces the results inline
+- `/ar:ai-session-tools` (or `/ar:claude-session-tools`): natural-language skill.
+  Describe what you want (`"find the auth bug I fixed last week"`, `"show recent
+  Python files"`) and Claude runs the appropriate `aise` commands and surfaces
+  the results inline
 - Full access to all `aise` capabilities (search, file history, corrections,
   stats, export) from within a Claude Code conversation
 - Useful after context compaction: ask Claude to recover the previous session
@@ -68,7 +73,7 @@ git clone https://github.com/ahundt/autorun ~/.claude/plugins/autorun
 uv tool install git+https://github.com/ahundt/ai_session_tools
 
 # 3. Use inside Claude Code
-# /ar:claude-session-tools find files I edited yesterday
+# /ar:ai-session-tools find files I edited yesterday
 ```
 
 See [autorun's README](https://github.com/ahundt/autorun) for full setup and
@@ -336,8 +341,11 @@ aise files cross-ref ./cli.py --format json
 ### Search conversation messages
 
 ```bash
-# Full-text search across all sources
+# Full-text search across all sources (literal match, case-insensitive)
 aise messages search "authentication"
+
+# Regex search (use --regex for | OR, .* wildcards, etc.)
+aise messages search "forgot|missed|deleted" --regex
 
 # Narrow to one provider
 aise messages search "error" --provider claude
@@ -345,6 +353,18 @@ aise messages search "error" --provider aistudio
 
 # Only user messages (not assistant)
 aise messages search "error" --type user
+
+# Only slash command messages
+aise messages search "" --type slash --since 14d
+
+# Exclude compaction summaries
+aise messages search "error" --no-compaction
+
+# Asymmetric context windows
+aise messages search "bug" --context-before 2 --context-after 5
+
+# Filter by tool type (show only Write/Edit/Bash calls)
+aise messages search "" --tool Write --since 7d
 
 # More results with truncation
 aise messages search "TODO" --limit 50 --max-chars 200
@@ -406,8 +426,12 @@ Detects messages where you corrected Claude's behavior:
 # Show all correction messages (categorized as regression/skip_step/misunderstanding/incomplete)
 aise messages corrections
 
-# Filter by project
+# Filter by project or session
 aise messages corrections --project myproject
+aise messages corrections --session ab841016
+
+# Session IDs only (for piping to other commands)
+aise messages corrections --since 14d --ids-only
 
 # More results
 aise messages corrections --limit 50
@@ -436,6 +460,39 @@ aise messages planning --commands "/ar:plannew,/ar:pn"
 
 The default **discovery mode** finds every message that starts with `/command` — `/ar:plannew`,
 `/commit`, `/help`, whatever you've used. No configuration required.
+
+### Slash command invocations (Claude Code)
+
+List every individual slash command invocation with timestamp, session, and arguments:
+
+```bash
+# List all slash command invocations
+aise commands list --since 14d
+
+# Filter to a specific command
+aise commands list --command /ar:plannew --since 14d
+
+# Session IDs only (for piping)
+aise commands list --command /ar:plannew --ids-only
+
+# JSON output
+aise commands list --format json --since 14d
+```
+
+### Slash command context (Claude Code)
+
+See what Claude did after each invocation of a command:
+
+```bash
+# Show 5 messages after each /ar:plannew invocation
+aise commands context /ar:plannew --context-after 5
+
+# JSON output
+aise commands context /ar:plannew --format json
+
+# Limit content length
+aise commands context /ar:plannew --max-chars 500
+```
 
 ### Export to markdown
 
