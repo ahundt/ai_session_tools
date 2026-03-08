@@ -2,10 +2,10 @@
 
 ## Version number locations (keep in sync)
 
-| File | Location | Example |
-|------|----------|---------|
-| `pyproject.toml` | line 7: `version = "X.Y.Z"` | `version = "0.3.0"` |
-| `ai_session_tools/__init__.py` | line 22: fallback `__version__ = "X.Y.Z"` | `__version__ = "0.3.0"` |
+| File | Location |
+|------|----------|
+| `pyproject.toml` | line 7: `version = "X.Y.Z"` |
+| `ai_session_tools/__init__.py` | line 61: fallback `__version__ = "X.Y.Z"` |
 
 The canonical version is read at runtime via `importlib.metadata.version("ai_session_tools")` (set by the installed package metadata from `pyproject.toml`). The fallback in `__init__.py` is only used when the package is not installed (e.g. running directly from source without `uv tool install`).
 
@@ -17,3 +17,5 @@ The canonical version is read at runtime via `importlib.metadata.version("ai_ses
 4. Commit: `git commit -m "chore(version): bump to X.Y.Z"`
 5. Reinstall: `uv tool install -e .`
 6. Verify: `aise --version`  # → "aise X.Y.Z"
+7. Tag: `git tag vX.Y.Z`
+8. Push: `git push origin main --tags`
