@@ -75,6 +75,9 @@ jobs:
           # Absolute path isolates tests from real ~/.claude on all platforms.
           # Tests use committed synthetic fixtures at tests/aise-demo/ -- no real user data.
           CLAUDE_CONFIG_DIR: ${{ github.workspace }}/tests/aise-demo
+          # Suppress Rich ANSI escape codes so CLI help text assertions work reliably.
+          NO_COLOR: "1"
+          TTY_COMPATIBLE: "0"
         run: |
           uv run pytest tests/ -m 'not integration' \
             --tb=short -v \
