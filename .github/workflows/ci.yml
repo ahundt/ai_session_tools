@@ -71,6 +71,7 @@ jobs:
         run: uvx ruff check --exit-zero .
 
       - name: Run unit tests
+        shell: bash
         env:
           # Absolute path isolates tests from real ~/.claude on all platforms.
           # Tests use committed synthetic fixtures at tests/aise-demo/ -- no real user data.
