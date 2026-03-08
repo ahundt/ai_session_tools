@@ -36,7 +36,7 @@ from ai_session_tools import (
 )
 from ai_session_tools.cli import app
 
-runner = CliRunner()
+runner = CliRunner(env={"NO_COLOR": "1"})
 
 
 @pytest.fixture
@@ -1706,7 +1706,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["search", "--help"])
         assert result.exit_code == 0
         assert "search" in result.output.lower() or "pattern" in result.output.lower()
@@ -1716,7 +1716,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["files", "--help"])
         assert result.exit_code == 0
 
@@ -1725,7 +1725,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["messages", "--help"])
         assert result.exit_code == 0
 
@@ -1734,7 +1734,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
         assert "pattern" in result.output.lower()
@@ -1744,7 +1744,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["messages", "search", "--help"])
         assert result.exit_code == 0
         assert "query" in result.output.lower()
@@ -1754,7 +1754,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["messages", "get", "--help"])
         assert result.exit_code == 0
         assert "session" in result.output.lower()
@@ -1764,7 +1764,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["extract", "--help"])
         assert result.exit_code == 0
         # Positional arg appears as NAME or name in help, not as --name flag
@@ -1776,7 +1776,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
         assert "session" in result.output.lower()
@@ -1786,7 +1786,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["stats", "--help"])
         assert result.exit_code == 0
 
@@ -1795,7 +1795,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["messages", "search", "--help"])
         assert result.exit_code == 0
         assert "max-chars" in result.output.lower()
@@ -1805,7 +1805,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
         assert "--since" in result.output
@@ -1817,7 +1817,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
         assert "include-sessions" in result.output.lower()
@@ -1828,7 +1828,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["files", "search", "--help"])
         assert result.exit_code == 0
         assert "include-extensions" in result.output.lower()
@@ -1838,7 +1838,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
         assert "max-chars" in result.output.lower()
@@ -1848,7 +1848,7 @@ class TestCLIDualOrdering:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["get", "--help"])
         assert result.exit_code == 0
         assert "format" in result.output.lower()
@@ -2759,7 +2759,7 @@ class TestClaudeDirCliFlag:
         # Create minimal structure so search doesn't crash
         (tmp_path / "projects").mkdir()
         (tmp_path / "recovery").mkdir()
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["--claude-dir", str(tmp_path), "files", "search"])
         # Should use tmp_path as claude dir; engine.projects_dir should be tmp_path/projects
         # The command should succeed (exit 0) or show "No files found"
@@ -3008,7 +3008,7 @@ class TestPositionalArgExtract:
 
         import ai_session_tools.cli as cli_module
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         # Set up tmp recovery dir
         recovery = _make_recovery_dir(tmp_path)
         import os
@@ -3038,7 +3038,7 @@ class TestPositionalArgExtract:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["extract", "--help"])
         assert result.exit_code == 0
         assert "--name" not in result.output
@@ -3051,7 +3051,7 @@ class TestPositionalArgHistory:
         from typer.testing import CliRunner
 
         from ai_session_tools.cli import app
-        runner = CliRunner()
+        runner = CliRunner(env={"NO_COLOR": "1"})
         result = runner.invoke(app, ["files", "history", "--help"])
         assert result.exit_code == 0
         assert "--name" not in result.output
@@ -10179,9 +10179,11 @@ class TestEdgeCaseRegressions:
             "matches_datetime does lexicographic comparison"
         )
         assert spec.since[:4].isdigit(), f"Expected ISO year, got: {spec.since!r}"
-        # Crucially: the filter must actually work
-        assert spec.matches_datetime("2026-03-01T00:00:00"), (
-            "with_since('7d') must pass a recent timestamp"
+        # Crucially: the filter must actually work — use dynamic timestamp
+        from datetime import datetime, timedelta
+        recent_ts = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S")
+        assert spec.matches_datetime(recent_ts), (
+            f"with_since('7d') must pass a timestamp 3 days ago ({recent_ts})"
         )
         assert not spec.matches_datetime("2020-01-01T00:00:00"), (
             "with_since('7d') must exclude old timestamps"
