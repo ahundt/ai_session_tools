@@ -19,3 +19,42 @@ The canonical version is read at runtime via `importlib.metadata.version("ai_ses
 6. Verify: `aise --version`  # → "aise X.Y.Z"
 7. Tag: `git tag vX.Y.Z`
 8. Push: `git push origin main --tags`
+
+## PyPI Publishing (automated via GitHub Actions)
+
+After pushing the tag (step above), GitHub Actions will:
+1. Run the full CI test suite (via reusable `ci.yml` workflow)
+2. Verify the tag version matches `pyproject.toml` version
+3. Build wheel + sdist with `uv build`
+4. Publish to TestPyPI (requires `testpypi` environment)
+5. Publish to PyPI (requires `pypi` environment approval if configured)
+
+### First-time setup (one-time)
+
+1. Create accounts on [pypi.org](https://pypi.org/account/register/) and [test.pypi.org](https://test.pypi.org/account/register/)
+2. Enable 2FA on both accounts (required by PyPI)
+3. Configure **Trusted Publishers** on both sites:
+   - PyPI Project Name: `ai-session-tools`
+   - Owner: `ahundt`
+   - Repository: `ai_session_tools`
+   - Workflow: `publish.yml`
+   - Environment: `pypi` (or `testpypi`)
+4. Create GitHub Environments in repo Settings → Environments:
+   - `testpypi` (no protection rules needed)
+   - `pypi` (add required reviewers for manual approval gate)
+5. Pin action versions to commit SHAs: `npx pin-github-action .github/workflows/publish.yml`
+
+### First-time TestPyPI verification
+
+```bash
+pip install --index-url https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    ai-session-tools
+```
+
+### Manual publishing (fallback)
+
+```bash
+uv build
+uv publish  # uses Trusted Publisher OIDC if run in GitHub Actions
+```

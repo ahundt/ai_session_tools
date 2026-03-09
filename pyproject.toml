@@ -49,6 +49,7 @@ Homepage = "https://github.com/ahundt/ai_session_tools"
 Documentation = "https://github.com/ahundt/ai_session_tools/blob/main/README.md"
 Repository = "https://github.com/ahundt/ai_session_tools"
 Issues = "https://github.com/ahundt/ai_session_tools/issues"
+Changelog = "https://github.com/ahundt/ai_session_tools/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ai_session_tools"]

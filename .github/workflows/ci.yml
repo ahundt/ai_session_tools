@@ -6,6 +6,7 @@ on:
   pull_request:
     branches: [main]
 
+  workflow_call:  # Allow publish.yml to reuse this workflow
 permissions:
   contents: read
   checks: write
@@ -30,13 +31,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install uv and Python
         # setup-uv@v7 is the current recommended version per official uv docs.
         # python-version here replaces actions/setup-python -- setup-uv handles both.
         # enable-cache speeds up installs by caching the uv cache between runs.
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
@@ -89,7 +90,7 @@ jobs:
         # Works on Linux, macOS, and Windows -- all 4 matrix jobs publish results.
         # reporter: java-junit parses the JUnit XML that pytest --junitxml generates.
         # fail-on-error: false prevents publishing from independently failing the job.
-        uses: dorny/test-reporter@v1
+        uses: dorny/test-reporter@d61b558e8df85cb60d09ca3e5b09653b4477cea7 # v1
         if: always()
         with:
           name: "aise Tests (${{ matrix.os }}, py${{ matrix.python-version }})"
