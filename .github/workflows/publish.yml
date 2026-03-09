@@ -14,6 +14,11 @@ on:
 jobs:
   test:
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      checks: write        # needed by dorny/test-reporter in ci.yml
+      pull-requests: write # needed by dorny/test-reporter in ci.yml
+      issues: read
 
   build:
     needs: test
