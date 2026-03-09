@@ -966,7 +966,12 @@ def run_post_a_acts() -> None:
     section("Verification -- same command, shorter window, after the fix")
     pause(1.5)
     _run(f"aise messages corrections --since 7d {PROV}")
-    pause(6.0)
+    # Write a final newline to anchor a PTY event just before the hold pause.
+    # Without this, the last cast event is the final byte of aise output, and
+    # agg/ffmpeg may drop the tail silence during GIF→MP4 conversion.
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    pause(8.0)
 
 
 # ── Recording pipeline ─────────────────────────────────────────────────────────
