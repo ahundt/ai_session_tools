@@ -1054,18 +1054,35 @@ def convert_to_gif(
 
 
 def convert_to_mp4(gif_file: Path = GIF_FILE, mp4_file: Path = MP4_FILE) -> None:
-    """Convert .gif → .mp4 using ffmpeg. Tries hardware accel first, then software."""
+    """Convert .gif → .mp4 using ffmpeg.
+
+    Encoder priority:
+      1. libx264 with -tune animation (universally available, best compression for
+         terminal/animation content — CRF 24 typically yields 300-600 kbps).
+      2. h264_videotoolbox (Apple Silicon hardware, fast but less efficient).
+      3. Bare ffmpeg default (last resort).
+
+    fps=24 in the vf chain produces a constant-frame-rate stream suitable for web
+    distribution (Reddit, etc.).  agg at speed=1.0 emits GIF frames at the 10 ms
+    GIF minimum resolution (100 fps base), so without the fps filter the output
+    would be 100 fps and several times larger than necessary.  24 fps is the cinema
+    standard; terminal recordings need no more than 24-30 fps.
+    """
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         print("[demo] ffmpeg not found — MP4 skipped")
         return
     print(f"Converting to MP4: {mp4_file} ...")
 
-    vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
-    # Try hardware acceleration (Apple Silicon), then libx264, then bare default
+    # fps=24: constant frame rate for web compatibility; scale: ensure even dimensions.
+    vf = "fps=24,scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    # libx264 first: universally available, -tune animation dramatically improves
+    # compression for content with large static regions (terminal recordings).
+    # CRF 24 = good quality/size balance; preset slow = better compression.
     encoders = [
-        ["-c:v", "h264_videotoolbox", "-b:v", "8M", "-color_range", "tv"],
-        ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p"],
+        ["-c:v", "libx264", "-preset", "slow", "-crf", "24",
+         "-tune", "animation", "-pix_fmt", "yuv420p"],
+        ["-c:v", "h264_videotoolbox", "-b:v", "2M", "-color_range", "tv"],
         ["-pix_fmt", "yuv420p"],
     ]
     for enc_flags in encoders:
