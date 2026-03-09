@@ -47,7 +47,7 @@ After pushing the tag (step above), GitHub Actions will:
 ### First-time TestPyPI verification
 
 ```bash
-pip install --index-url https://test.pypi.org/simple/ \
+uv pip install --index-url https://test.pypi.org/simple/ \
     --extra-index-url https://pypi.org/simple/ \
     ai-session-tools
 ```
