@@ -221,12 +221,12 @@ _WEB_SESSION_2 = [
                "grep -n 'verify_token\\|check_auth' /Users/demo/webauth/middleware.py",
                _WEB_CWD),
     _msg(_S2, "user",
-         "Actually wait, that's wrong — you missed the real bug entirely. "
+         "Actually wait, that's wrong, you missed the real bug entirely. "
          "The issue is in token expiry, not the route handler. "
          "Also need to fix the middleware comparison logic.",
          "2026-02-20T14:00:25.000Z", _WEB_CWD, "fix/auth-middleware"),
     _msg(_S2, "assistant",
-         "Found the issue — the middleware is checking token expiry with the wrong timezone. "
+         "Found the issue, the middleware is checking token expiry with the wrong timezone. "
          "The verify_token function uses UTC but the middleware compares against local time.",
          "2026-02-20T14:01:00.000Z", _WEB_CWD),
     _tool_edit(_S2, "2026-02-20T14:01:30.000Z",
@@ -294,7 +294,7 @@ _DATA_SESSION_4 = [
          "Can you add better null handling to the transformer?",
          "2026-02-25T11:00:00.000Z", _DATA_CWD, "fix/null-handling"),
     _msg(_S4, "user",
-         "You forgot to handle None at all — you missed that step. "
+         "You forgot to handle None at all, you missed that step. "
          "The filter_valid_records function still has the original logic, "
          "it regressed from what we had before.",
          "2026-02-25T11:00:05.000Z", _DATA_CWD, "fix/null-handling"),
