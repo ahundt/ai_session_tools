@@ -50,6 +50,7 @@ import uuid
 import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Final
 
 # Strip ANSI escape sequences from subprocess output (Rich may emit them).
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-B0-2]")
@@ -66,6 +67,12 @@ OUTPUT_DIR = Path(__file__).parent.parent  # repo root
 CAST_FILE = OUTPUT_DIR / "demo.cast"
 GIF_FILE  = OUTPUT_DIR / "demo.gif"
 MP4_FILE  = OUTPUT_DIR / "demo.mp4"
+
+# Post A (self-improvement loop) — separate output files so --post-a never
+# collides with --record outputs.
+CAST_FILE_POST_A = OUTPUT_DIR / "post-a.cast"
+GIF_FILE_POST_A  = OUTPUT_DIR / "post-a.gif"
+MP4_FILE_POST_A  = OUTPUT_DIR / "post-a.mp4"
 
 # Set CLAUDE_CONFIG_DIR so aise uses committed fixture data, never ~/.claude.
 # Respect an existing CLAUDE_CONFIG_DIR in the environment so that record()
@@ -106,6 +113,8 @@ _S3 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000003"))
 _S4 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000004"))
 _S5 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000005"))
 _S6 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000006"))
+_S7 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000007"))
+_S8 = str(uuid.UUID("cafe0001-cafe-cafe-cafe-000000000008"))
 
 def _msg(session_id: str, role: str, content, timestamp: str,
          cwd: str | None = None, git_branch: str | None = None) -> str:
@@ -356,6 +365,47 @@ _ML_SESSION_6 = [
          "2026-03-01T10:06:00.000Z", _ML_CWD),
 ]
 
+# ── Sessions S7/S8: after the CLAUDE.md fix — no correction-triggering messages ──
+# Dated 2026-02-27 (2 days before max_ts 2026-03-01) so create_dated_demo_dir()
+# shifts them to ~3 days ago, placing them inside the --since 7d window but with
+# zero corrections, providing the visual before/after contrast for Post A Act 6.
+
+_ML_SESSION_7 = [
+    _msg(_S7, "user",
+         "Add a configuration file for the model training hyperparameters.",
+         "2026-02-27T10:00:00.000Z", _ML_CWD, "feature/config"),
+    _msg(_S7, "assistant",
+         "I'll create a configuration file for the training hyperparameters.",
+         "2026-02-27T10:00:10.000Z", _ML_CWD),
+    _tool_write(_S7, "2026-02-27T10:01:00.000Z",
+                f"{_ML_CWD}/config.py",
+                '"""Training hyperparameter configuration."""\n'
+                "LEARNING_RATE = 0.01\nMAX_ITER = 1000\nTEST_SIZE = 0.2\n"
+                "CV_FOLDS = 5\nRANDOM_STATE = 42\n",
+                _ML_CWD),
+    _msg(_S7, "user",
+         "Looks good. Add a README section for the training config options.",
+         "2026-02-27T10:05:00.000Z", _ML_CWD, "feature/config"),
+    _msg(_S7, "assistant",
+         "Added a README section explaining the training configuration options.",
+         "2026-02-27T10:06:00.000Z", _ML_CWD),
+]
+
+_ML_SESSION_8 = [
+    _msg(_S8, "user",
+         "Run the evaluation pipeline on the test dataset and report results.",
+         "2026-02-27T14:00:00.000Z", _ML_CWD, "feature/eval"),
+    _msg(_S8, "assistant",
+         "Running the evaluation pipeline on the test dataset.",
+         "2026-02-27T14:00:10.000Z", _ML_CWD),
+    _tool_bash(_S8, "2026-02-27T14:01:00.000Z",
+               "uv run python evaluate.py --dataset test.csv --output results/",
+               _ML_CWD),
+    _msg(_S8, "assistant",
+         "Evaluation complete. Results written to results/eval_report.json.",
+         "2026-02-27T14:02:00.000Z", _ML_CWD),
+]
+
 # ── Data generator ─────────────────────────────────────────────────────────────
 
 def create_synthetic_data() -> None:
@@ -369,6 +419,8 @@ def create_synthetic_data() -> None:
         (_DATA_PROJ, _S4, _DATA_SESSION_4),
         (_ML_PROJ,   _S5, _ML_SESSION_5),
         (_ML_PROJ,   _S6, _ML_SESSION_6),
+        (_ML_PROJ,   _S7, _ML_SESSION_7),  # after fix — no corrections (Post A Act 6)
+        (_ML_PROJ,   _S8, _ML_SESSION_8),  # after fix — no corrections (Post A Act 6)
     ]
 
     for proj_dir, session_id, messages in sessions:
@@ -686,6 +738,71 @@ def _build_banner() -> str:
 BANNER = _build_banner()
 
 
+def _build_post_a_banner() -> str:
+    """Build the Post A intro banner for the self-improvement loop demo."""
+    W = 90
+    BOX  = "\033[36m"
+    CYAN = "\033[96m"
+    BOLD = "\033[1m"
+    GRAY = "\033[90m"
+    RST  = "\033[0m"
+
+    # Same helper closures as _build_banner() — see that function for design notes.
+    def top() -> str:
+        return f"{BOX}  ╔{'═' * W}╗{RST}"
+    def sep() -> str:
+        return f"{BOX}  ╠{'═' * W}╣{RST}"
+    def bot() -> str:
+        return f"{BOX}  ╚{'═' * W}╝{RST}"
+    def row(text: str = "", style: str = "") -> str:
+        content = (" " + text).ljust(W)
+        return f"{BOX}  ║{RST}{style}{content}{RST}{BOX}║{RST}"
+    def crow(text: str = "", style: str = "") -> str:
+        content = text.center(W)
+        return f"{BOX}  ║{RST}{style}{content}{RST}{BOX}║{RST}"
+    def cmd_row(cmd: str, desc: str, cmd_width: int = 26) -> str:
+        indent = "    "
+        arrow  = "  →  "
+        cmd_padded = cmd.ljust(cmd_width)
+        padding = " " * max(0, W - 1 - len(indent) - cmd_width - len(arrow) - len(desc))
+        return (
+            f"{BOX}  ║{RST} {indent}"
+            f"{BOLD}{CYAN}{cmd_padded}{RST}"
+            f"{GRAY}{arrow}{desc}{RST}"
+            f"{padding}{BOX}║{RST}"
+        )
+
+    lines = [
+        "",
+        top(),
+        row(),
+        crow("aise: the Claude Code self-improvement loop", style=BOLD),
+        row(),
+        crow("github.com/ahundt/ai_session_tools"),
+        sep(),
+        row(),
+        row("  Commands shown in this demo:"),
+        row(),
+        cmd_row("aise messages corrections", "AI correction patterns, auto-classified"),
+        row(),
+        cmd_row("aise messages search",      "search all your messages across sessions"),
+        row(),
+        cmd_row("aise messages corrections", "verify the loop closed after the fix"),
+        row(),
+        sep(),
+        row(),
+        crow("Install: uv tool install git+https://github.com/ahundt/ai_session_tools"),
+        crow("Claude Code: /ar:claude-session-tools  (via autorun: github.com/ahundt/autorun)",
+             style=GRAY),
+        bot(),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+BANNER_POST_A = _build_post_a_banner()
+
+
 def _type(text: str, delay: float = 0.04) -> None:
     """Write text to stdout character by character with typing effect."""
     if _TIMED:
@@ -796,9 +913,65 @@ def run_demo_acts() -> None:
     pause(6.0)
 
 
+def run_post_a_acts() -> None:
+    """Execute Post A acts (self-improvement loop demo). Called inside asciinema."""
+    sys.stdout.write("\033[H\033[2J")
+    sys.stdout.flush()
+    sys.stdout.write(BANNER_POST_A + "\n")
+    sys.stdout.flush()
+    pause(4.0)
+
+    PROV = "--provider claude"
+
+    # ── Act 1: corrections --since 30d ────────────────────────────────────────
+    section("Corrections -- 30 days of patterns, auto-classified")
+    pause(1.5)
+    _run(f"aise messages corrections --since 30d {PROV}")
+    pause(6.0)
+
+    # ── Act 2: all user messages --since 30d ──────────────────────────────────
+    section("Your messages -- everything you wrote across sessions this month")
+    pause(1.5)
+    _run(f"aise messages search '' --type user --since 30d {PROV}")
+    pause(5.0)
+
+    # ── Act 3: regex search with context ──────────────────────────────────────
+    section("Unclassified feedback -- regex search + context-after")
+    pause(1.5)
+    _run(
+        f"aise messages search 'forgot|skip' --type user --regex"
+        f" --context-after 2 {PROV}"
+    )
+    pause(5.0)
+
+    # ── Act 4: pipeline — session IDs from corrections into targeted search ────
+    # shell=True (inside _run) makes the pipe work correctly on macOS/Linux.
+    # {{}} in the f-string produces literal {} which xargs needs for -I{} placeholder.
+    section("Pipeline -- corrections IDs into targeted session search")
+    pause(1.5)
+    _run(
+        f"aise messages corrections --since 14d --ids-only {PROV}"
+        f" | xargs -I{{}} aise messages search 'you forgot'"
+        f" --session {{}} --context-after 3 {PROV}"
+    )
+    pause(6.0)
+
+    # ── Act 5: the CLAUDE.md fix — typed display only, no aise command ─────────
+    section("The fix -- one line in CLAUDE.md")
+    pause(1.5)
+    _type("Always use `uv run python` instead of `python3` or `python`.\n")
+    pause(3.0)
+
+    # ── Act 6: corrections --since 7d — verify the loop closed ────────────────
+    section("Verification -- same command, shorter window, after the fix")
+    pause(1.5)
+    _run(f"aise messages corrections --since 7d {PROV}")
+    pause(6.0)
+
+
 # ── Recording pipeline ─────────────────────────────────────────────────────────
 
-def record(cast_file: Path = CAST_FILE) -> None:
+def record(cast_file: Path = CAST_FILE, *, acts_flag: str = "--run-acts") -> None:
     """Record the demo with asciinema."""
     asciinema = shutil.which("asciinema")
     if not asciinema:
@@ -821,7 +994,7 @@ def record(cast_file: Path = CAST_FILE) -> None:
 
     # asciinema v3 API: --command, --window-size COLSxROWS, --capture-env
     # Use asciicast-v2 format for compatibility with agg 1.7.0
-    cmd = f"{sys.executable} {__file__} --run-acts"
+    cmd = f"{sys.executable} {__file__} {acts_flag}"
     # Pass dated_dir via CLAUDE_CONFIG_DIR so run_demo_acts() uses shifted timestamps.
     # DEMO_ENV respects this env var (see definition above) so all aise commands
     # inside --run-acts will target the dated tmp dir, not the committed fixtures.
@@ -841,8 +1014,21 @@ def record(cast_file: Path = CAST_FILE) -> None:
     print(f"Recording saved to {cast_file}")
 
 
-def convert_to_gif(cast_file: Path = CAST_FILE, gif_file: Path = GIF_FILE) -> None:
-    """Convert .cast → .gif using agg."""
+def convert_to_gif(
+    cast_file: Path = CAST_FILE,
+    gif_file: Path = GIF_FILE,
+    *,
+    speed: float = 0.75,
+) -> None:
+    """Convert .cast → .gif using agg.
+
+    Args:
+        cast_file: Source .cast file.
+        gif_file:  Destination .gif file.
+        speed:     Playback speed multiplier passed to agg (default 0.75 = 33% slower
+                   than recorded, matching the standard demo pacing). Use 1.0 for
+                   real-time playback (e.g. Post A, which has shorter built-in pauses).
+    """
     agg = shutil.which("agg")
     if not agg:
         print("[demo] agg not found — GIF skipped")
@@ -854,7 +1040,7 @@ def convert_to_gif(cast_file: Path = CAST_FILE, gif_file: Path = GIF_FILE) -> No
         "--theme", "dracula",
         "--font-size", "16",       # readable at 160-col width; agg reads cols/rows from cast
         "--renderer", "fontdue",   # vector-quality anti-aliased text (vs default bitmap)
-        "--speed", "0.75",
+        "--speed", str(speed),
         "--idle-time-limit", "10",
         "--last-frame-duration", "5",
         "--quiet",
@@ -891,23 +1077,52 @@ def convert_to_mp4(gif_file: Path = GIF_FILE, mp4_file: Path = MP4_FILE) -> None
 
 # ── Verification ───────────────────────────────────────────────────────────────
 
-def verify_recording(cast_file: Path = CAST_FILE) -> bool:
-    """Parse the asciinema cast to verify expected content appeared."""
+# Checks for the default --record demo. Each entry: (fragment, description).
+# Fragment must appear in command OUTPUT (not in typed keystroke stream).
+_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
+    ("Sessions:",        "Act 1: stats shows Sessions: label (table format)"),
+    ("accuracy",         "Act 2: recent user messages shows S6 content"),
+    ("cafe0001",         "Act 3: list shows synthetic session UUIDs"),
+    ("authentication",   "Act 4: message search finds authentication"),
+    (".py",              "Act 5: files search shows Python files"),
+    ("corrections",      "Act 6: corrections command shows AI correction history"),
+    ("cross-validation", "Act 7: session get shows ML session content"),
+)
+
+# Checks for the --post-a self-improvement loop demo.
+_POST_A_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
+    ("regression",  "Act 1: regression category present in corrections output"),
+    ("skip_step",   "Act 1: skip_step category present in corrections output"),
+    ("accuracy",    "Act 2: user message stream shows fixture message text"),
+    ("handle None", "Act 3: regex search output shows matched fixture message"),
+    # Act 4: pipeline search output — fixture message starts with capital 'You forgot'.
+    # The typed command is char-by-char (never contiguous in cast); check output instead.
+    ("You forgot",  "Act 4: pipeline search output shows correction context"),
+    # Act 5: _type() is char-by-char so the rule text is never contiguous in cast events.
+    # Check the section header written by section() via sys.stdout.write() instead.
+    ("CLAUDE.md",   "Act 5: CLAUDE.md fix section header displayed"),
+    ("corrections", "Act 6: verification corrections command produced output"),
+)
+
+
+def verify_recording(
+    cast_file: Path = CAST_FILE,
+    checks: tuple[tuple[str, str], ...] | None = None,
+) -> bool:
+    """Parse the asciinema cast to verify expected content appeared.
+
+    Args:
+        cast_file: Path to the .cast file to verify.
+        checks: Sequence of (fragment, description) pairs. Defaults to
+                _VERIFY_CHECKS (the standard demo checks) when None.
+    """
+    if checks is None:
+        checks = _VERIFY_CHECKS
     if not cast_file.exists():
         print(f"Cast file not found: {cast_file}")
         return False
 
     content = cast_file.read_text()
-    # Check for text that appears in command OUTPUT (not typed chars, which are split across events)
-    checks = [
-        ("Sessions:",          "Act 1: stats shows Sessions: label (table format)"),
-        ("accuracy",           "Act 2: recent user messages shows S6 content"),
-        ("cafe0001",           "Act 3: list shows synthetic session UUIDs"),
-        ("authentication",     "Act 4: message search finds authentication"),
-        (".py",                "Act 5: files search shows Python files"),
-        ("corrections",         "Act 6: corrections command shows AI correction history"),
-        ("cross-validation",   "Act 7: session get shows ML session content"),
-    ]
     passed = 0
     for fragment, description in checks:
         if fragment in content:
@@ -1114,6 +1329,12 @@ def main() -> None:
     parser.add_argument("--run-acts",  action="store_true", help="[internal] Run demo acts inside asciinema")
     parser.add_argument("--setup",     action="store_true", help="Create synthetic data only")
     parser.add_argument("--cleanup",   action="store_true", help="Remove synthetic data")
+    parser.add_argument("--post-a",          action="store_true",
+                        help="Record Post A (self-improvement loop) cast + GIF/MP4")
+    parser.add_argument("--run-post-a-acts", action="store_true",
+                        help="[internal] Run Post A acts inside asciinema subprocess")
+    parser.add_argument("--verify-post-a",   action="store_true",
+                        help="Verify Post A recording contains expected output")
     args = parser.parse_args()
 
     if args.run_acts:
@@ -1153,6 +1374,28 @@ def main() -> None:
         cleanup_synthetic_data()
         print(f"Removed {DEMO_DIR}")
         print("Note: re-commit tests/aise-demo/ if you removed the fixture directory.")
+
+    elif args.run_post_a_acts:
+        # Called by asciinema subprocess — run Post A acts with timing delays
+        _TIMED = True
+        create_synthetic_data()
+        run_post_a_acts()
+
+    elif args.post_a:
+        create_synthetic_data()
+        record(CAST_FILE_POST_A, acts_flag="--run-post-a-acts")
+        convert_to_gif(CAST_FILE_POST_A, GIF_FILE_POST_A, speed=1.0)
+        convert_to_mp4(GIF_FILE_POST_A, MP4_FILE_POST_A)
+        verify_recording(CAST_FILE_POST_A, checks=_POST_A_VERIFY_CHECKS)
+        print("\nDone! Post A files:")
+        for f in [CAST_FILE_POST_A, GIF_FILE_POST_A, MP4_FILE_POST_A]:
+            if f.exists():
+                size_kb = f.stat().st_size // 1024
+                print(f"  {f}  ({size_kb} KB)")
+
+    elif args.verify_post_a:
+        ok = verify_recording(CAST_FILE_POST_A, checks=_POST_A_VERIFY_CHECKS)
+        sys.exit(0 if ok else 1)
 
     else:
         parser.print_help()
