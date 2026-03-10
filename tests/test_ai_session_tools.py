@@ -14352,3 +14352,222 @@ class TestPathCrossPlatform:
                 p.write_text("x")
         # On any platform, verify the set is non-empty (documentation test)
         assert "?" in ntfs_reliably_forbidden, "Expected '?' in NTFS forbidden set"
+
+
+# ─── Regression tests: bugs fixed in commit b62e070 ───────────────────────────
+
+class TestMarkupErrorRegression:
+    """Regression: messages search --context N must not crash on Rich-tag-like content.
+
+    Bug: MarkupError: closing tag '[/claude-skill-builder invocation]' at position
+    15144 doesn't match any open tag. Root cause: three lines in _do_messages_search
+    context display block at cli.py:1640/1642/1645 were missing _esc() calls.
+    """
+
+    def test_context_search_no_crash_on_rich_markup_in_content(self, tmp_path):
+        """messages search --context 1 must not crash when message contains [/tag] text."""
+        content = "[/claude-skill-builder invocation]\nsome work done here"
+        _make_session_jsonl(tmp_path, "markup-test-uuid-0001", content)
+        result = runner.invoke(
+            app,
+            ["--provider", "claude", "messages", "search", "invocation", "--context", "1"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(tmp_path)},
+        )
+        assert result.exit_code == 0, (
+            f"messages search crashed on Rich-markup-like content (MarkupError regression):\n"
+            f"{result.output}\n{result.exception}"
+        )
+
+    def test_context_search_no_crash_on_ar_tag_in_content(self, tmp_path):
+        """messages search must not crash when content contains /ar:plannew-style tags."""
+        content = "Please run [/ar:plannew] to start a new plan with [bold] text"
+        _make_session_jsonl(tmp_path, "markup-test-uuid-0002", content)
+        result = runner.invoke(
+            app,
+            ["--provider", "claude", "messages", "search", "plan", "--context", "1"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(tmp_path)},
+        )
+        assert result.exit_code == 0, (
+            f"messages search crashed on [/tag] content (MarkupError regression):\n"
+            f"{result.output}\n{result.exception}"
+        )
+
+    def test_context_search_no_crash_on_closing_tag_in_content(self, tmp_path):
+        """Context display must not crash when context messages contain unmatched closing tags."""
+        projects = _make_projects_with_sessions(tmp_path)
+        # Add a session with a closing Rich tag in a message that will appear in context
+        proj = tmp_path / "projects" / "-markup-proj"
+        proj.mkdir(parents=True, exist_ok=True)
+        sid = "markup-ctx-0003-0000-0000-000000000000"
+        lines = [
+            json.dumps({"sessionId": sid, "type": "user",
+                        "timestamp": "2026-01-24T10:00:00.000Z",
+                        "message": {"role": "user", "content": "trigger_word_xyz"}}),
+            json.dumps({"sessionId": sid, "type": "user",
+                        "timestamp": "2026-01-24T10:01:00.000Z",
+                        "message": {"role": "user",
+                                    "content": "[/bold][/dim] after the trigger"}}),
+        ]
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines))
+        result = runner.invoke(
+            app,
+            ["--provider", "claude", "messages", "search", "trigger_word_xyz",
+             "--context", "1"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects")},
+        )
+        assert result.exit_code == 0, (
+            f"Context display crashed on closing-tag content (MarkupError regression):\n"
+            f"{result.output}\n{result.exception}"
+        )
+
+
+class TestPlainDefaultFormat:
+    """Regression: default output format must be plain text (no Rich box-drawing chars).
+
+    Bug: All table output used Rich boxes. When captured inside Claude Code the box
+    characters cost extra tokens and render poorly. PTY presence in Claude Code Bash
+    sessions makes TTY detection unreliable, so plain is now the permanent default.
+    Fix: _cfg_default("format", "plain") instead of "table" in _render_output().
+    """
+
+    # Box-drawing chars produced by Rich table borders (not in plain output)
+    _BOX_CHARS = set("┌┐└┘├┤┬┴┼─│╭╮╰╯")
+
+    def _has_box_chars(self, text: str) -> bool:
+        return bool(self._BOX_CHARS & set(text))
+
+    def test_list_default_format_is_plain(self, tmp_path, monkeypatch):
+        """aise list with no --format flag must not contain box-drawing characters."""
+        _make_session_jsonl(tmp_path, "plain-fmt-uuid-0001", "some work")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["list", "--provider", "claude"])
+        assert result.exit_code == 0
+        assert not self._has_box_chars(result.output), (
+            f"aise list default output contains box-drawing characters (table format).\n"
+            f"Expected plain text. Output:\n{result.output}"
+        )
+
+    def test_list_format_table_produces_box_chars(self, tmp_path, monkeypatch):
+        """aise list --format table must produce box-drawing characters (table format works)."""
+        _make_session_jsonl(tmp_path, "plain-fmt-uuid-0002", "some work")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
+        result = runner.invoke(app, ["list", "--provider", "claude", "--format", "table"])
+        assert result.exit_code == 0
+        assert self._has_box_chars(result.output), (
+            f"aise list --format table must produce box chars. Output:\n{result.output}"
+        )
+
+    def test_messages_search_default_format_is_plain(self, tmp_path):
+        """messages search with no --format flag must not produce box-drawing characters."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "messages", "search", "feature"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+        assert not self._has_box_chars(result.output), (
+            f"messages search default output contains box chars.\nOutput:\n{result.output}"
+        )
+
+    def test_config_show_default_format_is_plain(self, tmp_path):
+        """config show with no --format flag must not produce box-drawing characters."""
+        import ai_session_tools.config as cfg_mod
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"planning_commands": ["/mycommand"]}))
+        cfg_mod._config_cache = None
+        result = runner.invoke(app, ["config", "show"], env={
+            "AI_SESSION_TOOLS_PROJECTS": str(tmp_path / "projects"),
+            "AI_SESSION_TOOLS_CONFIG": str(cfg),
+        })
+        cfg_mod._config_cache = None
+        assert result.exit_code == 0
+        assert not self._has_box_chars(result.output), (
+            f"config show default output contains box chars.\nOutput:\n{result.output}"
+        )
+
+    def test_source_list_default_format_is_plain(self, tmp_path, monkeypatch):
+        """source list with no --format flag must not produce box-drawing characters."""
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
+        monkeypatch.setenv("AI_SESSION_TOOLS_CONFIG", str(tmp_path / "config.json"))
+        result = runner.invoke(app, ["source", "list"])
+        assert result.exit_code == 0
+        assert not self._has_box_chars(result.output), (
+            f"source list default output contains box chars.\nOutput:\n{result.output}"
+        )
+
+    def test_files_history_default_format_is_plain(self, tmp_path, monkeypatch):
+        """files history with no --format flag must not produce box-drawing characters."""
+        full_sid = "plain-hist-0001-0000-0000-000000000001"
+        recovery = tmp_path / "recovery"
+        vers_dir = recovery / f"session_all_versions_{full_sid}"
+        vers_dir.mkdir(parents=True)
+        (vers_dir / "login.py_v000001_line_3.txt").write_text("def login():\n    pass\n")
+        monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path / "projects"))
+        monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(recovery))
+        result = runner.invoke(app, ["files", "history", "login.py"])
+        assert result.exit_code == 0, (
+            f"files history failed. Output:\n{result.output}\n{result.exception}"
+        )
+        assert not self._has_box_chars(result.output), (
+            f"files history default output contains box chars.\nOutput:\n{result.output}"
+        )
+
+
+class TestOutputFlagWithPlainDefault:
+    """Regression: --output FILE must create a file when format is default (plain).
+
+    Bug: _render_output() plain path used console.print() and returned early,
+    never writing to file. This silently dropped --output FILE in plain mode.
+    Exposed by making plain the default format.
+    """
+
+    def test_corrections_output_flag_creates_file_with_plain_default(self, tmp_path):
+        """messages corrections --output FILE creates a file with default (plain) format."""
+        projects = _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "corrections_plain.txt"
+        runner.invoke(
+            app,
+            ["--provider", "claude", "messages", "corrections",
+             "--output", str(output_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert output_file.exists(), (
+            "--output FILE must create a file in default plain format "
+            "(regression: plain path silently dropped --output)"
+        )
+
+    def test_search_output_flag_creates_file_with_plain_default(self, tmp_path):
+        """messages search --output FILE creates a file with default (plain) format."""
+        projects = _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "search_plain.txt"
+        runner.invoke(
+            app,
+            ["--provider", "claude", "messages", "search", "feature",
+             "--output", str(output_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert output_file.exists(), (
+            "messages search --output FILE must create a file in default plain format "
+            "(regression: plain path silently dropped --output)"
+        )
+
+    def test_output_file_contains_session_data(self, tmp_path):
+        """--output FILE content must contain actual session data, not just an empty file."""
+        projects = _make_projects_with_sessions(tmp_path)
+        output_file = tmp_path / "search_data.txt"
+        runner.invoke(
+            app,
+            ["--provider", "claude", "messages", "search", "feature",
+             "--output", str(output_file)],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert output_file.exists(), "Output file must be created"
+        content = output_file.read_text()
+        assert content.strip(), "Output file must not be empty"
+        # "feature" appears in the session content so results must be non-empty
+        assert "feature" in content.lower(), (
+            f"Output file must contain search result content.\n"
+            f"Got:\n{content}"
+        )

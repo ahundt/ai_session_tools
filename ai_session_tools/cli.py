@@ -1413,7 +1413,7 @@ def _do_history_display(
     Supports fmt='table' (Rich table), 'json', 'csv', 'plain'.
     """
     if fmt is None:
-        fmt = _cfg_default("format", "table")
+        fmt = _cfg_default("format", "plain")
     if versions is None:
         versions = engine.get_versions(name)
     if not versions:
@@ -1599,7 +1599,7 @@ def _do_messages_search(
     if max_chars is None:
         max_chars = _cfg_default("max_chars", 0)
     if fmt is None:
-        fmt = _cfg_default("format", "table")
+        fmt = _cfg_default("format", "plain")
     tag = f" [tool: {tool}]" if tool else ""
 
     # Resolve effective before/after context window.
@@ -2292,7 +2292,7 @@ def _do_stats(
 ) -> None:
     """Show recovery statistics. Default since=None, until=None: all sessions shown."""
     if fmt is None:
-        fmt = _cfg_default("format", "table")
+        fmt = _cfg_default("format", "plain")
     stats = engine.get_statistics(since=since, until=until)
     sessions = stats.total_sessions
     files = stats.total_files
