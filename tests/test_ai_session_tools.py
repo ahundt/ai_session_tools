@@ -7633,7 +7633,7 @@ class TestBug6DisplayFormatting:
         _make_session_jsonl(tmp_path, "a1b2c3d4-e5f6-7890-abcd-ef1234567891", "provider col test")
         monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
         monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
-        result = runner.invoke(app, ["list", "--provider", "claude"])
+        result = runner.invoke(app, ["list", "--provider", "claude", "--format", "table"])
         assert result.exit_code == 0
         assert "Provider" in result.output, f"Provider column missing from list output:\n{result.output}"
 
@@ -10996,7 +10996,7 @@ class TestRoundOneRegressions:
             (proj / f"{sid}.jsonl").write_text(line)
         monkeypatch.setenv("AI_SESSION_TOOLS_PROJECTS", str(tmp_path))
         monkeypatch.setenv("AI_SESSION_TOOLS_RECOVERY", str(tmp_path / "recovery"))
-        result = runner.invoke(app, ["list", "--provider", "claude"])
+        result = runner.invoke(app, ["list", "--provider", "claude", "--format", "table"])
         assert result.exit_code == 0
         assert "Messages" in result.output, (
             f"Messages column must show even when all 0; got:\n{result.output}")

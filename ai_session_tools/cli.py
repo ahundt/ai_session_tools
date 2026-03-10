@@ -226,7 +226,7 @@ def _get_render_console() -> Console:
 # ── aise source CRUD commands ──────────────────────────────────────────────
 
 @source_app.command("list")
-def source_list(fmt: str = typer.Option("table", "--format", "-f", help="Output format: table or json")) -> None:
+def source_list(fmt: Optional[str] = typer.Option(None, "--format", "-f", help="Output format: table, json, plain. Default: plain.")) -> None:
     """Show all active sources (auto-detected + configured).
 
     Example:
@@ -268,6 +268,12 @@ def source_list(fmt: str = typer.Option("table", "--format", "-f", help="Output 
 
     if fmt == "json":
         console.print(json.dumps(rows, indent=2))
+        return
+
+    if fmt in ("plain", "csv") or fmt is None:
+        for r in rows:
+            exists = "yes" if r["exists"] else "no"
+            console.print(f"{r['type']}  {r['path']}  {r['configured']}  {exists}", markup=False)
         return
 
     from rich.table import Table
@@ -563,7 +569,7 @@ def _render_output(
                 instead of stdout. For other formats, writes Rich text to file.
     """
     if fmt is None:
-        fmt = _cfg_default("format", "table")
+        fmt = _cfg_default("format", "plain")
     if not items:
         console.print(f"[yellow]{empty_msg}[/yellow]")
         return
@@ -585,9 +591,11 @@ def _render_output(
             sys.stdout.write(json_text)
         return
     if fmt in ("csv", "plain"):
-        for d in dicts:
-            line = spec.plain_fn(d) if spec.plain_fn else "  ".join(str(v) for v in spec.row_fn(d))
+        lines = [spec.plain_fn(d) if spec.plain_fn else "  ".join(str(v) for v in spec.row_fn(d)) for d in dicts]
+        for line in lines:
             console.print(line, markup=False)
+        if output:
+            Path(output).expanduser().write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
     # Default: Rich table
     from rich.table import Table
@@ -1434,7 +1442,7 @@ def _do_history_display(
     if fmt == "json":
         sys.stdout.write(json.dumps(rows, indent=2) + "\n")
         return
-    if fmt in ("csv", "plain"):
+    if fmt in ("csv", "plain") or fmt is None:
         for r in rows:
             console.print(f"{r['version']}  {r['lines']}  {r['delta_lines']}  {r['timestamp']}  {r['session']}")
         return
@@ -1637,12 +1645,12 @@ def _do_messages_search(
             out_console.print(f"[dim]{_SEPARATOR}[/dim]")
             for m in cm.context_before:
                 out_console.print(f"[dim][{m.type.value}] {m.timestamp[:19]}[/dim]")
-                out_console.print(f"[dim]{m.content[:truncate]}[/dim]\n")
+                out_console.print(f"[dim]{_esc(m.content[:truncate])}[/dim]\n")
             out_console.print(f"[bold cyan][{cm.match.type.value}] {cm.match.timestamp[:19]}[/bold cyan]")
-            out_console.print(f"{cm.match.content[:truncate]}\n")
+            out_console.print(f"{_esc(cm.match.content[:truncate])}\n")
             for m in cm.context_after:
                 out_console.print(f"[dim][{m.type.value}] {m.timestamp[:19]}[/dim]")
-                out_console.print(f"[dim]{m.content[:truncate]}[/dim]\n")
+                out_console.print(f"[dim]{_esc(m.content[:truncate])}[/dim]\n")
         out_console.print(f"\n[bold]Found {len(ctx_results)} matches{tag}[/bold]")
         _write_output(out_console, output)
         return
@@ -3588,7 +3596,7 @@ def config_path() -> None:
 
 @config_app.command("show")
 def config_show(
-    fmt: str = typer.Option("table", "--format", "-f", help="Output format: table, json, plain."),
+    fmt: Optional[str] = typer.Option(None, "--format", "-f", help="Output format: table, json, plain. Default: plain."),
 ) -> None:
     """Show the effective configuration (file contents + resolved path).
 
@@ -3618,7 +3626,7 @@ def config_show(
         console.print("[dim]File exists but is empty (no keys set).[/dim]")
         return
 
-    if fmt in ("plain", "csv"):
+    if fmt in ("plain", "csv") or fmt is None:
         for k, v in cfg.items():
             console.print(f"{k}: {v}")
         return
