@@ -211,46 +211,29 @@ _WEB_SESSION_1 = [
 
 _WEB_SESSION_2 = [
     _msg(_S2, "user",
-         "The authentication middleware is returning 403 for valid tokens. "
-         "Can you investigate and fix the issue?",
-         "2026-02-20T14:00:00.000Z", _WEB_CWD, "fix/auth-middleware"),
+         "Run the auth test suite to verify the JWT implementation works correctly.",
+         "2026-02-20T14:00:00.000Z", _WEB_CWD, "fix/auth-tests"),
     _msg(_S2, "assistant",
-         "I'll investigate the authentication middleware issue. Let me check the token verification logic.",
+         "I'll run the auth test suite to verify the JWT implementation.",
          "2026-02-20T14:00:10.000Z", _WEB_CWD),
     _tool_bash(_S2, "2026-02-20T14:00:15.000Z",
-               "grep -n 'verify_token\\|check_auth' /Users/demo/webauth/middleware.py",
+               "python3 -m pytest tests/test_auth.py -v",
                _WEB_CWD),
     _msg(_S2, "user",
-         "Actually wait, that's wrong, you missed the real bug entirely. "
-         "The issue is in token expiry, not the route handler. "
-         "Also need to fix the middleware comparison logic.",
-         "2026-02-20T14:00:25.000Z", _WEB_CWD, "fix/auth-middleware"),
+         "you used python3 again, this regressed to the old behavior, "
+         "got a ModuleNotFoundError because the packages are not installed globally. "
+         "Always use uv run python.",
+         "2026-02-20T14:00:25.000Z", _WEB_CWD, "fix/auth-tests"),
     _msg(_S2, "assistant",
-         "Found the issue, the middleware is checking token expiry with the wrong timezone. "
-         "The verify_token function uses UTC but the middleware compares against local time.",
+         "I'll use uv run python for all script execution. "
+         "The project dependencies are only available through uv.",
+         "2026-02-20T14:00:30.000Z", _WEB_CWD),
+    _tool_bash(_S2, "2026-02-20T14:00:35.000Z",
+               "uv run python -m pytest tests/test_auth.py -v",
+               _WEB_CWD),
+    _msg(_S2, "assistant",
+         "All tests passing with uv run python. The JWT implementation is working correctly.",
          "2026-02-20T14:01:00.000Z", _WEB_CWD),
-    _tool_edit(_S2, "2026-02-20T14:01:30.000Z",
-               f"{_WEB_CWD}/auth/jwt.py",
-               "exp': time.time() + expires_in",
-               "exp': time.time() + expires_in  # UTC timestamp",
-               _WEB_CWD),
-    _tool_edit(_S2, "2026-02-20T14:01:45.000Z",
-               f"{_WEB_CWD}/middleware.py",
-               "if current_time > payload['exp']:",
-               "if time.time() > payload['exp']:  # compare UTC",
-               _WEB_CWD),
-    _msg(_S2, "user",
-         "Also update the tests to cover the timezone fix.",
-         "2026-02-20T14:05:00.000Z", _WEB_CWD, "fix/auth-middleware"),
-    _tool_edit(_S2, "2026-02-20T14:05:30.000Z",
-               f"{_WEB_CWD}/tests/test_auth.py",
-               "def test_verify_invalid_token_returns_none():",
-               "def test_expired_token_returns_none():\n    token = create_token('user-1', expires_in=-1)\n    assert verify_token(token) is None\n\ndef test_verify_invalid_token_returns_none():",
-               _WEB_CWD),
-    _msg(_S2, "assistant",
-         "Fixed the timezone issue and added a test for expired tokens. "
-         "The authentication middleware should now work correctly.",
-         "2026-02-20T14:06:00.000Z", _WEB_CWD),
 ]
 
 # ── Project 2: datapipe — ETL and processing ─────────────────────────────────
@@ -290,29 +273,27 @@ _DATA_SESSION_3 = [
 
 _DATA_SESSION_4 = [
     _msg(_S4, "user",
-         "The pipeline is failing on records with null category values. "
-         "Can you add better null handling to the transformer?",
-         "2026-02-25T11:00:00.000Z", _DATA_CWD, "fix/null-handling"),
-    _msg(_S4, "user",
-         "You forgot to handle None at all, you missed that step. "
-         "The filter_valid_records function still has the original logic, "
-         "it regressed from what we had before.",
-         "2026-02-25T11:00:05.000Z", _DATA_CWD, "fix/null-handling"),
+         "Test the pipeline with the sample dataset to verify it runs end to end.",
+         "2026-02-25T11:00:00.000Z", _DATA_CWD, "fix/pipeline-test"),
     _msg(_S4, "assistant",
-         "I'll add null handling to the transformer to handle missing category values gracefully.",
-         "2026-02-25T11:00:10.000Z", _DATA_CWD),
-    _tool_edit(_S4, "2026-02-25T11:01:00.000Z",
-               f"{_DATA_CWD}/pipeline/transformer.py",
-               "def filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:\n    return df[df['value'].notna() & (df['value'] > 0)]",
-               "def filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:\n    df = df.copy()\n    df['category'] = df['category'].fillna('unknown')\n    return df[df['value'].notna() & (df['value'] > 0)]",
+         "I'll run the pipeline with the sample dataset to verify it works.",
+         "2026-02-25T11:00:05.000Z", _DATA_CWD),
+    _tool_bash(_S4, "2026-02-25T11:00:10.000Z",
+               "python run_pipeline.py sample.csv output/test.parquet",
                _DATA_CWD),
-    _tool_write(_S4, "2026-02-25T11:02:00.000Z",
-                f"{_DATA_CWD}/tests/test_transformer.py",
-                "\"\"\"Tests for data transformation functions.\"\"\"\nimport pytest\nimport pandas as pd\nfrom pipeline.transformer import filter_valid_records, transform\n\ndef test_null_category_filled_with_unknown():\n    df = pd.DataFrame({'id': [1], 'timestamp': ['2026-01-01'], 'value': [10.0], 'category': [None]})\n    result = filter_valid_records(df)\n    assert result['category'].iloc[0] == 'unknown'\n\ndef test_negative_values_filtered():\n    df = pd.DataFrame({'id': [1, 2], 'timestamp': ['2026-01-01', '2026-01-01'],\n                       'value': [-5.0, 10.0], 'category': ['A', 'B']})\n    result = filter_valid_records(df)\n    assert len(result) == 1\n    assert result['value'].iloc[0] == 10.0\n",
-                _DATA_CWD),
+    _msg(_S4, "user",
+         "You forgot to use uv run python again, got a ModuleNotFoundError "
+         "because pandas is not in the system python.",
+         "2026-02-25T11:00:20.000Z", _DATA_CWD, "fix/pipeline-test"),
     _msg(_S4, "assistant",
-         "Added null handling for category values and wrote tests to verify the fix.",
-         "2026-02-25T11:03:00.000Z", _DATA_CWD),
+         "I'll use uv run python to ensure all project dependencies are available.",
+         "2026-02-25T11:00:25.000Z", _DATA_CWD),
+    _tool_bash(_S4, "2026-02-25T11:00:30.000Z",
+               "uv run python run_pipeline.py sample.csv output/test.parquet",
+               _DATA_CWD),
+    _msg(_S4, "assistant",
+         "Pipeline completed successfully. Output written to output/test.parquet.",
+         "2026-02-25T11:01:00.000Z", _DATA_CWD),
 ]
 
 # ── Project 3: mlresearch — model training ────────────────────────────────────
@@ -936,10 +917,10 @@ def run_post_a_acts() -> None:
     pause(5.0)
 
     # ── Act 3: regex search with context ──────────────────────────────────────
-    section("Unclassified feedback -- regex search + context-after")
+    section("Find the pattern -- search for python3 and uv run mentions")
     pause(1.5)
     _run(
-        f"aise messages search 'forgot|skip' --type user --regex"
+        f"aise messages search 'python3|uv run' --type user --regex"
         f" --context-after 2 {PROV}"
     )
     pause(5.0)
@@ -1116,10 +1097,10 @@ _POST_A_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     ("regression",  "Act 1: regression category present in corrections output"),
     ("skip_step",   "Act 1: skip_step category present in corrections output"),
     ("accuracy",    "Act 2: user message stream shows fixture message text"),
-    ("handle None", "Act 3: regex search output shows matched fixture message"),
+    ("python3",     "Act 3: regex search output shows python3 usage pattern"),
     # Act 4: pipeline search output — fixture message starts with capital 'You forgot'.
     # The typed command is char-by-char (never contiguous in cast); check output instead.
-    ("You forgot",  "Act 4: pipeline search output shows correction context"),
+    ("You forgot",  "Act 4: pipeline search output shows uv run python correction"),
     # Act 5: _type() is char-by-char so the rule text is never contiguous in cast events.
     # Check the section header written by section() via sys.stdout.write() instead.
     ("CLAUDE.md",   "Act 5: CLAUDE.md fix section header displayed"),
