@@ -963,7 +963,7 @@ def run_post_a_acts() -> None:
     # ── Act 5: the CLAUDE.md fix — typed display only, no aise command ─────────
     section("The fix — one line in CLAUDE.md")
     pause(1.5)
-    _type("Always use `uv run python` instead of `python3` or `python` for any script execution.\n")
+    _type("You must always use `uv run python`. Never run `python3` or `python` directly.\n")
     pause(3.0)
 
     # ── Act 6: corrections --since 7d — verify the loop closed ────────────────
