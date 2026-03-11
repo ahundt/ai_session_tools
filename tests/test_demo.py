@@ -937,7 +937,7 @@ def run_post_a_acts() -> None:
     pause(6.0)
 
     # ── Act 5: the CLAUDE.md fix — cat >> command (typed, not executed) ─────────
-    section("The fix — one line appended to CLAUDE.md")
+    section("The fix — stop AI crashing when it fails to use uv venvs")
     pause(1.5)
     _type("\n\033[1;32m$\033[0m ", delay=0)
     _type('cat >> CLAUDE.md << \'EOF\'\n', delay=0.045)
@@ -962,6 +962,18 @@ def run_post_a_acts() -> None:
     sys.stdout.write(
         "\n"
         "  autorun plugin: https://github.com/ahundt/autorun\n"
+    )
+    sys.stdout.flush()
+    pause(3.0)
+
+    # ── Done ─────────────────────────────────────────────────────────────────
+    sys.stdout.write(
+        "\n\n"
+        "\033[1;32m  ✅ Done — correction found, fix applied, loop closed, workflow automated\033[0m\n"
+        "\n"
+        "  Install:   uv tool install git+https://github.com/ahundt/ai_session_tools\n"
+        "  Autorun:   https://github.com/ahundt/autorun\n"
+        "\n"
     )
     sys.stdout.flush()
     # Write a final newline to anchor a PTY event just before the hold pause.
@@ -1119,10 +1131,12 @@ _POST_A_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     # The typed command is char-by-char (never contiguous in cast); check output instead.
     ("You forgot",  "Act 4: pipeline search output shows uv run python correction"),
     # Act 5: section header written by section() via sys.stdout.write().
-    ("CLAUDE.md",   "Act 5: CLAUDE.md fix section header displayed"),
+    ("uv venvs",    "Act 5: fix section header mentions uv venvs"),
     ("corrections", "Act 6: verification corrections command produced output"),
     # Act 7: autorun section header written by section() via sys.stdout.write().
     ("autorun",     "Act 7: autorun plugin reference displayed"),
+    # Done banner written by sys.stdout.write().
+    ("Done",        "Done: success banner displayed"),
 )
 
 
