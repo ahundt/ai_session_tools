@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -211,45 +212,27 @@ _WEB_SESSION_1 = [
 
 _WEB_SESSION_2 = [
     _msg(_S2, "user",
-         "the authentication middleware is returning 403 for valid tokens, "
-         "can you investigate and fix the issue",
+         "run the auth tests to verify the login endpoint works",
          "2026-02-20T14:00:00.000Z", _WEB_CWD, "fix/auth-middleware"),
     _msg(_S2, "assistant",
-         "I'll investigate the authentication middleware issue. Let me check the token verification logic.",
+         "I'll run the authentication tests now.",
          "2026-02-20T14:00:10.000Z", _WEB_CWD),
     _tool_bash(_S2, "2026-02-20T14:00:15.000Z",
-               "grep -n 'verify_token\\|check_auth' /Users/demo/webauth/middleware.py",
+               "python3 -m pytest tests/test_auth.py -v",
                _WEB_CWD),
     _msg(_S2, "user",
-         "actually wait you missed the real bug, the issue is in token expiry "
-         "not the route handler. also need to fix the middleware comparison logic",
-         "2026-02-20T14:00:25.000Z", _WEB_CWD, "fix/auth-middleware"),
+         "you forgot to use uv run python again, the packages aren't installed globally, "
+         "use uv run python -m pytest",
+         "2026-02-20T14:00:30.000Z", _WEB_CWD, "fix/auth-middleware"),
     _msg(_S2, "assistant",
-         "Found the issue. The middleware is checking token expiry with the wrong timezone. "
-         "The verify_token function uses UTC but the middleware compares against local time.",
+         "You're right. Running with uv run python to use the project's virtual environment.",
+         "2026-02-20T14:00:35.000Z", _WEB_CWD),
+    _tool_bash(_S2, "2026-02-20T14:00:40.000Z",
+               "uv run python -m pytest tests/test_auth.py -v",
+               _WEB_CWD),
+    _msg(_S2, "assistant",
+         "Tests pass. The login endpoint is working correctly.",
          "2026-02-20T14:01:00.000Z", _WEB_CWD),
-    _tool_edit(_S2, "2026-02-20T14:01:30.000Z",
-               f"{_WEB_CWD}/auth/jwt.py",
-               "exp': time.time() + expires_in",
-               "exp': time.time() + expires_in  # UTC timestamp",
-               _WEB_CWD),
-    _tool_edit(_S2, "2026-02-20T14:01:45.000Z",
-               f"{_WEB_CWD}/middleware.py",
-               "if current_time > payload['exp']:",
-               "if time.time() > payload['exp']:  # compare UTC",
-               _WEB_CWD),
-    _msg(_S2, "user",
-         "also update the tests to cover the timezone fix",
-         "2026-02-20T14:05:00.000Z", _WEB_CWD, "fix/auth-middleware"),
-    _tool_edit(_S2, "2026-02-20T14:05:30.000Z",
-               f"{_WEB_CWD}/tests/test_auth.py",
-               "def test_verify_invalid_token_returns_none():",
-               "def test_expired_token_returns_none():\n    token = create_token('user-1', expires_in=-1)\n    assert verify_token(token) is None\n\ndef test_verify_invalid_token_returns_none():",
-               _WEB_CWD),
-    _msg(_S2, "assistant",
-         "Fixed the timezone issue and added a test for expired tokens. "
-         "The authentication middleware should now work correctly.",
-         "2026-02-20T14:06:00.000Z", _WEB_CWD),
 ]
 
 # ── Project 2: datapipe — ETL and processing ─────────────────────────────────
@@ -443,11 +426,12 @@ def _setup_recovery_files(demo_dir: Path) -> None:
     SessionRecoveryEngine.get_versions() reads session_all_versions_*/ for edit count.
 
     Files with 2+ versions (edits) will pass --min-edits 2:
-      jwt.py:         S1 (Write) + S2 (Edit) → 2 versions ✓
-      test_auth.py:   S1 (Write) + S2 (Edit) → 2 versions ✓
       transformer.py: S3 (Write) + S4 (Edit) → 2 versions ✓
     """
     recovery = demo_dir / "recovery"
+    # Clean slate: remove old recovery dirs so orphans from removed sessions don't persist
+    if recovery.exists():
+        shutil.rmtree(recovery)
 
     JWT_V1 = (
         '"""JWT authentication utilities."""\n'
@@ -463,10 +447,6 @@ def _setup_recovery_files(demo_dir: Path) -> None:
         "        return None\n"
         "    except jwt.InvalidTokenError:\n"
         "        return None\n"
-    )
-    JWT_V2 = JWT_V1.replace(
-        "exp': time.time() + expires_in}",
-        "exp': time.time() + expires_in}  # UTC timestamp",
     )
     ROUTES_V1 = (
         '"""Authentication route handlers."""\n'
@@ -501,13 +481,6 @@ def _setup_recovery_files(demo_dir: Path) -> None:
         "def test_verify_invalid_token_returns_none():\n"
         "    result = verify_token('not-a-real-token')\n"
         "    assert result is None\n"
-    )
-    TEST_AUTH_V2 = TEST_AUTH_V1.replace(
-        "def test_verify_invalid_token_returns_none():",
-        "def test_expired_token_returns_none():\n"
-        "    token = create_token('user-1', expires_in=-1)\n"
-        "    assert verify_token(token) is None\n\n"
-        "def test_verify_invalid_token_returns_none():",
     )
     TRANSFORMER_V1 = (
         '"""Data transformation functions."""\n'
@@ -551,7 +524,6 @@ def _setup_recovery_files(demo_dir: Path) -> None:
     # version_number must be unique per filename across sessions to count as separate edits
     _sessions: list[tuple] = [
         (_S1, {"jwt.py": JWT_V1, "routes.py": ROUTES_V1, "test_auth.py": TEST_AUTH_V1}, 1),
-        (_S2, {"jwt.py": JWT_V2, "test_auth.py": TEST_AUTH_V2},                         2),
         (_S3, {"transformer.py": TRANSFORMER_V1},                                        1),
         (_S4, {"transformer.py": TRANSFORMER_V2},                                        2),
     ]
@@ -819,17 +791,20 @@ def _type(text: str, delay: float = 0.04) -> None:
         sys.stdout.flush()
 
 
-def _run(cmd: str, show_prompt: bool = True) -> subprocess.CompletedProcess:
-    """Print a shell prompt + command (with typing effect), then run it via shell."""
+def _run(cmd: str, show_prompt: bool = True, shell: bool = False) -> subprocess.CompletedProcess:
+    """Print a shell prompt + command (with typing effect), then run it.
+
+    shell=False (default): uses shlex.split() — safe for regex metacharacters.
+    shell=True: needed only for commands with real shell pipes (|).
+    """
     if show_prompt:
         _type("\n\033[1;32m$\033[0m ", delay=0)
         _type(cmd + "\n", delay=0.045)
         pause(0.3)
-    # Use shell=True so glob patterns like *.py and quotes work naturally
     result = subprocess.run(
-        cmd,
+        shlex.split(cmd) if not shell else cmd,
         env=DEMO_ENV,
-        shell=True,
+        shell=shell,
         capture_output=False,   # let output flow to terminal (captured by asciinema)
         text=True,
     )
@@ -943,8 +918,8 @@ def run_post_a_acts() -> None:
     section("Unclassified feedback — regex search + context-after")
     pause(1.5)
     _run(
-        f"aise messages search 'forgot|missed|wrong' --type user --regex"
-        f" --context-after 2 {PROV}"
+        f'aise messages search "forgot|missed|wrong" --type user --regex'
+        f' --context-after 2 {PROV}'
     )
     pause(5.0)
 
@@ -954,9 +929,10 @@ def run_post_a_acts() -> None:
     section("Pipeline — corrections IDs into targeted session search")
     pause(1.5)
     _run(
-        f"aise messages corrections --since 14d --ids-only {PROV}"
-        f" | xargs -I{{}} aise messages search 'you forgot'"
-        f" --session {{}} --context-after 3 {PROV}"
+        f'aise messages corrections --since 14d --ids-only {PROV}'
+        f' | xargs -I{{}} aise messages search "you forgot"'
+        f' --session {{}} --context-after 3 {PROV}',
+        shell=True,
     )
     pause(6.0)
 

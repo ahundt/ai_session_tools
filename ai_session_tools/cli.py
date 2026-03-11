@@ -2601,7 +2601,7 @@ def files_cross_ref(
 def _messages_search_cmd(
     ctx: typer.Context,
     provider: Optional[str] = _OPT_PROVIDER,
-    query: Optional[str] = typer.Argument(None, help="Text to search for in messages. Use quotes for multi-word queries."),
+    query: Optional[list[str]] = typer.Argument(None, help="Text to search for in messages. Multi-word queries work with or without quotes."),
     query_opt: Optional[str] = typer.Option(None, "--query", "-q", hidden=True),
     message_type: Optional[MsgFilterType] = typer.Option(
         None, "--type", "-t",
@@ -2678,7 +2678,7 @@ def _messages_search_cmd(
         aise messages search "error" --session 83326782               # scope to one session
         aise messages search "error" --session abc --after-index 50   # skip first 50 msgs
     """
-    q = query or query_opt
+    q = " ".join(query) if query else query_opt
     msg_type_str = message_type.value if message_type else None
     # fixed_strings is the inverse of regex: literal by default, regex opt-in
     fixed_strings = not regex
