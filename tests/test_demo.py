@@ -928,22 +928,22 @@ def run_post_a_acts() -> None:
     PROV = "--provider claude"
 
     # ── Act 1: corrections --since 30d ────────────────────────────────────────
-    section("Corrections -- 30 days of patterns, auto-classified")
+    section("Corrections — 30 days of patterns, auto-classified")
     pause(1.5)
     _run(f"aise messages corrections --since 30d {PROV}")
     pause(6.0)
 
     # ── Act 2: all user messages --since 30d ──────────────────────────────────
-    section("Your messages -- everything you wrote across sessions this month")
+    section("Your messages — everything you wrote across sessions this month")
     pause(1.5)
     _run(f"aise messages search '' --type user --since 30d {PROV}")
     pause(5.0)
 
     # ── Act 3: regex search with context ──────────────────────────────────────
-    section("Unclassified feedback -- regex search + context-after")
+    section("Unclassified feedback — regex search + context-after")
     pause(1.5)
     _run(
-        f"aise messages search 'python3|uv run' --type user --regex"
+        f"aise messages search 'forgot|missed|wrong' --type user --regex"
         f" --context-after 2 {PROV}"
     )
     pause(5.0)
@@ -951,7 +951,7 @@ def run_post_a_acts() -> None:
     # ── Act 4: pipeline — session IDs from corrections into targeted search ────
     # shell=True (inside _run) makes the pipe work correctly on macOS/Linux.
     # {{}} in the f-string produces literal {} which xargs needs for -I{} placeholder.
-    section("Pipeline -- corrections IDs into targeted session search")
+    section("Pipeline — corrections IDs into targeted session search")
     pause(1.5)
     _run(
         f"aise messages corrections --since 14d --ids-only {PROV}"
@@ -961,13 +961,13 @@ def run_post_a_acts() -> None:
     pause(6.0)
 
     # ── Act 5: the CLAUDE.md fix — typed display only, no aise command ─────────
-    section("The fix -- one line in CLAUDE.md")
+    section("The fix — one line in CLAUDE.md")
     pause(1.5)
-    _type("Always use `uv run python` instead of `python3` or `python`.\n")
+    _type("Always use `uv run python` instead of `python3` or `python` for any script execution.\n")
     pause(3.0)
 
     # ── Act 6: corrections --since 7d — verify the loop closed ────────────────
-    section("Verification -- same command, shorter window, after the fix")
+    section("Verification — same command, shorter window, after the fix")
     pause(1.5)
     _run(f"aise messages corrections --since 7d {PROV}")
     # Write a final newline to anchor a PTY event just before the hold pause.
@@ -1120,7 +1120,7 @@ _POST_A_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     ("regression",  "Act 1: regression category present in corrections output"),
     ("skip_step",   "Act 1: skip_step category present in corrections output"),
     ("accuracy",    "Act 2: user message stream shows fixture message text"),
-    ("python3",     "Act 3: regex search output shows python3 usage pattern"),
+    ("missed",      "Act 3: regex search finds missed/forgot correction patterns across sessions"),
     # Act 4: pipeline search output — fixture message starts with capital 'You forgot'.
     # The typed command is char-by-char (never contiguous in cast); check output instead.
     ("You forgot",  "Act 4: pipeline search output shows uv run python correction"),
