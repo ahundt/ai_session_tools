@@ -1061,6 +1061,59 @@ def convert_to_gif(
     print(f"GIF saved to {gif_file}")
 
 
+def trim_cast_to_banner(cast_file: Path, banner_marker: str = "self-improvement") -> None:
+    """Trim early .cast events so the banner is the first visible frame.
+
+    Asciinema records shell init (prompt, env) before the script starts.
+    This function finds the first output event containing *banner_marker*
+    (part of the banner text), drops all prior output events, and rebases
+    timestamps so the banner event is at t=0.  The header line is preserved.
+
+    Modifies *cast_file* in place.
+    """
+    lines = cast_file.read_text().splitlines()
+    if len(lines) < 2:
+        return
+
+    header = lines[0]  # JSON header — always line 1
+    events = lines[1:]
+
+    # Find the first event whose data contains the banner marker.
+    banner_idx = None
+    for i, line in enumerate(events):
+        if banner_marker in line:
+            banner_idx = i
+            break
+
+    if banner_idx is None:
+        print(f"[trim] marker {banner_marker!r} not found — skipping trim")
+        return
+
+    # But we want the clear-screen event just before the banner text,
+    # since that's what wipes the shell init.  Walk back to find it.
+    clear_idx = banner_idx
+    for i in range(banner_idx - 1, -1, -1):
+        if "\\u001b[H\\u001b[2J" in events[i] or "\\033[H\\033[2J" in events[i]:
+            clear_idx = i
+            break
+
+    kept = events[clear_idx:]
+    if not kept:
+        return
+
+    # Rebase timestamps: first kept event becomes t=0.
+    first_ts = json.loads(kept[0])[0]
+    rebased = []
+    for line in kept:
+        evt = json.loads(line)
+        evt[0] = round(evt[0] - first_ts, 6)
+        rebased.append(json.dumps(evt))
+
+    cast_file.write_text(header + "\n" + "\n".join(rebased) + "\n")
+    trimmed = len(events) - len(kept)
+    print(f"[trim] Removed {trimmed} events before banner (kept {len(kept)})")
+
+
 def convert_to_mp4(gif_file: Path = GIF_FILE, mp4_file: Path = MP4_FILE) -> None:
     """Convert .gif → .mp4 using ffmpeg.
 
@@ -1379,6 +1432,7 @@ def main() -> None:
     elif args.record:
         create_synthetic_data()
         record()
+        trim_cast_to_banner(CAST_FILE, banner_marker="ai_session_tools")
         convert_to_gif()
         convert_to_mp4()
         verify_recording()
@@ -1417,6 +1471,7 @@ def main() -> None:
     elif args.post_a:
         create_synthetic_data()
         record(CAST_FILE_POST_A, acts_flag="--run-post-a-acts")
+        trim_cast_to_banner(CAST_FILE_POST_A)
         convert_to_gif(CAST_FILE_POST_A, GIF_FILE_POST_A, speed=1.0)
         convert_to_mp4(GIF_FILE_POST_A, MP4_FILE_POST_A)
         verify_recording(CAST_FILE_POST_A, checks=_POST_A_VERIFY_CHECKS)
