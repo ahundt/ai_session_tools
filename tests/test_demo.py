@@ -936,16 +936,34 @@ def run_post_a_acts() -> None:
     )
     pause(6.0)
 
-    # ── Act 5: the CLAUDE.md fix — typed display only, no aise command ─────────
-    section("The fix — one line in CLAUDE.md")
+    # ── Act 5: the CLAUDE.md fix — cat >> command (typed, not executed) ─────────
+    section("The fix — one line appended to CLAUDE.md")
     pause(1.5)
-    _type("You must always use `uv run python`. Never run `python3` or `python` directly.\n")
+    _type("\n\033[1;32m$\033[0m ", delay=0)
+    _type('cat >> CLAUDE.md << \'EOF\'\n', delay=0.045)
+    _type("You must always use `uv run python`. Never run `python3` or `python` directly.\n", delay=0.035)
+    _type("EOF\n", delay=0.045)
     pause(3.0)
 
-    # ── Act 6: corrections --since 7d — verify the loop closed ────────────────
-    section("Verification — same command, shorter window, after the fix")
+    # ── Act 6: a week later — verify the loop closed ────────────────────────
+    section("A week later — checking if the fix worked")
     pause(1.5)
     _run(f"aise messages corrections --since 7d {PROV}")
+    pause(6.0)
+
+    # ── Act 7: automate from inside Claude Code ─────────────────────────────
+    section("Automate the loop — run from inside Claude Code")
+    pause(1.5)
+    _type("\n\033[1;32m$\033[0m ", delay=0)
+    _type('/ar:ai-session-tools\n', delay=0.045)
+    pause(0.5)
+    _type('"analyze my correction patterns from the last month and suggest CLAUDE.md rules"\n', delay=0.035)
+    pause(1.0)
+    sys.stdout.write(
+        "\n"
+        "  autorun plugin: https://github.com/ahundt/autorun\n"
+    )
+    sys.stdout.flush()
     # Write a final newline to anchor a PTY event just before the hold pause.
     # Without this, the last cast event is the final byte of aise output, and
     # agg/ffmpeg may drop the tail silence during GIF→MP4 conversion.
@@ -1100,10 +1118,11 @@ _POST_A_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     # Act 4: pipeline search output — fixture message starts with capital 'You forgot'.
     # The typed command is char-by-char (never contiguous in cast); check output instead.
     ("You forgot",  "Act 4: pipeline search output shows uv run python correction"),
-    # Act 5: _type() is char-by-char so the rule text is never contiguous in cast events.
-    # Check the section header written by section() via sys.stdout.write() instead.
+    # Act 5: section header written by section() via sys.stdout.write().
     ("CLAUDE.md",   "Act 5: CLAUDE.md fix section header displayed"),
     ("corrections", "Act 6: verification corrections command produced output"),
+    # Act 7: autorun section header written by section() via sys.stdout.write().
+    ("autorun",     "Act 7: autorun plugin reference displayed"),
 )
 
 
