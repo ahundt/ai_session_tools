@@ -940,9 +940,7 @@ def run_post_a_acts() -> None:
     section("The fix — stop AI crashing when it fails to use uv venvs")
     pause(1.5)
     _type("\n\033[1;32m$\033[0m ", delay=0)
-    _type('cat >> CLAUDE.md << \'EOF\'\n', delay=0.045)
-    _type("You must always use `uv run python`. Never run `python3` or `python` directly.\n", delay=0.035)
-    _type("EOF\n", delay=0.045)
+    _type("echo 'Always use uv run python. Never run python3 or python directly.' >> CLAUDE.md\n", delay=0.045)
     pause(3.0)
 
     # ── Act 6: a week later — verify the loop closed ────────────────────────
