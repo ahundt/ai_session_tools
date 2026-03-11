@@ -190,14 +190,14 @@ _WEB_SESSION_1 = [
                 "\"\"\"JWT authentication utilities.\"\"\"\nimport jwt\nimport time\n\nSECRET = 'change-in-production'\nALGORITHM = 'HS256'\n\ndef create_token(user_id: str, expires_in: int = 3600) -> str:\n    payload = {'sub': user_id, 'exp': time.time() + expires_in}\n    return jwt.encode(payload, SECRET, algorithm=ALGORITHM)\n\ndef verify_token(token: str) -> dict | None:\n    try:\n        return jwt.decode(token, SECRET, algorithms=[ALGORITHM])\n    except jwt.ExpiredSignatureError:\n        return None\n    except jwt.InvalidTokenError:\n        return None\n",
                 _WEB_CWD),
     _msg(_S1, "user",
-         "Great! Now add a login endpoint that validates credentials and returns a token.",
+         "add a login endpoint that validates credentials and returns a token",
          "2026-02-10T09:05:00.000Z", _WEB_CWD, "main"),
     _tool_write(_S1, "2026-02-10T09:05:30.000Z",
                 f"{_WEB_CWD}/auth/routes.py",
                 "\"\"\"Authentication route handlers.\"\"\"\nfrom flask import Blueprint, request, jsonify\nfrom .jwt import create_token, verify_token\nfrom .models import User\n\nauth_bp = Blueprint('auth', __name__, url_prefix='/auth')\n\n@auth_bp.route('/login', methods=['POST'])\ndef login():\n    data = request.get_json()\n    user = User.query.filter_by(email=data.get('email')).first()\n    if user and user.check_password(data.get('password')):\n        token = create_token(str(user.id))\n        return jsonify({'token': token, 'expires_in': 3600})\n    return jsonify({'error': 'Invalid credentials'}), 401\n\n@auth_bp.route('/logout', methods=['POST'])\ndef logout():\n    # Token invalidation handled client-side\n    return jsonify({'message': 'Logged out successfully'})\n",
                 _WEB_CWD),
     _msg(_S1, "user",
-         "Please add unit tests for the JWT functions.",
+         "add unit tests for the jwt functions",
          "2026-02-10T09:10:00.000Z", _WEB_CWD, "main"),
     _tool_write(_S1, "2026-02-10T09:10:45.000Z",
                 f"{_WEB_CWD}/tests/test_auth.py",
@@ -211,29 +211,45 @@ _WEB_SESSION_1 = [
 
 _WEB_SESSION_2 = [
     _msg(_S2, "user",
-         "Run the auth test suite to verify the JWT implementation works correctly.",
-         "2026-02-20T14:00:00.000Z", _WEB_CWD, "fix/auth-tests"),
+         "the authentication middleware is returning 403 for valid tokens, "
+         "can you investigate and fix the issue",
+         "2026-02-20T14:00:00.000Z", _WEB_CWD, "fix/auth-middleware"),
     _msg(_S2, "assistant",
-         "I'll run the auth test suite to verify the JWT implementation.",
+         "I'll investigate the authentication middleware issue. Let me check the token verification logic.",
          "2026-02-20T14:00:10.000Z", _WEB_CWD),
     _tool_bash(_S2, "2026-02-20T14:00:15.000Z",
-               "python3 -m pytest tests/test_auth.py -v",
+               "grep -n 'verify_token\\|check_auth' /Users/demo/webauth/middleware.py",
                _WEB_CWD),
     _msg(_S2, "user",
-         "you used python3 again, this regressed to the old behavior, "
-         "got a ModuleNotFoundError because the packages are not installed globally. "
-         "Always use uv run python.",
-         "2026-02-20T14:00:25.000Z", _WEB_CWD, "fix/auth-tests"),
+         "actually wait you missed the real bug, the issue is in token expiry "
+         "not the route handler. also need to fix the middleware comparison logic",
+         "2026-02-20T14:00:25.000Z", _WEB_CWD, "fix/auth-middleware"),
     _msg(_S2, "assistant",
-         "I'll use uv run python for all script execution. "
-         "The project dependencies are only available through uv.",
-         "2026-02-20T14:00:30.000Z", _WEB_CWD),
-    _tool_bash(_S2, "2026-02-20T14:00:35.000Z",
-               "uv run python -m pytest tests/test_auth.py -v",
+         "Found the issue. The middleware is checking token expiry with the wrong timezone. "
+         "The verify_token function uses UTC but the middleware compares against local time.",
+         "2026-02-20T14:01:00.000Z", _WEB_CWD),
+    _tool_edit(_S2, "2026-02-20T14:01:30.000Z",
+               f"{_WEB_CWD}/auth/jwt.py",
+               "exp': time.time() + expires_in",
+               "exp': time.time() + expires_in  # UTC timestamp",
+               _WEB_CWD),
+    _tool_edit(_S2, "2026-02-20T14:01:45.000Z",
+               f"{_WEB_CWD}/middleware.py",
+               "if current_time > payload['exp']:",
+               "if time.time() > payload['exp']:  # compare UTC",
+               _WEB_CWD),
+    _msg(_S2, "user",
+         "also update the tests to cover the timezone fix",
+         "2026-02-20T14:05:00.000Z", _WEB_CWD, "fix/auth-middleware"),
+    _tool_edit(_S2, "2026-02-20T14:05:30.000Z",
+               f"{_WEB_CWD}/tests/test_auth.py",
+               "def test_verify_invalid_token_returns_none():",
+               "def test_expired_token_returns_none():\n    token = create_token('user-1', expires_in=-1)\n    assert verify_token(token) is None\n\ndef test_verify_invalid_token_returns_none():",
                _WEB_CWD),
     _msg(_S2, "assistant",
-         "All tests passing with uv run python. The JWT implementation is working correctly.",
-         "2026-02-20T14:01:00.000Z", _WEB_CWD),
+         "Fixed the timezone issue and added a test for expired tokens. "
+         "The authentication middleware should now work correctly.",
+         "2026-02-20T14:06:00.000Z", _WEB_CWD),
 ]
 
 # ── Project 2: datapipe — ETL and processing ─────────────────────────────────
@@ -273,27 +289,34 @@ _DATA_SESSION_3 = [
 
 _DATA_SESSION_4 = [
     _msg(_S4, "user",
-         "Test the pipeline with the sample dataset to verify it runs end to end.",
-         "2026-02-25T11:00:00.000Z", _DATA_CWD, "fix/pipeline-test"),
-    _msg(_S4, "assistant",
-         "I'll run the pipeline with the sample dataset to verify it works.",
-         "2026-02-25T11:00:05.000Z", _DATA_CWD),
-    _tool_bash(_S4, "2026-02-25T11:00:10.000Z",
-               "python run_pipeline.py sample.csv output/test.parquet",
-               _DATA_CWD),
+         "the pipeline is failing on records with null category values, "
+         "can you add better null handling to the transformer",
+         "2026-02-25T11:00:00.000Z", _DATA_CWD, "fix/null-handling"),
     _msg(_S4, "user",
-         "You forgot to use uv run python again, got a ModuleNotFoundError "
-         "because pandas is not in the system python.",
-         "2026-02-25T11:00:20.000Z", _DATA_CWD, "fix/pipeline-test"),
+         "You forgot to handle None at all, you missed that step. "
+         "filter_valid_records still has the old logic, it regressed from what we had before",
+         "2026-02-25T11:00:05.000Z", _DATA_CWD, "fix/null-handling"),
     _msg(_S4, "assistant",
-         "I'll use uv run python to ensure all project dependencies are available.",
-         "2026-02-25T11:00:25.000Z", _DATA_CWD),
-    _tool_bash(_S4, "2026-02-25T11:00:30.000Z",
-               "uv run python run_pipeline.py sample.csv output/test.parquet",
+         "I'll add null handling to the transformer to handle missing category values gracefully.",
+         "2026-02-25T11:00:10.000Z", _DATA_CWD),
+    _tool_edit(_S4, "2026-02-25T11:01:00.000Z",
+               f"{_DATA_CWD}/pipeline/transformer.py",
+               "def filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:\n    return df[df['value'].notna() & (df['value'] > 0)]",
+               "def filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:\n    df = df.copy()\n    df['category'] = df['category'].fillna('unknown')\n    return df[df['value'].notna() & (df['value'] > 0)]",
+               _DATA_CWD),
+    _tool_write(_S4, "2026-02-25T11:02:00.000Z",
+                f"{_DATA_CWD}/tests/test_transformer.py",
+                "\"\"\"Tests for data transformation functions.\"\"\"\nimport pytest\nimport pandas as pd\nfrom pipeline.transformer import filter_valid_records, transform\n\ndef test_null_category_filled_with_unknown():\n    df = pd.DataFrame({'id': [1], 'timestamp': ['2026-01-01'], 'value': [10.0], 'category': [None]})\n    result = filter_valid_records(df)\n    assert result['category'].iloc[0] == 'unknown'\n\ndef test_negative_values_filtered():\n    df = pd.DataFrame({'id': [1, 2], 'timestamp': ['2026-01-01', '2026-01-01'],\n                       'value': [-5.0, 10.0], 'category': ['A', 'B']})\n    result = filter_valid_records(df)\n    assert len(result) == 1\n    assert result['value'].iloc[0] == 10.0\n",
+                _DATA_CWD),
+    _msg(_S4, "user",
+         "run the tests with uv run python not python3, the deps aren't installed globally",
+         "2026-02-25T11:03:00.000Z", _DATA_CWD, "fix/null-handling"),
+    _tool_bash(_S4, "2026-02-25T11:03:05.000Z",
+               "uv run python -m pytest tests/test_transformer.py -v",
                _DATA_CWD),
     _msg(_S4, "assistant",
-         "Pipeline completed successfully. Output written to output/test.parquet.",
-         "2026-02-25T11:01:00.000Z", _DATA_CWD),
+         "Added null handling for category values and tests pass with uv run python.",
+         "2026-02-25T11:04:00.000Z", _DATA_CWD),
 ]
 
 # ── Project 3: mlresearch — model training ────────────────────────────────────
@@ -917,7 +940,7 @@ def run_post_a_acts() -> None:
     pause(5.0)
 
     # ── Act 3: regex search with context ──────────────────────────────────────
-    section("Find the pattern -- search for python3 and uv run mentions")
+    section("Unclassified feedback -- regex search + context-after")
     pause(1.5)
     _run(
         f"aise messages search 'python3|uv run' --type user --regex"
