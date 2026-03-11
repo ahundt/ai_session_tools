@@ -894,9 +894,9 @@ def run_demo_acts() -> None:
 
 def run_post_a_acts() -> None:
     """Execute Post A acts (self-improvement loop demo). Called inside asciinema."""
-    # Write clear + banner as a single flush so the first captured frame shows the banner,
-    # not a blank screen with a cursor.
-    sys.stdout.write("\033[H\033[2J" + BANNER_POST_A + "\n")
+    sys.stdout.write("\033[H\033[2J")
+    sys.stdout.flush()
+    sys.stdout.write(BANNER_POST_A + "\n")
     sys.stdout.flush()
     pause(4.0)
 
