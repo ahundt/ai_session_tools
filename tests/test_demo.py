@@ -1398,6 +1398,30 @@ class TestDemoFree:
         assert "Summary" not in result.stdout, \
             f"Old 'Summary' column header must not appear (renamed to 'Compact'); got:\n{result.stdout}"
 
+    def test_demo_acts_full_pathway(self) -> None:
+        """Run all default demo acts end-to-end and verify expected output."""
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__)), "--test-acts"],
+            capture_output=True, text=True, timeout=120,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, f"--test-acts failed (rc={result.returncode}):\n{combined}"
+        for fragment, desc in _VERIFY_CHECKS:
+            assert fragment in combined, \
+                f"MISSING: {desc} — expected {fragment!r} in output:\n{combined[-2000:]}"
+
+    def test_post_a_acts_full_pathway(self) -> None:
+        """Run all Post A demo acts end-to-end and verify expected output."""
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__)), "--test-post-a-acts"],
+            capture_output=True, text=True, timeout=120,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, f"--test-post-a-acts failed (rc={result.returncode}):\n{combined}"
+        for fragment, desc in _POST_A_VERIFY_CHECKS:
+            assert fragment in combined, \
+                f"MISSING: {desc} — expected {fragment!r} in output:\n{combined[-2000:]}"
+
 
 # ── Main entrypoint ────────────────────────────────────────────────────────────
 
@@ -1421,6 +1445,10 @@ def main() -> None:
                         help="[internal] Run Post A acts inside asciinema subprocess")
     parser.add_argument("--verify-post-a",   action="store_true",
                         help="Verify Post A recording contains expected output")
+    parser.add_argument("--test-acts",       action="store_true",
+                        help="Run demo acts without timing delays (for pytest)")
+    parser.add_argument("--test-post-a-acts", action="store_true",
+                        help="Run Post A acts without timing delays (for pytest)")
     args = parser.parse_args()
 
     if args.run_acts:
@@ -1484,6 +1512,31 @@ def main() -> None:
     elif args.verify_post_a:
         ok = verify_recording(CAST_FILE_POST_A, checks=_POST_A_VERIFY_CHECKS)
         sys.exit(0 if ok else 1)
+
+    elif args.test_acts:
+        # Run demo acts without timing delays, with date-shifted fixtures.
+        # Used by pytest to verify the full demo pathway produces expected output.
+        create_synthetic_data()
+        dated_dir = create_dated_demo_dir()
+        try:
+            os.environ["CLAUDE_CONFIG_DIR"] = str(dated_dir)
+            # Reload DEMO_ENV so _run() uses the dated dir
+            global DEMO_ENV
+            DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir), "NO_COLOR": "1"}
+            run_demo_acts()
+        finally:
+            shutil.rmtree(dated_dir, ignore_errors=True)
+
+    elif args.test_post_a_acts:
+        # Run Post A acts without timing delays, with date-shifted fixtures.
+        create_synthetic_data()
+        dated_dir = create_dated_demo_dir()
+        try:
+            os.environ["CLAUDE_CONFIG_DIR"] = str(dated_dir)
+            DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir), "NO_COLOR": "1"}
+            run_post_a_acts()
+        finally:
+            shutil.rmtree(dated_dir, ignore_errors=True)
 
     else:
         parser.print_help()
