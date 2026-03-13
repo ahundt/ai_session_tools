@@ -1406,9 +1406,10 @@ class TestDemoFree:
         """Run all default demo acts end-to-end and verify expected output."""
         result = subprocess.run(
             [sys.executable, str(Path(__file__)), "--test-acts"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, timeout=120,
+            encoding="utf-8", errors="replace",
         )
-        combined = result.stdout + result.stderr
+        combined = (result.stdout or "") + (result.stderr or "")
         assert result.returncode == 0, f"--test-acts failed (rc={result.returncode}):\n{combined}"
         for fragment, desc in _VERIFY_CHECKS:
             assert fragment in combined, \
@@ -1418,9 +1419,10 @@ class TestDemoFree:
         """Run all Post A demo acts end-to-end and verify expected output."""
         result = subprocess.run(
             [sys.executable, str(Path(__file__)), "--test-post-a-acts"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, timeout=120,
+            encoding="utf-8", errors="replace",
         )
-        combined = result.stdout + result.stderr
+        combined = (result.stdout or "") + (result.stderr or "")
         assert result.returncode == 0, f"--test-post-a-acts failed (rc={result.returncode}):\n{combined}"
         for fragment, desc in _POST_A_VERIFY_CHECKS:
             assert fragment in combined, \
