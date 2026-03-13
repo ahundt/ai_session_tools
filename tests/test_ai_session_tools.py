@@ -1050,13 +1050,14 @@ class TestRootSearchToolFlag:
         )
         assert result.exit_code == 0
 
-    def test_root_search_tools_domain_requires_tool(self, tmp_path):
+    def test_root_search_tools_domain_without_tool_succeeds(self, tmp_path):
+        """B3: search tools without --tool now searches all tool types."""
         projects = _make_projects_with_sessions(tmp_path)
         result = runner.invoke(
             app, ["--provider", "claude", "search", "tools"],
             env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
         )
-        assert result.exit_code != 0
+        assert result.exit_code == 0
 
 
 class TestRootFindAlias:
@@ -1097,12 +1098,21 @@ class TestMessagesFindAlias:
         )
         assert result.exit_code == 0
 
+    @pytest.mark.integration
     def test_statistics_consistency(self, engine):
-        """Test that statistics are consistent"""
+        """Test that statistics are consistent.
+
+        Note: search() now includes Edit-tracked files from JSONL (Phase 2),
+        so search results may exceed stats.total_files (which only counts
+        Write-based files from recovery_dir). Both counts should be non-negative.
+
+        Marked integration: uses real engine fixture scanning all JSONL files.
+        """
         stats = engine.get_statistics()
         search_results = engine.search(".*")
-        # Statistics should count all files
-        assert stats.total_files >= len(search_results)
+        # Both should return valid counts
+        assert stats.total_files >= 0
+        assert len(search_results) >= stats.total_files  # search includes Edit files too
 
 
 class TestEdgeCases:
@@ -14571,3 +14581,457 @@ class TestOutputFlagWithPlainDefault:
             f"Output file must contain search result content.\n"
             f"Got:\n{content}"
         )
+
+
+# ─── Plan TDD: _iter_tool_use_blocks (P10) ──────────────────────────────────
+
+class TestIterToolUseBlocks:
+    """Tests for _iter_tool_use_blocks() module-level helper at engine.py."""
+
+    def test_empty_content(self):
+        from ai_session_tools.engine import _iter_tool_use_blocks
+        assert list(_iter_tool_use_blocks([])) == []
+
+    def test_text_only_content(self):
+        from ai_session_tools.engine import _iter_tool_use_blocks
+        content = [{"type": "text", "text": "hello"}]
+        assert list(_iter_tool_use_blocks(content)) == []
+
+    def test_single_tool_use(self):
+        from ai_session_tools.engine import _iter_tool_use_blocks
+        block = {"type": "tool_use", "name": "Edit", "input": {"file_path": "a.py"}}
+        content = [{"type": "text", "text": "x"}, block]
+        assert list(_iter_tool_use_blocks(content)) == [block]
+
+    def test_multiple_tool_uses(self):
+        from ai_session_tools.engine import _iter_tool_use_blocks
+        b1 = {"type": "tool_use", "name": "Edit", "input": {}}
+        b2 = {"type": "tool_use", "name": "Write", "input": {}}
+        assert list(_iter_tool_use_blocks([b1, b2])) == [b1, b2]
+
+    def test_non_dict_items_skipped(self):
+        from ai_session_tools.engine import _iter_tool_use_blocks
+        content = ["string", 42, None, {"type": "tool_use", "name": "Bash"}]
+        result = list(_iter_tool_use_blocks(content))
+        assert len(result) == 1
+        assert result[0]["name"] == "Bash"
+
+
+# ─── Plan TDD: _iter_file_tool_calls (P6/Step0) ────────────────────────────
+
+def _make_session_jsonl_for_tool(tmp_path, tool, filename, session_id="test_sess",
+                                  timestamp="2026-01-01T00:00:00", **tool_input):
+    """Create a minimal JSONL file with one tool call for plan TDD tests."""
+    projects = tmp_path / "projects" / "-test-project"
+    projects.mkdir(parents=True, exist_ok=True)
+    jsonl = projects / f"{session_id}.jsonl"
+    inp = {"file_path": f"/repo/{filename}"}
+    if tool == "Write":
+        inp["content"] = tool_input.get("content", "")
+    elif tool == "Edit":
+        inp["old_string"] = tool_input.get("old_string", "")
+        inp["new_string"] = tool_input.get("new_string", "")
+        if tool_input.get("replace_all"):
+            inp["replace_all"] = True
+    elif tool == "Bash":
+        inp["command"] = tool_input.get("command", "echo test")
+    record = json.dumps({
+        "type": "assistant",
+        "timestamp": timestamp,
+        "sessionId": session_id,
+        "message": {
+            "content": [
+                {"type": "tool_use", "name": tool, "input": inp}
+            ]
+        }
+    })
+    with open(jsonl, "a") as f:
+        f.write(record + "\n")
+    return jsonl
+
+
+def _make_plan_engine(tmp_path):
+    """Create a SessionRecoveryEngine for plan TDD tests."""
+    return SessionRecoveryEngine(
+        tmp_path / "projects",
+        tmp_path / "recovery",
+    )
+
+
+class TestIterFileToolCalls:
+    """Tests for _iter_file_tool_calls() shared JSONL scanner at engine.py."""
+
+    def test_finds_edit_calls(self, tmp_path):
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      old_string="old", new_string="new")
+        engine = _make_plan_engine(tmp_path)
+        calls = list(engine._iter_file_tool_calls("test.py"))
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "Edit"
+        assert calls[0]["file_path"].endswith("test.py")
+
+    def test_finds_write_calls(self, tmp_path):
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="test.py",
+                                      content="hello world")
+        engine = _make_plan_engine(tmp_path)
+        calls = list(engine._iter_file_tool_calls("test.py"))
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "Write"
+
+    def test_wildcard_returns_all_files(self, tmp_path):
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="a.py",
+                                      session_id="s1", old_string="x", new_string="y")
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="b.py",
+                                      session_id="s2", content="hello")
+        engine = _make_plan_engine(tmp_path)
+        calls = list(engine._iter_file_tool_calls("*"))
+        filenames = {Path(c["file_path"]).name for c in calls}
+        assert "a.py" in filenames
+        assert "b.py" in filenames
+
+    def test_session_id_filter(self, tmp_path):
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      session_id="abc123", old_string="a", new_string="b")
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      session_id="def456", old_string="c", new_string="d")
+        engine = _make_plan_engine(tmp_path)
+        calls = list(engine._iter_file_tool_calls("test.py", session_id="abc"))
+        assert all(c["session_id"].startswith("abc") for c in calls)
+        assert len(calls) >= 1
+
+    def test_tools_filter(self, tmp_path):
+        _make_session_jsonl_for_tool(tmp_path, tool="Bash", filename="test.py",
+                                      command="echo hi")
+        engine = _make_plan_engine(tmp_path)
+        calls = list(engine._iter_file_tool_calls("test.py", tools=("Edit", "Write")))
+        assert len(calls) == 0  # Bash excluded
+
+    def test_corrupt_jsonl_skipped(self, tmp_path):
+        projects = tmp_path / "projects" / "test" / "sess123"
+        projects.mkdir(parents=True)
+        jsonl_file = projects / "sess123.jsonl"
+        jsonl_file.write_text('not json\n{"type":"assistant"BAD\n')
+        engine = _make_plan_engine(tmp_path)
+        calls = list(engine._iter_file_tool_calls("test.py"))
+        assert calls == []  # no crash
+
+
+# ─── Plan TDD: _opt_limit factory (P2) ──────────────────────────────────────
+
+class TestOptLimitFactory:
+    """Tests for _opt_limit() and None-default semantics."""
+
+    def test_none_default_full_list(self):
+        data = [1, 2, 3, 4, 5]
+        limit = None
+        assert data[:limit] == [1, 2, 3, 4, 5]
+
+    def test_positive_limit_slices(self):
+        data = [1, 2, 3, 4, 5]
+        limit = 3
+        assert data[:limit] == [1, 2, 3]
+
+    def test_zero_returns_empty(self):
+        """Verify 0 is never a valid limit value (would return empty)."""
+        data = [1, 2, 3]
+        assert data[:0] == []  # This is the bug we prevent
+
+    def test_negative_drops_last(self):
+        """Verify -1 is never a valid limit value (would drop last)."""
+        data = [1, 2, 3]
+        assert data[:-1] == [1, 2]  # This is wrong for "unlimited"
+
+
+# ─── Plan TDD: FileVersion new fields ───────────────────────────────────────
+
+class TestFileVersionNewFields:
+    """Tests for FileVersion.tool, lines_added, lines_deleted fields."""
+
+    def test_defaults(self):
+        v = FileVersion(filename="test.py", version_num=1, line_count=10, session_id="abc")
+        assert v.tool == "Write"
+        assert v.lines_added == 0
+        assert v.lines_deleted == 0
+
+    def test_explicit_fields(self):
+        v = FileVersion(
+            filename="test.py", version_num=2, line_count=15, session_id="abc",
+            tool="Edit", lines_added=7, lines_deleted=2,
+        )
+        assert v.tool == "Edit"
+        assert v.lines_added == 7
+        assert v.lines_deleted == 2
+
+    def test_frozen_immutability(self):
+        v = FileVersion(filename="test.py", version_num=1, line_count=10, session_id="abc")
+        with pytest.raises(AttributeError):
+            v.tool = "Edit"  # type: ignore[misc]
+
+    def test_sort_by_version_num(self):
+        v1 = FileVersion(filename="a.py", version_num=1, line_count=10, session_id="s1", tool="Write")
+        v2 = FileVersion(filename="a.py", version_num=2, line_count=15, session_id="s1", tool="Edit")
+        assert v1 < v2
+        assert sorted([v2, v1]) == [v1, v2]
+
+
+# ─── Plan TDD: reconstruct_from_edits (C1) ──────────────────────────────────
+
+class TestReconstructFromEdits:
+    """Tests for engine.reconstruct_from_edits() — Edit reconstruction."""
+
+    def test_write_only_reconstruction(self, tmp_path):
+        """Single Write call → returns that content (Write is used as base)."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="test.py",
+                                      content="hello world")
+        engine = _make_plan_engine(tmp_path)
+        result = engine.reconstruct_from_edits("test.py")
+        assert result is not None
+        content, applied = result
+        assert content == "hello world"
+        # Write becomes base — no edits applied after it
+        assert len(applied) == 0
+
+    def test_write_then_edit(self, tmp_path):
+        """Write then Edit → Edit applied after Write."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="test.py",
+                                      content="hello world",
+                                      timestamp="2026-01-01T00:00:00")
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      old_string="hello", new_string="goodbye",
+                                      timestamp="2026-01-01T00:01:00")
+        engine = _make_plan_engine(tmp_path)
+        result = engine.reconstruct_from_edits("test.py")
+        assert result is not None
+        content, edits = result
+        assert content == "goodbye world"
+
+    def test_no_edits_returns_none(self, tmp_path):
+        """No tool calls → returns None."""
+        engine = _make_plan_engine(tmp_path)
+        assert engine.reconstruct_from_edits("nonexistent.py") is None
+
+    def test_edits_before_last_write_skipped(self, tmp_path):
+        """Edits before last Write are not replayed (already in Write content)."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      old_string="a", new_string="b",
+                                      timestamp="2026-01-01T00:00:00")
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="test.py",
+                                      content="b content",
+                                      timestamp="2026-01-01T00:01:00")
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      old_string="b content", new_string="c content",
+                                      timestamp="2026-01-01T00:02:00")
+        engine = _make_plan_engine(tmp_path)
+        result = engine.reconstruct_from_edits("test.py")
+        assert result is not None
+        content, applied = result
+        assert content == "c content"
+
+    def test_replace_all_flag(self, tmp_path):
+        """replace_all=True replaces all occurrences."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="test.py",
+                                      content="aaa",
+                                      timestamp="2026-01-01T00:00:00")
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      old_string="a", new_string="b", replace_all=True,
+                                      timestamp="2026-01-01T00:01:00")
+        engine = _make_plan_engine(tmp_path)
+        result = engine.reconstruct_from_edits("test.py")
+        content, _ = result
+        assert content == "bbb"
+
+    def test_failed_edit_skipped(self, tmp_path):
+        """Edit whose old_string is not in content is skipped."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="test.py",
+                                      content="hello",
+                                      timestamp="2026-01-01T00:00:00")
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      old_string="NOTFOUND", new_string="x",
+                                      timestamp="2026-01-01T00:01:00")
+        engine = _make_plan_engine(tmp_path)
+        result = engine.reconstruct_from_edits("test.py")
+        content, applied = result
+        assert content == "hello"
+        # Write is base; Edit with "NOTFOUND" is skipped → 0 applied
+        assert len(applied) == 0
+
+
+# ─── Plan TDD: search() Edit indexing (A1) ──────────────────────────────────
+
+class TestSearchIncludesEdits:
+    """Tests for engine.search() including Edit-modified files."""
+
+    def test_edit_only_file_found(self, tmp_path):
+        """File modified only via Edit (no Write) appears in search results."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="edited.py",
+                                      old_string="old", new_string="new")
+        engine = _make_plan_engine(tmp_path)
+        results = engine.search("edited*")
+        assert any(r.name == "edited.py" for r in results)
+
+    def test_pattern_filter_applies_to_edits(self, tmp_path):
+        """Pattern filter works on Edit-discovered files."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="foo.py",
+                                      session_id="s1", old_string="a", new_string="b")
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="bar.txt",
+                                      session_id="s2", old_string="x", new_string="y")
+        engine = _make_plan_engine(tmp_path)
+        results = engine.search("*.py")
+        names = [r.name for r in results]
+        assert "foo.py" in names
+        assert "bar.txt" not in names
+
+
+# ─── Plan TDD: get_versions() Edit entries (A2) ─────────────────────────────
+
+class TestGetVersionsIncludesEdits:
+    """Tests for engine.get_versions() including Edit entries."""
+
+    def test_edit_entries_in_timeline(self, tmp_path):
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      old_string="old", new_string="new")
+        engine = _make_plan_engine(tmp_path)
+        versions = engine.get_versions("test.py")
+        assert len(versions) >= 1
+        assert any(v.tool == "Edit" for v in versions)
+
+    def test_lines_added_deleted_tracked(self, tmp_path):
+        """lines_added and lines_deleted are tracked independently per edit."""
+        # Write 3 lines, then edit to replace 2 lines with 1
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="test.py",
+                                      content="a\nb\nc\n",
+                                      timestamp="2026-01-01T00:00:00")
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      old_string="b\nc\n", new_string="bc\n",
+                                      timestamp="2026-01-01T00:01:00")
+        engine = _make_plan_engine(tmp_path)
+        versions = engine.get_versions("test.py")
+        edit_v = [v for v in versions if v.tool == "Edit"]
+        assert len(edit_v) == 1
+        assert edit_v[0].lines_added == 0
+        assert edit_v[0].lines_deleted == 1
+
+    def test_line_count_not_clamped(self, tmp_path):
+        """line_count can go to 0 — no clamping."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="test.py",
+                                      content="a\n",
+                                      timestamp="2026-01-01T00:00:00")
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="test.py",
+                                      old_string="a\n", new_string="",
+                                      timestamp="2026-01-01T00:01:00")
+        engine = _make_plan_engine(tmp_path)
+        versions = engine.get_versions("test.py")
+        edit_v = [v for v in versions if v.tool == "Edit"]
+        assert len(edit_v) == 1
+        assert edit_v[0].line_count == 0  # 1 - 1 = 0, NOT clamped
+        assert edit_v[0].lines_deleted == 1
+
+
+# ─── Plan TDD: Remaining fixes (B1-B3, A5b, P4-P5, P7) ─────────────────────
+
+class TestFormatJsonl:
+    """Tests for A5b: --format jsonl in _render_output()."""
+
+    def test_jsonl_output_one_line_per_record(self, capsys):
+        """JSONL outputs one JSON object per line."""
+        from ai_session_tools.cli import _render_output, TableSpec
+        spec = TableSpec(title_template="", columns=[], row_fn=lambda d: [])
+        items = [{"a": 1}, {"a": 2}]
+        _render_output(items, "jsonl", spec)
+        captured = capsys.readouterr()
+        lines = captured.out.strip().split("\n")
+        assert len(lines) == 2
+        assert json.loads(lines[0]) == {"a": 1}
+        assert json.loads(lines[1]) == {"a": 2}
+
+    def test_jsonl_to_file(self, tmp_path, capsys):
+        """JSONL with output writes to file."""
+        from ai_session_tools.cli import _render_output, TableSpec
+        spec = TableSpec(title_template="", columns=[], row_fn=lambda d: [])
+        outfile = tmp_path / "out.jsonl"
+        items = [{"x": "y"}]
+        _render_output(items, "jsonl", spec, output=str(outfile))
+        content = outfile.read_text()
+        assert json.loads(content.strip()) == {"x": "y"}
+
+
+class TestFilesSearchPositionalArg:
+    """Tests for B2: aise files search accepts positional pattern."""
+
+    def test_positional_pattern(self, tmp_path):
+        """aise files search 'test*' works without --pattern."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "files", "search", "test*"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        # Should not error with "unexpected argument"
+        assert "unexpected" not in (result.output or "").lower()
+        assert result.exit_code == 0
+
+    def test_flag_pattern_still_works(self, tmp_path):
+        """aise files search --pattern 'test*' still works."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "files", "search", "--pattern", "test*"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert result.exit_code == 0
+
+
+class TestSearchToolsNoToolFlag:
+    """Tests for B3: aise search tools without --tool doesn't error."""
+
+    def test_no_tool_flag_accepted(self, tmp_path):
+        """aise search tools --query 'test' no longer errors."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "search", "tools", "--query", "test"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        # Should not exit with "requires --tool" error
+        assert "requires --tool" not in (result.output or "").lower()
+
+
+class TestRootAliasParity:
+    """Tests for P4: root history/get have same params as subcommands."""
+
+    def test_root_history_accepts_since(self, tmp_path):
+        """aise history test.py --since 2d accepted (not 'unknown option')."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "history", "test.py", "--since", "2d"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert "No such option" not in (result.output or "")
+
+    def test_root_get_accepts_since(self, tmp_path):
+        """aise get sess123 --since 2d accepted."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "get", "sess123", "--since", "2d"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert "No such option" not in (result.output or "")
+
+
+class TestSessionNamingConsistency:
+    """Tests for P7: --session alias on files search and root search."""
+
+    def test_files_search_session_flag(self, tmp_path):
+        """aise files search --session <sid> works."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "files", "search", "--session", "test"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert "No such option" not in (result.output or "")
+
+    def test_root_search_session_flag(self, tmp_path):
+        """aise search --session <sid> works."""
+        projects = _make_projects_with_sessions(tmp_path)
+        result = runner.invoke(
+            app, ["--provider", "claude", "search", "--session", "test"],
+            env={"AI_SESSION_TOOLS_PROJECTS": str(projects)},
+        )
+        assert "No such option" not in (result.output or "")

@@ -17,7 +17,7 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Set
 
 if TYPE_CHECKING:
     from .filters import SearchFilter
@@ -540,6 +540,13 @@ def _is_structured_instruction_body(content: str) -> bool:
     return subsections >= 5
 
 
+def _iter_tool_use_blocks(content: list) -> "Iterator[dict]":
+    """Yield tool_use items from a message content array."""
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "tool_use":
+            yield item
+
+
 class SessionRecoveryEngine:
     """Core recovery engine with clean separation of concerns."""
 
@@ -835,66 +842,114 @@ class SessionRecoveryEngine:
         # Compile first: raise ValueError on bad patterns before any I/O.
         pattern_re = self._compile_pattern(pattern)
 
-        if not self.recovery_dir.exists():
-            return []
-
-        # location is always "recovery"; short-circuit if include_folders excludes it.
-        if filters.include_folders and not filters.matches_location("recovery"):
-            return []
-
         results: List[SessionFile] = []
         seen_names: Set[str] = set()
 
-        with os.scandir(self.recovery_dir) as it:
-            for entry in it:
-                if not entry.is_dir():
-                    continue
-                name = entry.name
-                if not name.startswith("session_") or "all_versions" in name:
-                    continue
+        # Phase 1: Scan recovery_dir for Write-based files
+        skip_phase1 = (
+            not self.recovery_dir.exists()
+            or (filters.include_folders and not filters.matches_location("recovery"))
+        )
 
-                # Session dir-level pre-filter: skip entire dir before iterating files.
-                session_id_str = name[len("session_"):]
-                if filters.include_sessions and session_id_str not in filters.include_sessions:
-                    continue
-                if filters.exclude_sessions and session_id_str in filters.exclude_sessions:
-                    continue
+        if not skip_phase1:
+            with os.scandir(self.recovery_dir) as it:
+                for entry in it:
+                    if not entry.is_dir():
+                        continue
+                    name = entry.name
+                    if not name.startswith("session_") or "all_versions" in name:
+                        continue
 
-                session_dir = Path(entry.path)
+                    # Session dir-level pre-filter: skip entire dir before iterating files.
+                    session_id_str = name[len("session_"):]
+                    if filters.include_sessions and session_id_str not in filters.include_sessions:
+                        continue
+                    if filters.exclude_sessions and session_id_str in filters.exclude_sessions:
+                        continue
 
-                with os.scandir(session_dir) as it2:
-                    for entry2 in it2:
-                        if not entry2.is_file() or not pattern_re.search(entry2.name):
-                            continue
-                        if entry2.name in seen_names:
-                            continue
+                    session_dir = Path(entry.path)
 
-                        file_path = Path(entry2.path)
-
-                        # Extension pre-filter: skip stat+get_versions for wrong extensions.
-                        ext = file_path.suffix.lstrip(".")
-                        if not filters.matches_extension(ext):
-                            continue
-
-                        # Stat pre-filter: check date/size before expensive get_versions.
-                        if filters.since or filters.until or filters.min_size or (filters.max_size is not None):
-                            try:
-                                s = file_path.stat()
-                                mtime = datetime.datetime.fromtimestamp(
-                                    s.st_mtime, tz=datetime.timezone.utc
-                                ).strftime("%Y-%m-%dT%H:%M:%S")
-                                if not filters.matches_datetime(mtime) or not filters.matches_size(s.st_size):
-                                    continue
-                            except OSError:
+                    with os.scandir(session_dir) as it2:
+                        for entry2 in it2:
+                            if not entry2.is_file() or not pattern_re.search(entry2.name):
+                                continue
+                            if entry2.name in seen_names:
                                 continue
 
-                        file_info = self._get_or_create_file_info(file_path)
-                        if file_info is None:
-                            continue
+                            file_path = Path(entry2.path)
 
-                        if self._apply_all_filters(file_info, filters):
-                            results.append(file_info)
-                            seen_names.add(file_path.name)
+                            # Extension pre-filter: skip stat+get_versions for wrong extensions.
+                            ext = file_path.suffix.lstrip(".")
+                            if not filters.matches_extension(ext):
+                                continue
+
+                            # Stat pre-filter: check date/size before expensive get_versions.
+                            if filters.since or filters.until or filters.min_size or (filters.max_size is not None):
+                                try:
+                                    s = file_path.stat()
+                                    mtime = datetime.datetime.fromtimestamp(
+                                        s.st_mtime, tz=datetime.timezone.utc
+                                    ).strftime("%Y-%m-%dT%H:%M:%S")
+                                    if not filters.matches_datetime(mtime) or not filters.matches_size(s.st_size):
+                                        continue
+                                except OSError:
+                                    continue
+
+                            file_info = self._get_or_create_file_info(file_path)
+                            if file_info is None:
+                                continue
+
+                            if self._apply_all_filters(file_info, filters):
+                                results.append(file_info)
+                                seen_names.add(file_path.name)
+
+        # Phase 2: Scan JSONL for Edit/Write/NotebookEdit tool calls not in recovery_dir
+        edit_files: dict[str, dict] = {}  # filename -> aggregated info
+        for call in self._iter_file_tool_calls(
+            filename="*",
+            session_id=None,
+            tools=("Edit", "Write", "NotebookEdit"),
+        ):
+            fname = Path(call["file_path"]).name
+            if fname in seen_names:
+                continue
+            if not pattern_re.search(fname):
+                continue
+            ext = Path(fname).suffix.lstrip(".")
+            if not filters.matches_extension(ext):
+                continue
+            ts = call.get("timestamp", "")
+            if not filters.matches_datetime(ts):
+                continue
+            if fname not in edit_files:
+                edit_files[fname] = {
+                    "sessions": set(), "edits": 0,
+                    "first_ts": ts, "last_ts": ts, "path": call["file_path"],
+                }
+            info = edit_files[fname]
+            info["sessions"].add(call["session_id"])
+            info["edits"] += 1
+            if ts and (not info["first_ts"] or ts < info["first_ts"]):
+                info["first_ts"] = ts
+            if ts and (not info["last_ts"] or ts > info["last_ts"]):
+                info["last_ts"] = ts
+
+        for fname, info in edit_files.items():
+            if not filters.matches_edits(info["edits"]):
+                continue
+            if filters.include_sessions and not info["sessions"] & filters.include_sessions:
+                continue
+            if filters.exclude_sessions and info["sessions"] & filters.exclude_sessions:
+                continue
+            results.append(SessionFile(
+                name=fname,
+                path=info["path"],
+                edits=info["edits"],
+                sessions=sorted(info["sessions"]),
+                created_date=info["first_ts"],
+                last_modified=info["last_ts"],
+            ))
+            seen_names.add(fname)
 
         return sorted(results, key=lambda f: f.edits, reverse=True)
 
@@ -938,7 +993,63 @@ class SessionRecoveryEngine:
                         )
                     )
 
-        versions.sort()
+        # Phase 2: Append Edit/NotebookEdit entries from JSONL
+        max_write_version = max((v.version_num for v in versions), default=0)
+        # Estimate running line count from last Write version or disk file
+        running_line_count = 0
+        if versions:
+            last_write = max(versions, key=lambda v: v.version_num)
+            running_line_count = last_write.line_count
+        else:
+            orig = self.get_original_path(filename)
+            if orig and Path(orig).exists():
+                try:
+                    with open(orig, encoding="utf-8", errors="replace") as _f:
+                        running_line_count = sum(1 for _ in _f)
+                except OSError:
+                    pass
+        edit_version_num = max_write_version + 1
+        # Scan all tool types: Write calls update baseline, Edit/NotebookEdit create entries
+        all_calls = sorted(
+            self._iter_file_tool_calls(filename, tools=("Edit", "Write", "NotebookEdit")),
+            key=lambda x: x.get("timestamp", ""),
+        )
+        for call in all_calls:
+            inp = call["input"]
+            if call["tool"] == "Write":
+                # Write calls update running baseline but don't create new version entries
+                # (Phase 1 already has them from recovery_dir)
+                content = inp.get("content", "")
+                running_line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+                continue
+            old_s = inp.get("old_string", "")
+            new_s = inp.get("new_string", "")
+            if not old_s and not new_s:
+                continue
+            old_lines = old_s.count("\n")
+            new_lines = new_s.count("\n")
+            added = max(new_lines - old_lines, 0)
+            deleted = max(old_lines - new_lines, 0)
+            running_line_count += (new_lines - old_lines)
+            versions.append(
+                FileVersion(
+                    filename=filename,
+                    version_num=edit_version_num,
+                    line_count=running_line_count,
+                    session_id=call["session_id"],
+                    timestamp=call.get("timestamp", ""),
+                    tool=call["tool"],
+                    lines_added=added,
+                    lines_deleted=deleted,
+                )
+            )
+            edit_version_num += 1
+
+        # Sort by timestamp when Edit entries present for chronological interleaving
+        if edit_version_num > max_write_version + 1:
+            versions.sort(key=lambda v: (v.timestamp or "", v.version_num))
+        else:
+            versions.sort()
         self._version_cache[filename] = versions
         return versions
 
@@ -1649,6 +1760,138 @@ class SessionRecoveryEngine:
                 continue
         results.sort(key=lambda x: x["timestamp"])
         return results
+
+    def _iter_file_tool_calls(
+        self,
+        filename: str,
+        session_id: Optional[str] = None,
+        tools: tuple = ("Edit", "Write", "NotebookEdit"),
+    ) -> Iterator[dict]:
+        """Yield tool call dicts for a file from JSONL, in file-scan order (NOT sorted).
+
+        Each dict: {tool, file_path, timestamp, session_id, input: {…}}
+        Reuses _iter_all_jsonl() for session/date filtering.
+        Callers needing chronological order must sort by timestamp themselves.
+        """
+        for _, jsonl_file, _ in self._iter_all_jsonl(
+            session_id_prefix=session_id,
+        ):
+            try:
+                with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
+                            continue
+                        try:
+                            data = _json_loads(line)
+                            if data.get("type") != "assistant":
+                                continue
+                            sid = data.get("sessionId", "")
+                            if session_id and not sid.startswith(session_id):
+                                continue
+                            for item in _iter_tool_use_blocks(
+                                data.get("message", {}).get("content") or []
+                            ):
+                                tool_name = item.get("name", "")
+                                if tool_name not in tools:
+                                    continue
+                                inp = item.get("input", {})
+                                fp = inp.get("file_path", "")
+                                if filename != "*" and Path(fp).name != filename:
+                                    continue
+                                yield {
+                                    "tool": tool_name,
+                                    "file_path": fp,
+                                    "timestamp": data.get("timestamp", ""),
+                                    "session_id": sid,
+                                    "input": inp,
+                                }
+                        except (json.JSONDecodeError, KeyError, ValueError):
+                            continue
+            except OSError:
+                continue
+
+    def reconstruct_from_edits(
+        self,
+        filename: str,
+        session_id: Optional[str] = None,
+        base_content: Optional[str] = None,
+    ) -> Optional[tuple]:
+        """Reconstruct a file by replaying Edit/Write tool calls from session JSONL.
+
+        Returns (reconstructed_content, applied_edits_list) or None if no edits found.
+        """
+        calls = sorted(
+            self._iter_file_tool_calls(filename, session_id=session_id),
+            key=lambda x: x["timestamp"],
+        )
+        if not calls:
+            return None
+
+        # Build edit sequence
+        edits: list = []
+        for call in calls:
+            inp = call["input"]
+            if call["tool"] == "Write":
+                edits.append({"tool": "Write", "content": inp.get("content", ""),
+                              "timestamp": call["timestamp"], "session_id": call["session_id"]})
+            elif call["tool"] in ("Edit", "NotebookEdit"):
+                old = inp.get("old_string", "")
+                new = inp.get("new_string", "")
+                if old or new:
+                    edits.append({"tool": "Edit", "old_string": old, "new_string": new,
+                                  "replace_all": inp.get("replace_all", False),
+                                  "timestamp": call["timestamp"], "session_id": call["session_id"]})
+
+        if not edits:
+            return None
+
+        # Determine base content and edit start index
+        content = base_content
+        base_edit_idx = 0
+        if content is None:
+            # Strategy 1: Use most recent Write as base, apply only edits AFTER it
+            for i in range(len(edits) - 1, -1, -1):
+                if edits[i]["tool"] == "Write":
+                    content = edits[i]["content"]
+                    base_edit_idx = i + 1
+                    break
+        if content is None:
+            # Strategy 2: git show HEAD:<path>
+            original_path = self.get_original_path(filename)
+            if original_path:
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        ["git", "show", f"HEAD:{original_path}"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if result.returncode == 0:
+                        content = result.stdout
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    pass
+        if content is None:
+            # Strategy 3: Read current file from disk
+            original_path = self.get_original_path(filename)
+            if original_path and Path(original_path).exists():
+                content = Path(original_path).read_text(errors="replace")
+        if content is None:
+            return None
+
+        # Apply edits sequentially, starting from base_edit_idx
+        applied = []
+        for edit in edits[base_edit_idx:]:
+            if edit["tool"] == "Write":
+                content = edit["content"]
+                applied.append(edit)
+            elif edit["tool"] == "Edit":
+                if edit["old_string"] in content:
+                    if edit.get("replace_all"):
+                        content = content.replace(edit["old_string"], edit["new_string"])
+                    else:
+                        content = content.replace(edit["old_string"], edit["new_string"], 1)
+                    applied.append(edit)
+
+        return (content, applied)
 
     def export_session_markdown(self, session_id: str) -> str:
         """Export one session's messages as a markdown string.

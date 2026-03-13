@@ -100,6 +100,9 @@ class FileVersion:
     line_count: int
     session_id: str
     timestamp: str = ""
+    tool: str = "Write"  # "Write", "Edit", or "NotebookEdit"
+    lines_added: int = 0  # gross lines added in this version's edit
+    lines_deleted: int = 0  # gross lines deleted in this version's edit
 
     def __lt__(self, other: FileVersion) -> bool:
         """Compare by version number for sorting."""

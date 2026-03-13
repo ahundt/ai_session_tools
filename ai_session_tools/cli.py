@@ -590,6 +590,14 @@ def _render_output(
         else:
             sys.stdout.write(json_text)
         return
+    if fmt == "jsonl":
+        jsonl_lines = [json.dumps(d, default=str) for d in dicts]
+        jsonl_text = "\n".join(jsonl_lines) + "\n"
+        if output:
+            Path(output).expanduser().write_text(jsonl_text, encoding="utf-8")
+        else:
+            sys.stdout.write(jsonl_text)
+        return
     if fmt in ("csv", "plain"):
         lines = [spec.plain_fn(d) if spec.plain_fn else "  ".join(str(v) for v in spec.row_fn(d)) for d in dicts]
         for line in lines:
@@ -756,6 +764,26 @@ _OPT_IDS_ONLY = typer.Option(
     False, "--ids-only",
     help="Output only session IDs, one per line. Designed for piping to other aise commands "
          "via xargs or shell loops. Suppresses all other output.",
+)
+
+
+def _opt_limit(default: Optional[int] = None, help_noun: str = "results") -> typer.Option:
+    """Factory for --limit option. None = unlimited (list[:None] returns full list)."""
+    return typer.Option(
+        default, "--limit",
+        help=f"Max {help_noun} to return. Default: unlimited.",
+    )
+
+
+_OPT_SESSION = typer.Option(
+    None, "--session", "-s",
+    help="Limit to one session ID (prefix match). Find IDs via 'aise list'.",
+)
+
+
+_OPT_DRY_RUN = typer.Option(
+    False, "--dry-run",
+    help="Show what would happen without making changes.",
 )
 
 
@@ -1344,6 +1372,35 @@ def _do_extract(  # noqa: C901
             raise typer.Exit(code=1)
 
     if not versions:
+        # Fall back to Edit-based reconstruction
+        result = engine.reconstruct_from_edits(name, session_id=session)
+        if result:
+            content, applied_edits = result
+            err_console.print(
+                f"[green]Reconstructed {name} from {len(applied_edits)} "
+                f"edit{'s' if len(applied_edits) != 1 else ''}[/green]"
+            )
+            if dry_run:
+                err_console.print(f"[yellow][dry run] would output {len(content)} chars[/yellow]")
+                return
+            if restore:
+                original = engine.get_original_path(name)
+                if original:
+                    target = _resolve_output_path(Path(original))
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content)
+                    err_console.print(f"Restored to: {target}")
+                else:
+                    err_console.print(f"[red]No original path recorded for:[/red] {name}")
+                    raise typer.Exit(code=1)
+            elif output_dir:
+                target = Path(output_dir).expanduser() / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+                err_console.print(f"Written to: {target}")
+            else:
+                sys.stdout.write(content)
+            return
         err_console.print(f"[red]File not found in session data:[/red] {name}")
         raise typer.Exit(code=1)
 
@@ -1434,8 +1491,11 @@ def _do_history_display(
             "version": f"v{v.version_num}",
             "lines": v.line_count,
             "delta_lines": delta,
+            "added": getattr(v, "lines_added", 0),
+            "deleted": getattr(v, "lines_deleted", 0),
             "timestamp": v.timestamp or "—",
             "session": v.session_id if full_uuid else v.session_id[:8],
+            "tool": getattr(v, "tool", "Write"),
         })
         prev_lines = v.line_count
 
@@ -1444,7 +1504,7 @@ def _do_history_display(
         return
     if fmt in ("csv", "plain") or fmt is None:
         for r in rows:
-            console.print(f"{r['version']}  {r['lines']}  {r['delta_lines']}  {r['timestamp']}  {r['session']}")
+            console.print(f"{r['version']}  {r['lines']}  {r['delta_lines']}  +{r['added']}/-{r['deleted']}  {r['timestamp']}  {r['session']}  {r['tool']}")
         return
     # Default: Rich table
     from rich.table import Table
@@ -1458,8 +1518,14 @@ def _do_history_display(
         session_col_kw["min_width"] = 36
         session_col_kw["no_wrap"] = True
     table.add_column("Session", **session_col_kw)
+    table.add_column("Tool", style="green", justify="center")
+    table.add_column("+Add", justify="right", style="green")
+    table.add_column("-Del", justify="right", style="red")
     for r in rows:
-        table.add_row(r["version"], str(r["lines"]), r["delta_lines"], r["timestamp"], r["session"])
+        tool_label = {"Write": "W", "Edit": "E", "NotebookEdit": "NE"}.get(r["tool"], "?")
+        add_s = f"+{r['added']}" if r["added"] else "—"
+        del_s = f"-{r['deleted']}" if r["deleted"] else "—"
+        table.add_row(r["version"], str(r["lines"]), r["delta_lines"], r["timestamp"], r["session"], tool_label, add_s, del_s)
     console.print(table)
 
 
@@ -1573,7 +1639,7 @@ def _do_messages_search(
     engine: "AISession",
     query: str,
     message_type: Optional[str] = None,
-    limit: int = 0,
+    limit: Optional[int] = None,
     max_chars: Optional[int] = None,
     fmt: Optional[str] = None,
     tool: Optional[str] = None,
@@ -1625,7 +1691,7 @@ def _do_messages_search(
             after_index=after_index,
             after_timestamp=after_timestamp,
         )
-        ctx_results = ctx_results[:limit or None]
+        ctx_results = ctx_results[:limit]
         out_console = _console(record=bool(output))
         if not ctx_results:
             out_console.print(f"[yellow]No messages match query{tag}[/yellow]")
@@ -1666,7 +1732,7 @@ def _do_messages_search(
         after_index=after_index,
         after_timestamp=after_timestamp,
     )
-    results = all_results[:limit or None]
+    results = all_results[:limit]
 
     out_console = _console(record=bool(output))
     if not results:
@@ -2193,13 +2259,9 @@ def _do_search(  # noqa: C901
     tool: Optional[str] = None,
 ) -> None:
     """Shared logic for search() and find() commands."""
-    # When user explicitly says 'tools' domain, --tool is required.
+    # When domain is 'tools' and --tool is omitted, search all tool types.
     if domain == "tools" and tool is None:
-        typer.echo(
-            "Error: 'tools' domain requires --tool <name> (e.g. --tool Bash, --tool Write, --tool Edit).",
-            err=True,
-        )
-        raise typer.Exit(1)
+        message_type = "assistant"
 
     # Normalize "tools" domain -> "messages" after validation
     if domain == "tools":
@@ -2257,7 +2319,7 @@ def _do_get(
     engine: "AISession",
     session_id: Optional[str],
     message_type: Optional[str] = None,
-    limit: int = 0,
+    limit: Optional[int] = None,
     max_chars: Optional[int] = None,
     fmt: Optional[str] = None,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
@@ -2346,10 +2408,7 @@ def export_session(
         None, "--output", "-o",
         help="Write to this file instead of stdout. Example: --output session.md",
     ),
-    dry_run: bool = typer.Option(
-        False, "--dry-run",
-        help="Show what would be written without producing any output or writing files.",
-    ),
+    dry_run: bool = _OPT_DRY_RUN,
 ) -> None:
     """Export a single session's messages to markdown. Outputs to stdout by default.
 
@@ -2376,7 +2435,7 @@ def export_recent(
         help="Output file path.",
     ),
     project: Optional[str] = typer.Option(None, "--project", help="Limit to this project directory substring."),
-    dry_run: bool = typer.Option(False, "--dry-run"),
+    dry_run: bool = _OPT_DRY_RUN,
 ) -> None:
     """Export all sessions from the last N days to a single markdown file.
 
@@ -2398,12 +2457,14 @@ def export_recent(
 def files_search(
     ctx: typer.Context,
     provider: Optional[str] = _OPT_PROVIDER,
+    pattern_pos: Optional[str] = typer.Argument(None, metavar="[PATTERN]", help="Filename glob/regex (shorthand for --pattern)."),
     pattern: str = typer.Option("*", "--pattern", "-p", help="Filename glob/regex to match (e.g. '*.py', 'cli*'). Default: * (all files)"),
     min_edits: int = typer.Option(0, "--min-edits", help="Only show files edited at least this many times across all sessions. Default: 0"),
     max_edits: Optional[int] = typer.Option(None, "--max-edits", help="Only show files edited at most this many times. Default: unlimited"),
     include_extensions: Optional[str] = typer.Option(None, "--include-extensions", "-i", help="Only these file extensions, comma-separated (e.g. py,md,json)"),
     exclude_extensions: Optional[str] = typer.Option(None, "--exclude-extensions", "-x", help="Skip these file extensions, comma-separated (e.g. pyc,tmp)"),
-    include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="Only search these session UUIDs, comma-separated"),
+    session: Optional[str] = _OPT_SESSION,
+    include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="Advanced: multiple session UUIDs, comma-separated."),
     exclude_sessions: Optional[str] = typer.Option(None, "--exclude-sessions", help="Skip these session UUIDs, comma-separated"),
     since:  Optional[str] = _OPT_SINCE,
     until:  Optional[str] = _OPT_UNTIL,
@@ -2429,8 +2490,12 @@ def files_search(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
+    # Merge positional pattern and --session into existing params
+    effective_pattern = pattern_pos or pattern
+    if session:
+        include_sessions = f"{session},{include_sessions}" if include_sessions else session
     since, until = _normalize_date_range(since, until, when, after, before)
-    _do_files_search(engine, pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, since, until, limit, fmt)
+    _do_files_search(engine, effective_pattern, min_edits, max_edits, include_extensions, exclude_extensions, include_sessions, exclude_sessions, since, until, limit, fmt)
 
 
 # Register 'find' as hidden alias for 'files search'
@@ -2446,13 +2511,7 @@ def files_extract(
         None, "--version", "-v",
         help="Version number to extract (default: latest). Run 'files history FILENAME' to see available versions.",
     ),
-    session: Optional[str] = typer.Option(
-        None, "--session", "-s",
-        help=(
-            "Limit to versions from this session ID (prefix match). "
-            "Use 'files search FILENAME' or 'files history FILENAME' to find session IDs."
-        ),
-    ),
+    session: Optional[str] = _OPT_SESSION,
     restore: bool = typer.Option(
         False, "--restore",
         help=(
@@ -2467,10 +2526,7 @@ def files_extract(
             "Example: --output-dir ./backup  writes ./backup/cli.py"
         ),
     ),
-    dry_run: bool = typer.Option(
-        False, "--dry-run",
-        help="Show what would be extracted/written without producing any output or writing any files.",
-    ),
+    dry_run: bool = _OPT_DRY_RUN,
 ) -> None:
     """Extract a source file (cli.py, engine.py, etc.) from Claude Code session data.
 
@@ -2512,11 +2568,11 @@ def files_history(
     ctx: typer.Context,
     provider: Optional[str] = _OPT_PROVIDER,
     name: str = typer.Argument(..., help="Filename (e.g. cli.py). Use 'aise files search' to find names."),
-    session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to versions from this session ID (prefix match)."),
+    session: Optional[str] = _OPT_SESSION,
     export: bool = typer.Option(False, "--export", help="Write all versions to disk as cli_v1.py, cli_v2.py, etc."),
     export_dir: Optional[str] = typer.Option(None, "--export-dir", help="Where to write exported files. Default: versions/ alongside original path."),
     stdout_mode: bool = typer.Option(False, "--stdout", help="Print all versions to stdout with === v1 === headers (for scripting/AI)."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="With --export: show what would be written without writing."),
+    dry_run: bool = _OPT_DRY_RUN,
     fmt: Optional[str] = _OPT_FORMAT,
     since: Optional[str] = _OPT_SINCE,
     until: Optional[str] = _OPT_UNTIL,
@@ -2576,7 +2632,7 @@ def files_cross_ref(
     ctx: typer.Context,
     provider: Optional[str] = _OPT_PROVIDER,
     file: str = typer.Argument(..., help="Path to a file to compare against session edits (e.g. ./cli.py)."),
-    session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to one session (prefix match)."),
+    session: Optional[str] = _OPT_SESSION,
     fmt: Optional[str] = _OPT_FORMAT,
     full_uuid: bool = _OPT_FULL_UUID,
 ) -> None:
@@ -2607,7 +2663,7 @@ def _messages_search_cmd(
         None, "--type", "-t",
         help="Filter by message type: user, assistant, tool, slash (real slash command invocations only, identified by <command-name> XML tag), compaction (context-compaction summaries). Typer shows valid values automatically.",
     ),
-    limit: int = typer.Option(0, "--limit", help="Max messages to return. 0 = unlimited (default)"),
+    limit: Optional[int] = _opt_limit(help_noun="messages"),
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
     tool: Optional[str] = typer.Option(
@@ -2716,7 +2772,7 @@ def messages_get(
     session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016). Find IDs via 'aise list'."),
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
-    limit: int = typer.Option(0, "--limit", help="Max messages to return. 0 = unlimited (default)"),
+    limit: Optional[int] = _opt_limit(help_noun="messages"),
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
     since: Optional[str] = _OPT_SINCE,
@@ -2757,7 +2813,7 @@ def messages_corrections(
     when:   Optional[str] = _OPT_WHEN,
     after:  Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
-    limit: int = typer.Option(0, "--limit", help="Max corrections to return. 0 = unlimited (default)"),
+    limit: Optional[int] = _opt_limit(help_noun="corrections"),
     fmt: Optional[str] = _OPT_FORMAT,
     pattern: Optional[List[str]] = typer.Option(
         None, "--pattern",
@@ -2996,7 +3052,7 @@ def slash_list(
     fmt:    Optional[str] = _OPT_FORMAT,
     full_uuid: bool = _OPT_FULL_UUID,
     ids_only: bool = _OPT_IDS_ONLY,
-    limit: int = typer.Option(0, "--limit", help="Max invocations to return. 0 = unlimited (default)."),
+    limit: Optional[int] = _opt_limit(help_noun="invocations"),
     output: Optional[str] = _OPT_OUTPUT,
 ) -> None:
     """List every slash command invocation across all sessions.
@@ -3030,7 +3086,7 @@ def slash_list(
             if "ReDoS" in msg:
                 err_console.print(f"[yellow]Warning:[/yellow] --command pattern rejected: {msg}. Falling back to literal substring match.")
             invocations = [inv for inv in invocations if command.lower() in inv.command.lower()]
-    if limit > 0:
+    if limit is not None:
         invocations = invocations[:limit]
     if ids_only:
         _output_ids_only(invocations)
@@ -3227,7 +3283,7 @@ def _tools_search_cmd(
     provider: Optional[str] = _OPT_PROVIDER,
     tool: str = typer.Argument(..., help="Tool name (e.g. Bash, Edit, Write, Read, Glob, Grep)."),
     query: Optional[str] = typer.Argument(None, help="Optional text to match in tool input. Omit to list all uses."),
-    limit: int = typer.Option(0, "--limit", help="Max results. 0 = unlimited (default)"),
+    limit: Optional[int] = _opt_limit(),
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
     since: Optional[str] = _OPT_SINCE,
@@ -3394,7 +3450,8 @@ def _root_search_cmd(
     max_edits: Optional[int] = typer.Option(None, "--max-edits", help="[files] Only show files edited at most this many times. Default: unlimited"),
     include_extensions: Optional[str] = typer.Option(None, "--include-extensions", "-i", help="[files] Only these file extensions, comma-separated (e.g. py,md,json)"),
     exclude_extensions: Optional[str] = typer.Option(None, "--exclude-extensions", "-x", help="[files] Skip these file extensions, comma-separated (e.g. pyc,tmp)"),
-    include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="[files] Only search these session UUIDs, comma-separated"),
+    session: Optional[str] = _OPT_SESSION,
+    include_sessions: Optional[str] = typer.Option(None, "--include-sessions", help="[files] Advanced: multiple session UUIDs, comma-separated."),
     exclude_sessions: Optional[str] = typer.Option(None, "--exclude-sessions", help="[files] Skip these session UUIDs, comma-separated"),
     since:  Optional[str] = _OPT_SINCE,
     until:  Optional[str] = _OPT_UNTIL,
@@ -3425,6 +3482,9 @@ def _root_search_cmd(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
+    # Merge --session into --include-sessions for unified filtering
+    if session:
+        include_sessions = f"{session},{include_sessions}" if include_sessions else session
     since, until = _normalize_date_range(since, until, when, after, before)
     _do_search(
         engine, domain, pattern, query, min_edits, max_edits,
@@ -3444,10 +3504,7 @@ def extract(
         None, "--version", "-v",
         help="Version number to extract (default: latest). Run 'history FILENAME' to see available versions.",
     ),
-    session: Optional[str] = typer.Option(
-        None, "--session", "-s",
-        help="Limit to versions from this session ID (prefix match).",
-    ),
+    session: Optional[str] = _OPT_SESSION,
     restore: bool = typer.Option(
         False, "--restore",
         help="Write to the path Claude originally created/edited this file.",
@@ -3456,10 +3513,7 @@ def extract(
         None, "--output-dir", "-o",
         help="Write to this directory instead of stdout. Example: --output-dir ./backup",
     ),
-    dry_run: bool = typer.Option(
-        False, "--dry-run",
-        help="Show what would be extracted/written without producing any output.",
-    ),
+    dry_run: bool = _OPT_DRY_RUN,
 ) -> None:
     """Extract the latest (or a specific) version of a source file from session history.
 
@@ -3479,14 +3533,19 @@ def extract(
 def history(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="Filename to show history for (e.g. cli.py)."),
-    session: Optional[str] = typer.Option(None, "--session", "-s", help="Limit to versions from this session ID (prefix match)."),
+    session: Optional[str] = _OPT_SESSION,
     export: bool = typer.Option(False, "--export", help="Write all versions to disk as cli_v1.py, cli_v2.py, etc."),
     export_dir: Optional[str] = typer.Option(None, "--export-dir", help="Where to write exported files."),
     stdout_mode: bool = typer.Option(False, "--stdout", help="Print all versions to stdout with === v1 === headers."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="With --export: show what would be written without writing."),
+    dry_run: bool = _OPT_DRY_RUN,
     fmt: Optional[str] = _OPT_FORMAT,
     provider: Optional[str] = _OPT_PROVIDER,
     full_uuid: bool = _OPT_FULL_UUID,
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Show all recorded versions of a file across sessions.
 
@@ -3497,10 +3556,14 @@ def history(
     if not engine:
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
+    since_val, until_val = _normalize_date_range(since, until, when, after, before)
     versions = engine.get_versions(name)
 
     if session:
         versions = [v for v in versions if v.session_id.startswith(session)]
+    if since_val or until_val:
+        from ai_session_tools.engine import _passes_date_filter
+        versions = [v for v in versions if _passes_date_filter(v.timestamp, since_val, until_val)]
 
     if not versions:
         err_console.print(f"[red]No versions found for:[/red] {name}  (check filters)")
@@ -3522,10 +3585,15 @@ def get(
     session_id: Optional[str] = typer.Argument(None, help="Session ID (prefix match, e.g. ab841016)."),
     session_opt: Optional[str] = typer.Option(None, "--session", "-s", hidden=True),
     message_type: Optional[str] = typer.Option(None, "--type", "-t", help="Show only 'user' or 'assistant' messages. Default: both"),
-    limit: int = typer.Option(0, "--limit", help="Max messages to return. 0 = unlimited (default)"),
+    limit: Optional[int] = _opt_limit(help_noun="messages"),
     max_chars: Optional[int] = _OPT_MAX_CHARS,
     fmt: Optional[str] = _OPT_FORMAT,
     provider: Optional[str] = _OPT_PROVIDER,
+    since: Optional[str] = _OPT_SINCE,
+    until: Optional[str] = _OPT_UNTIL,
+    when: Optional[str] = _OPT_WHEN,
+    after: Optional[str] = _OPT_AFTER,
+    before: Optional[str] = _OPT_BEFORE,
 ) -> None:
     """Read messages from one specific session.
 
@@ -3540,7 +3608,8 @@ def get(
         err_console.print("[red]Internal error: engine not initialized[/red]")
         raise typer.Exit(code=1)
     sid = session_id or session_opt
-    _do_get(engine, sid, message_type, limit, max_chars, fmt)
+    since_val, until_val = _normalize_date_range(since, until, when, after, before)
+    _do_get(engine, sid, message_type, limit, max_chars, fmt, since=since_val, until=until_val)
 
 
 @app.command()
