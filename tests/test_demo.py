@@ -53,6 +53,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final
 
+# Ensure stdout uses UTF-8 on Windows (cp1252 can't encode box-drawing chars).
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+
 # Strip ANSI escape sequences from subprocess output (Rich may emit them).
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-B0-2]")
 
@@ -573,7 +577,7 @@ def create_dated_demo_dir() -> Path:
         raise RuntimeError("No timestamps found in fixture JSONL files")
 
     # Shift: place the latest session 1 day before today
-    delta = (datetime.utcnow() - timedelta(days=1)) - max_ts
+    delta = (datetime.now(tz=None) - timedelta(days=1)) - max_ts
 
     # Copy projects and recovery subtrees to a fresh temp dir
     tmp_dir = Path(tempfile.mkdtemp(prefix="aise-demo-dated-"))
