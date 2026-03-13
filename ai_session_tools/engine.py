@@ -17,7 +17,7 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Set
+from typing import TYPE_CHECKING, Callable, Dict, Iterator, List, Optional, Set
 
 if TYPE_CHECKING:
     from .filters import SearchFilter
@@ -1451,7 +1451,7 @@ class SessionRecoveryEngine:
         project_filter: Optional[str] = None,
         session_id_prefix: Optional[str] = None,
         message_type: str = "user",
-        raw_line_filter: Optional["Callable[[str], bool]"] = None,
+        raw_line_filter: Optional[Callable[[str], bool]] = None,
     ) -> Iterator[tuple]:
         """Yield (session_id, project_dir, timestamp, data, content) for messages.
 
