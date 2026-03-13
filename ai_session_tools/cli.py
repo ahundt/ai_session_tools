@@ -1655,6 +1655,7 @@ def _do_messages_search(
     fixed_strings: bool = False,
     after_index: int = 0,
     after_timestamp: Optional[str] = None,
+    tool_use_only: bool = False,
 ) -> None:
     """Search messages across all sessions. When context > 0, each result includes
     up to ``context`` surrounding messages from the same session file.
@@ -1731,6 +1732,7 @@ def _do_messages_search(
         fixed_strings=fixed_strings,
         after_index=after_index,
         after_timestamp=after_timestamp,
+        tool_use_only=tool_use_only,
     )
     results = all_results[:limit]
 
@@ -2260,7 +2262,9 @@ def _do_search(  # noqa: C901
 ) -> None:
     """Shared logic for search() and find() commands."""
     # When domain is 'tools' and --tool is omitted, search all tool types.
-    if domain == "tools" and tool is None:
+    # Track this before normalization so we can pass tool_use_only downstream.
+    _tools_no_tool = domain == "tools" and tool is None
+    if _tools_no_tool:
         message_type = "assistant"
 
     # Normalize "tools" domain -> "messages" after validation
@@ -2311,8 +2315,11 @@ def _do_search(  # noqa: C901
 
     if domain in ("messages", "both"):
         msg_limit = limit if limit is not None else 10
+        # Thread session filter: include_sessions is comma-separated; pass first as session prefix
+        msg_session = include_sessions.split(",")[0].strip() if include_sessions else None
         _do_messages_search(engine, query or "", message_type, msg_limit, max_chars, fmt,
-                            tool=tool, since=since, until=until)
+                            tool=tool, since=since, until=until, session=msg_session,
+                            tool_use_only=_tools_no_tool)
 
 
 def _do_get(
@@ -2324,26 +2331,18 @@ def _do_get(
     fmt: Optional[str] = None,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
+    output: Optional[str] = None,
 ) -> None:
-    """Get messages from a specific session."""
-    if max_chars is None:
-        max_chars = _cfg_default("max_chars", 0)
+    """Get messages from a specific session — delegates to _do_messages_search."""
     if not session_id:
         err_console.print("[red]Session ID is required.[/red] Use 'aise list' to find session IDs.")
         raise typer.Exit(code=1)
-    messages_list = engine.get_messages(session_id, message_type)
-    if since or until:
-        from ai_session_tools.engine import _passes_date_filter
-        messages_list = [m for m in messages_list if _passes_date_filter(m.timestamp, since, until)]
-    messages_list = messages_list[:limit]
-
-    if not messages_list:
-        console.print("[yellow]No messages found[/yellow]")
-        return
-
-    formatter = MessageFormatter(max_chars=max_chars)
-    console.print(formatter.format_many(messages_list))
-    console.print(f"\n[bold]Found {len(messages_list)} messages[/bold]")
+    _do_messages_search(
+        engine, query="", message_type=message_type,
+        limit=limit, max_chars=max_chars, fmt=fmt,
+        session=session_id, since=since, until=until,
+        output=output,
+    )
 
 
 def _do_stats(

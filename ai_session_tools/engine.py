@@ -1053,6 +1053,33 @@ class SessionRecoveryEngine:
         self._version_cache[filename] = versions
         return versions
 
+    def _resolve_version_paths(
+        self, filename: str,
+    ) -> tuple:
+        """Return (version_file_paths, fallback_path).
+
+        version_file_paths: list of (Path, FileVersion) from session_all_versions_*/ dirs.
+        fallback_path: Path from session_*/ dirs (first match), only if version_file_paths is empty.
+        """
+        versions = self.get_versions(filename)
+        version_paths = []
+        if versions:
+            for v in sorted(versions):
+                session_dir = self.recovery_dir / f"session_all_versions_{v.session_id}"
+                vf = session_dir / f"{filename}_v{v.version_num:06d}_line_{v.line_count}.txt"
+                if vf.exists():
+                    version_paths.append((vf, v))
+
+        fallback = None
+        if not version_paths and self.recovery_dir.exists():
+            for session_dir in self.recovery_dir.glob("session_*/"):
+                if "all_versions" not in session_dir.name:
+                    fp = session_dir / filename
+                    if fp.exists():
+                        fallback = fp
+                        break
+        return version_paths, fallback
+
     def extract_final(self, filename: str, output_dir: Path) -> Optional[Path]:
         """Extract the most recent version of a file (highest version number).
 
@@ -1063,35 +1090,14 @@ class SessionRecoveryEngine:
         Returns:
             Path to extracted file, or None if not found.
         """
-        versions = self.get_versions(filename)
-
-        if versions:
-            # Use max version_num, not max line_count: a refactor that shortens a file
-            # should not revert to an older longer version.
-            final = max(versions, key=lambda v: v.version_num)
-            session_dir = self.recovery_dir / f"session_all_versions_{final.session_id}"
-            version_file = session_dir / f"{filename}_v{final.version_num:06d}_line_{final.line_count}.txt"
-
-            if version_file.exists():
-                output_dir.mkdir(parents=True, exist_ok=True)
-                output_path = output_dir / filename
-                output_path.write_text(version_file.read_text(errors="ignore"))
-                return output_path
-
-        # Fallback: check session_*/ directories
-        if self.recovery_dir.exists():
-            for session_dir in self.recovery_dir.glob("session_*/"):
-                if "all_versions" in session_dir.name:
-                    continue
-
-                file_path = session_dir / filename
-                if file_path.exists():
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    output_path = output_dir / filename
-                    output_path.write_text(file_path.read_text(errors="ignore"))
-                    return output_path
-
-        return None
+        version_paths, fallback = self._resolve_version_paths(filename)
+        source = version_paths[-1][0] if version_paths else fallback
+        if source is None:
+            return None
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / filename
+        output_path.write_text(source.read_text(errors="ignore"))
+        return output_path
 
     def extract_all(self, filename: str, output_dir: Path) -> List[Path]:
         """Extract all recorded versions of a file.
@@ -1103,30 +1109,18 @@ class SessionRecoveryEngine:
         Returns:
             List of paths to extracted version files.
         """
-        versions = self.get_versions(filename)
+        version_paths, fallback = self._resolve_version_paths(filename)
         output_dir.mkdir(parents=True, exist_ok=True)
         extracted = []
-
-        if versions:
-            for version in sorted(versions):
-                session_dir = self.recovery_dir / f"session_all_versions_{version.session_id}"
-                version_file = session_dir / f"{filename}_v{version.version_num:06d}_line_{version.line_count}.txt"
-
-                if version_file.exists():
-                    target = output_dir / f"v{version.version_num:06d}_line_{version.line_count}.txt"
-                    target.write_text(version_file.read_text(errors="ignore"))
-                    extracted.append(target)
-        elif self.recovery_dir.exists():
-            # Fallback: single copy from first session_*/ dir that has the file
-            for session_dir in self.recovery_dir.glob("session_*/"):
-                if "all_versions" not in session_dir.name:
-                    file_path = session_dir / filename
-                    if file_path.exists():
-                        target = output_dir / "v000001_final.txt"
-                        target.write_text(file_path.read_text(errors="ignore"))
-                        extracted.append(target)
-                        break
-
+        if version_paths:
+            for vf, v in version_paths:
+                target = output_dir / f"v{v.version_num:06d}_line_{v.line_count}.txt"
+                target.write_text(vf.read_text(errors="ignore"))
+                extracted.append(target)
+        elif fallback:
+            target = output_dir / "v000001_final.txt"
+            target.write_text(fallback.read_text(errors="ignore"))
+            extracted.append(target)
         return extracted
 
     @staticmethod
@@ -1216,6 +1210,7 @@ class SessionRecoveryEngine:
         fixed_strings: bool = False,
         after_index: int = 0,
         after_timestamp: Optional[str] = None,
+        tool_use_only: bool = False,
     ) -> List[SessionMessage]:
         """Search for messages across all sessions.
 
@@ -1231,6 +1226,8 @@ class SessionRecoveryEngine:
                            Consistent with grep -F / ripgrep -F.
             after_index: Skip the first N messages in each session before searching.
             after_timestamp: Skip messages before this timestamp within each session.
+            tool_use_only: When True, only return messages that contain tool_use blocks.
+                           Used by 'search tools' without --tool to exclude pure text messages.
 
         Returns:
             List of matching SessionMessage objects. Empty list if projects_dir does not exist.
@@ -1320,10 +1317,8 @@ class SessionRecoveryEngine:
                                 msg_content = data.get("message", {}).get("content", [])
                                 if not isinstance(msg_content, list):
                                     continue
-                                for item in msg_content:
-                                    if (isinstance(item, dict)
-                                            and item.get("type") == "tool_use"
-                                            and item.get("name", "").lower() == tool_lower):
+                                for item in _iter_tool_use_blocks(msg_content):
+                                    if item.get("name", "").lower() == tool_lower:
                                         # Serialize input for query matching + display
                                         input_str = json.dumps(item.get("input", {}))
                                         # Match query against tool input (literal or regex)
@@ -1342,6 +1337,13 @@ class SessionRecoveryEngine:
                                             ))
                                             break  # one match per message line
                             else:
+                                # tool_use_only: skip messages without tool_use blocks
+                                if tool_use_only:
+                                    msg_content = data.get("message", {}).get("content", [])
+                                    if not isinstance(msg_content, list):
+                                        continue
+                                    if not any(True for _ in _iter_tool_use_blocks(msg_content)):
+                                        continue
                                 # content already extracted above for type/compaction filtering
                                 if not content:
                                     continue
@@ -1714,50 +1716,20 @@ class SessionRecoveryEngine:
                 content_snippet (str, first snippet_chars chars), found_in_current (bool)
         """
         results: List[dict] = []
-        for project_dir_name, jsonl_file, _ in self._iter_all_jsonl():
-            try:
-                with open(jsonl_file, encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        # Raw pre-filter: only assistant messages carry tool_use blocks
-                        if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
-                            continue
-                        try:
-                            data = _json_loads(line)
-                            if data.get("type") != "assistant":
-                                continue
-                            sid = data.get("sessionId", "")
-                            if session_id and not sid.startswith(session_id):
-                                continue
-                            # Direct content array scan — cannot use _extract_content()
-                            msg_content = data.get("message", {}).get("content", [])
-                            if not isinstance(msg_content, list):
-                                continue
-                            for item in msg_content:
-                                if not isinstance(item, dict):
-                                    continue
-                                tool = item.get("name", "")
-                                if item.get("type") != "tool_use" or tool not in ("Edit", "Write"):
-                                    continue
-                                inp = item.get("input", {})
-                                fp = inp.get("file_path", "")
-                                if Path(fp).name != filename:
-                                    continue
-                                # Edit uses new_string; Write uses content
-                                snippet_src = inp.get("new_string") or inp.get("content", "")
-                                snippet = snippet_src[:snippet_chars]
-                                results.append({
-                                    "session_id": sid,
-                                    "project_dir": project_dir_name,
-                                    "timestamp": data.get("timestamp", ""),
-                                    "tool": tool,
-                                    "file_path": fp,
-                                    "content_snippet": snippet,
-                                    "found_in_current": bool(snippet and snippet in current_content),
-                                })
-                        except (json.JSONDecodeError, KeyError, ValueError):
-                            continue
-            except OSError:
-                continue
+        for call in self._iter_file_tool_calls(filename, session_id=session_id,
+                                                tools=("Edit", "Write")):
+            inp = call["input"]
+            snippet_src = inp.get("new_string") or inp.get("content", "")
+            snippet = snippet_src[:snippet_chars]
+            results.append({
+                "session_id": call["session_id"],
+                "project_dir": "",  # not available from _iter_file_tool_calls
+                "timestamp": call["timestamp"],
+                "tool": call["tool"],
+                "file_path": call["file_path"],
+                "content_snippet": snippet,
+                "found_in_current": bool(snippet and snippet in current_content),
+            })
         results.sort(key=lambda x: x["timestamp"])
         return results
 
@@ -2103,10 +2075,7 @@ class SessionRecoveryEngine:
             if msg_type == "assistant":
                 msg_content = data.get("message", {}).get("content", [])
                 if isinstance(msg_content, list):
-                    tool_count = sum(
-                        1 for item in msg_content
-                        if isinstance(item, dict) and item.get("type") == "tool_use"
-                    )
+                    tool_count = sum(1 for _ in _iter_tool_use_blocks(msg_content))
             events.append({
                 "type": msg_type,
                 "timestamp": ts,
@@ -2183,10 +2152,8 @@ class SessionRecoveryEngine:
                                 msg_content = data.get("message", {}).get("content", [])
                                 if not isinstance(msg_content, list):
                                     continue
-                                for item in msg_content:
-                                    if (isinstance(item, dict)
-                                            and item.get("type") == "tool_use"
-                                            and item.get("name", "").lower() == tool_lower):
+                                for item in _iter_tool_use_blocks(msg_content):
+                                    if item.get("name", "").lower() == tool_lower:
                                         input_str = json.dumps(item.get("input", {}))
                                         all_msgs.append(SessionMessage(
                                             type=self._parse_message_type(msg_type_raw),
@@ -2412,12 +2379,8 @@ class SessionRecoveryEngine:
                                 # Path 2: message.content[].input.file_path (assistant tool_use)
                                 msg = data.get("message") or {}
                                 if isinstance(msg, dict):
-                                    for item in msg.get("content") or []:
-                                        if (
-                                            isinstance(item, dict)
-                                            and item.get("type") == "tool_use"
-                                            and item.get("name") in ("Write", "Edit", "NotebookEdit")
-                                        ):
+                                    for item in _iter_tool_use_blocks(msg.get("content") or []):
+                                        if item.get("name") in ("Write", "Edit", "NotebookEdit"):
                                             fp = (item.get("input") or {}).get("file_path", "")
                                             if fp and Path(fp).name == filename:
                                                 last_path = fp
@@ -2970,6 +2933,7 @@ class AISession:
         fixed_strings: bool = False,
         after_index: int = 0,
         after_timestamp: str | None = None,
+        tool_use_only: bool = False,
     ) -> list[SessionMessage] | list[ContextMatch]:
         """Search messages across all configured AI session sources.
 
@@ -2987,6 +2951,7 @@ class AISession:
             fixed_strings:     When True, treat query as literal string (no regex). Consistent with grep -F.
             after_index:       Skip the first N messages in each session before searching.
             after_timestamp:   Skip messages before this timestamp within each session.
+            tool_use_only:     Only return messages containing tool_use blocks (Claude-only).
 
         Returns:
             list[SessionMessage] when context=0 and no context_before/after (default).
@@ -3053,6 +3018,7 @@ class AISession:
                 fixed_strings=fixed_strings,
                 after_index=after_index,
                 after_timestamp=after_timestamp,
+                tool_use_only=tool_use_only,
             )
             # Merge non-Claude results in multi-source mode
             non_claude = _non_claude_results()
