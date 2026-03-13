@@ -925,10 +925,18 @@ class SessionRecoveryEngine:
                 edit_files[fname] = {
                     "sessions": set(), "edits": 0,
                     "first_ts": ts, "last_ts": ts, "path": call["file_path"],
+                    "write_count": 0, "edit_count": 0, "notebook_edit_count": 0,
                 }
             info = edit_files[fname]
             info["sessions"].add(call["session_id"])
             info["edits"] += 1
+            tool_name = call["tool"]
+            if tool_name == "Write":
+                info["write_count"] += 1
+            elif tool_name == "Edit":
+                info["edit_count"] += 1
+            elif tool_name == "NotebookEdit":
+                info["notebook_edit_count"] += 1
             if ts and (not info["first_ts"] or ts < info["first_ts"]):
                 info["first_ts"] = ts
             if ts and (not info["last_ts"] or ts > info["last_ts"]):
@@ -948,6 +956,9 @@ class SessionRecoveryEngine:
                 sessions=sorted(info["sessions"]),
                 created_date=info["first_ts"],
                 last_modified=info["last_ts"],
+                write_count=info["write_count"],
+                edit_count=info["edit_count"],
+                notebook_edit_count=info["notebook_edit_count"],
             ))
             seen_names.add(fname)
 
@@ -1433,6 +1444,69 @@ class SessionRecoveryEngine:
         sessions.sort(key=lambda s: s.timestamp_first, reverse=True)
         return sessions
 
+    def _scan_user_messages(
+        self,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        project_filter: Optional[str] = None,
+        session_id_prefix: Optional[str] = None,
+        message_type: str = "user",
+        raw_line_filter: Optional["Callable[[str], bool]"] = None,
+    ) -> Iterator[tuple]:
+        """Yield (session_id, project_dir, timestamp, data, content) for messages.
+
+        Handles: _iter_all_jsonl iteration, file open, raw type prefilter, json.loads,
+        type check, date range filtering, _extract_content, empty content skip.
+
+        Args:
+            message_type: Message type to filter for. Default "user".
+                          Pass None to yield all message types.
+            raw_line_filter: Optional callable applied to each raw JSONL line BEFORE
+                             json.loads. Return True to keep, False to skip. Used for
+                             efficient pre-filtering (e.g. slash command detection).
+
+        Callers apply their own domain-specific filters (skill injection, continuation
+        summary, slash command detection, regex matching, etc.).
+        """
+        # Build raw type prefilter strings for the specified message_type
+        _type_raw_a = f'"type":"{message_type}"' if message_type else None
+        _type_raw_b = f'"type": "{message_type}"' if message_type else None
+
+        for project_dir_name, jsonl_file, skip_until_check in self._iter_all_jsonl(
+            project_filter, since=since, until=until,
+            session_id_prefix=session_id_prefix,
+        ):
+            try:
+                with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        # Raw type prefilter (skip json.loads on ~60-70% of lines)
+                        if _type_raw_a is not None:
+                            if _type_raw_a not in line and _type_raw_b not in line:
+                                continue
+                        # Optional caller-supplied raw line filter
+                        if raw_line_filter is not None and not raw_line_filter(line):
+                            continue
+                        try:
+                            data = _json_loads(line)
+                            if message_type and data.get("type") != message_type:
+                                continue
+                            ts = data.get("timestamp", "")
+                            if (since or until) and not ts:
+                                continue
+                            if since and ts and ts < since:
+                                continue
+                            if not skip_until_check and until and ts and ts > until:
+                                continue
+                            content = self._extract_content(data)
+                            if not content:
+                                continue
+                            sid = data.get("sessionId", "")
+                            yield (sid, project_dir_name, ts, data, content)
+                        except (json.JSONDecodeError, KeyError, ValueError):
+                            continue
+            except OSError:
+                continue
+
     def find_corrections(
         self,
         project_filter: Optional[str] = None,
@@ -1456,69 +1530,36 @@ class SessionRecoveryEngine:
             List of CorrectionMatch, sorted by timestamp descending.
         """
         _patterns = patterns or DEFAULT_CORRECTION_PATTERNS
-        # Pre-compile: one regex per category
         compiled = [
             (cat, re.compile("|".join(kws), re.IGNORECASE), kws)
             for cat, kws in _patterns
         ]
         results: List[CorrectionMatch] = []
-        for project_dir_name, jsonl_file, skip_until_check in self._iter_all_jsonl(
-            project_filter, since=since, until=until,
+        prev_was_slash = False
+        for sid, project_dir_name, ts, data, content in self._scan_user_messages(
+            since=since, until=until, project_filter=project_filter,
             session_id_prefix=session_id_prefix,
         ):
-            try:
-                with open(jsonl_file, encoding="utf-8", errors="replace") as f:
-                    prev_was_slash = False
-                    for line in f:
-                        try:
-                            # Raw pre-filter: skip non-user lines cheaply before json.loads.
-                            # Do NOT reset prev_was_slash here — non-user records (assistant,
-                            # system) can appear between a slash command and its skill injection.
-                            if '"type":"user"' not in line and '"type": "user"' not in line:
-                                continue
-                            data = _json_loads(line)
-                            if data.get("type") != "user":
-                                continue
-                            ts = data.get("timestamp", "")
-                            # Exclude undated messages when a date filter is active —
-                            # consistent with FilterSpec.matches_datetime() semantics.
-                            if (since or until) and not ts:
-                                continue
-                            if since and ts and ts < since:
-                                continue
-                            # skip_until_check=True: mtime < until → all records guaranteed
-                            # before until, so the per-record check can be skipped.
-                            if not skip_until_check and until and ts and ts > until:
-                                continue
-                            content = self._extract_content(data)
-                            if not content:
-                                continue
-                            # Skip false positives: continuation summaries and skill injections.
-                            # Continuation summaries are never slash commands — always reset.
-                            if _is_continuation_summary(content):
-                                prev_was_slash = False
-                                continue
-                            is_slash = "<command-name>" in content
-                            if _is_skill_injection(data, content, prev_was_slash):
-                                prev_was_slash = False
-                                continue
-                            prev_was_slash = is_slash
-                            for cat, regex, _kws in compiled:
-                                m = regex.search(content)
-                                if m:
-                                    results.append(CorrectionMatch(
-                                        session_id=data.get("sessionId", ""),
-                                        project_dir=project_dir_name,
-                                        timestamp=ts,
-                                        content=content,
-                                        category=cat,
-                                        matched_pattern=m.group(0),
-                                    ))
-                                    break
-                        except (json.JSONDecodeError, KeyError, ValueError):
-                            continue
-            except OSError:
+            if _is_continuation_summary(content):
+                prev_was_slash = False
                 continue
+            is_slash = "<command-name>" in content
+            if _is_skill_injection(data, content, prev_was_slash):
+                prev_was_slash = False
+                continue
+            prev_was_slash = is_slash
+            for cat, regex, _kws in compiled:
+                m = regex.search(content)
+                if m:
+                    results.append(CorrectionMatch(
+                        session_id=sid,
+                        project_dir=project_dir_name,
+                        timestamp=ts,
+                        content=content,
+                        category=cat,
+                        matched_pattern=m.group(0),
+                    ))
+                    break
         results.sort(key=lambda x: x.timestamp, reverse=True)
         return results[:limit] if limit else results
 
@@ -1568,105 +1609,76 @@ class SessionRecoveryEngine:
         session_ids_by_cmd: Dict[str, set] = defaultdict(set)
         project_dirs_by_cmd: Dict[str, set] = defaultdict(set)
         invocations_list: List = []
-        for project_dir_name, jsonl_file, skip_until_check in self._iter_all_jsonl(
-            project_filter, since=since, until=until
+
+        # Use _scan_user_messages() with appropriate type and raw_line_filter.
+        # Discovery mode: user messages only, with slash command raw prefilter.
+        # Pattern mode: all message types, no raw prefilter.
+        _msg_type = "user" if discovery_mode else None
+        _raw_filter = (lambda line: bool(_SLASH_CMD_CONTENT_RE.search(line))) if discovery_mode else None
+
+        for session_id, project_dir_name, ts, data, content in self._scan_user_messages(
+            since=since, until=until,
+            project_filter=project_filter,
+            message_type=_msg_type,
+            raw_line_filter=_raw_filter,
         ):
-            try:
-                with open(jsonl_file, encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        try:
-                            # Raw pre-filter: discovery mode only needs user messages
-                            if discovery_mode:
-                                if '"type":"user"' not in line and '"type": "user"' not in line:
-                                    continue
-                                # Slash commands must appear at the start of a content,
-                                # text, or message JSON field value. _SLASH_CMD_CONTENT_RE
-                                # checks for exactly those fields — excluding "cwd", "path",
-                                # and other fields that also contain '/' but cannot hold
-                                # slash command invocations. The naive '"/' check was
-                                # ineffective because every user message has
-                                # "cwd":"/Users/..." which always contains '"/'.
-                                if not _SLASH_CMD_CONTENT_RE.search(line):
-                                    continue
-                            data = _json_loads(line)
-                            if discovery_mode and data.get("type") != "user":
-                                continue
-                            ts = data.get("timestamp", "")
-                            # Exclude undated messages when a date filter is active —
-                            # consistent with FilterSpec.matches_datetime() semantics.
-                            if (since or until) and not ts:
-                                continue
-                            if since and ts and ts < since:
-                                continue
-                            # skip_until_check=True: mtime < until → all records guaranteed
-                            # before until, so per-record check can be skipped.
-                            if not skip_until_check and until and ts and ts > until:
-                                continue
-                            content = self._extract_content(data)
-                            if not content:
-                                continue
-                            session_id = data.get("sessionId", "")
-                            if discovery_mode:
-                                # Match slash command: try bare "/command" at start,
-                                # then fall back to <command-name> XML tag (Claude Code format).
-                                m = _SLASH_CMD_DISCOVERY_RE.match(content.lstrip())
-                                cmd = m.group(0) if m else None
-                                args_text = ""
-                                if not cmd:
-                                    # Claude Code wraps invocations in XML tags
-                                    tag_m = _COMMAND_NAME_TAG_RE.search(content)
-                                    if tag_m:
-                                        cmd = tag_m.group(1)
-                                        # Extract args from <command-args> tag if present
-                                        args_m = re.search(
-                                            r"<command-args>(.*?)</command-args>",
-                                            content, re.DOTALL,
-                                        )
-                                        args_text = args_m.group(1).strip() if args_m else ""
-                                if cmd:
-                                    counts[cmd] += 1
-                                    session_ids_by_cmd[cmd].add(session_id)
-                                    project_dirs_by_cmd[cmd].add(project_dir_name)
-                                    if return_invocations:
-                                        args = args_text or content.lstrip()[len(cmd):].strip()
-                                        invocations_list.append(SlashCommandRecord(
-                                            command=cmd,
-                                            args=args,
-                                            session_id=session_id,
-                                            timestamp=ts,
-                                            project_dir=project_dir_name,
-                                            cwd=data.get("cwd", ""),
-                                            git_branch=data.get("gitBranch", ""),
-                                        ))
-                            else:
-                                for cmd, regex in compiled:
-                                    if regex.search(content):
-                                        counts[cmd] += 1
-                                        session_ids_by_cmd[cmd].add(session_id)
-                                        project_dirs_by_cmd[cmd].add(project_dir_name)
-                                        if return_invocations:
-                                            # Extract args from XML tag or from content after command
-                                            tag_m = _COMMAND_NAME_TAG_RE.search(content)
-                                            args_m = re.search(
-                                                r"<command-args>(.*?)</command-args>",
-                                                content, re.DOTALL,
-                                            )
-                                            inv_args = args_m.group(1).strip() if args_m else ""
-                                            inv_cmd = tag_m.group(1) if tag_m else cmd.rstrip(r"\b")
-                                            invocations_list.append(SlashCommandRecord(
-                                                command=inv_cmd,
-                                                args=inv_args,
-                                                session_id=session_id,
-                                                timestamp=ts,
-                                                project_dir=project_dir_name,
-                                                cwd=data.get("cwd", ""),
-                                                git_branch=data.get("gitBranch", ""),
-                                            ))
-                                        break  # one match per message
-                        except (json.JSONDecodeError, KeyError, ValueError):
-                            continue
-            except OSError:
-                continue
+            if discovery_mode:
+                # Match slash command: try bare "/command" at start,
+                # then fall back to <command-name> XML tag (Claude Code format).
+                m = _SLASH_CMD_DISCOVERY_RE.match(content.lstrip())
+                cmd = m.group(0) if m else None
+                args_text = ""
+                if not cmd:
+                    # Claude Code wraps invocations in XML tags
+                    tag_m = _COMMAND_NAME_TAG_RE.search(content)
+                    if tag_m:
+                        cmd = tag_m.group(1)
+                        # Extract args from <command-args> tag if present
+                        args_m = re.search(
+                            r"<command-args>(.*?)</command-args>",
+                            content, re.DOTALL,
+                        )
+                        args_text = args_m.group(1).strip() if args_m else ""
+                if cmd:
+                    counts[cmd] += 1
+                    session_ids_by_cmd[cmd].add(session_id)
+                    project_dirs_by_cmd[cmd].add(project_dir_name)
+                    if return_invocations:
+                        args = args_text or content.lstrip()[len(cmd):].strip()
+                        invocations_list.append(SlashCommandRecord(
+                            command=cmd,
+                            args=args,
+                            session_id=session_id,
+                            timestamp=ts,
+                            project_dir=project_dir_name,
+                            cwd=data.get("cwd", ""),
+                            git_branch=data.get("gitBranch", ""),
+                        ))
+            else:
+                for cmd, regex in compiled:
+                    if regex.search(content):
+                        counts[cmd] += 1
+                        session_ids_by_cmd[cmd].add(session_id)
+                        project_dirs_by_cmd[cmd].add(project_dir_name)
+                        if return_invocations:
+                            # Extract args from XML tag or from content after command
+                            tag_m = _COMMAND_NAME_TAG_RE.search(content)
+                            args_m = re.search(
+                                r"<command-args>(.*?)</command-args>",
+                                content, re.DOTALL,
+                            )
+                            inv_args = args_m.group(1).strip() if args_m else ""
+                            inv_cmd = tag_m.group(1) if tag_m else cmd.rstrip(r"\b")
+                            invocations_list.append(SlashCommandRecord(
+                                command=inv_cmd,
+                                args=inv_args,
+                                session_id=session_id,
+                                timestamp=ts,
+                                project_dir=project_dir_name,
+                                cwd=data.get("cwd", ""),
+                                git_branch=data.get("gitBranch", ""),
+                            ))
+                        break  # one match per message
         if return_invocations:
             invocations_list.sort(key=lambda x: x.timestamp)
             return invocations_list

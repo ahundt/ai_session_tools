@@ -137,6 +137,9 @@ class SessionFile:
     created_date: Optional[str] = None
     last_modified: Optional[str] = None
     size_bytes: int = 0
+    write_count: int = 0
+    edit_count: int = 0
+    notebook_edit_count: int = 0
 
     @property
     def is_versioned(self) -> bool:

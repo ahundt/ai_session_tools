@@ -15168,3 +15168,55 @@ class TestResolveVersionPaths:
         # May or may not find version_paths depending on whether get_versions finds them
         # The key test is that fallback is None when version_paths exist
         assert fallback is None or version_paths == []
+
+
+class TestSessionFileToolCounts:
+    """Tests for S2: SessionFile per-tool-type breakdown."""
+
+    def test_default_counts_are_zero(self):
+        """New fields default to 0 for backward compat."""
+        from ai_session_tools.models import SessionFile
+        sf = SessionFile(name="test.py", path="/test.py")
+        assert sf.write_count == 0
+        assert sf.edit_count == 0
+        assert sf.notebook_edit_count == 0
+
+    def test_edit_only_file_has_edit_count(self, tmp_path):
+        """File modified only via Edit shows edit_count > 0, write_count == 0."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="edited.py",
+                                      old_string="old", new_string="new")
+        engine = _make_plan_engine(tmp_path)
+        results = engine.search("edited*")
+        matches = [r for r in results if r.name == "edited.py"]
+        assert len(matches) == 1
+        sf = matches[0]
+        assert sf.edit_count == 1
+        assert sf.write_count == 0
+
+    def test_write_only_file_has_write_count(self, tmp_path):
+        """File created via Write shows write_count > 0, edit_count == 0."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="written.py",
+                                      content="hello")
+        engine = _make_plan_engine(tmp_path)
+        results = engine.search("written*")
+        matches = [r for r in results if r.name == "written.py"]
+        assert len(matches) == 1
+        sf = matches[0]
+        assert sf.write_count == 1
+        assert sf.edit_count == 0
+
+    def test_mixed_tools_file_counts_both(self, tmp_path):
+        """File with Write + Edit shows both counts."""
+        _make_session_jsonl_for_tool(tmp_path, tool="Write", filename="mixed.py",
+                                      content="initial", timestamp="2026-01-01T00:00:00")
+        _make_session_jsonl_for_tool(tmp_path, tool="Edit", filename="mixed.py",
+                                      old_string="initial", new_string="changed",
+                                      timestamp="2026-01-01T00:01:00")
+        engine = _make_plan_engine(tmp_path)
+        results = engine.search("mixed*")
+        matches = [r for r in results if r.name == "mixed.py"]
+        assert len(matches) == 1
+        sf = matches[0]
+        assert sf.write_count == 1
+        assert sf.edit_count == 1
+        assert sf.edits == 2
