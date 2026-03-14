@@ -13,7 +13,7 @@ import json
 import re
 from pathlib import Path
 
-from ai_session_tools.config import load_config
+from ai_session_tools.config import load_config, resolve_org_dir
 
 # Context notes: brief description of what was happening at each message stage
 _CONTEXT_RANGES: list[tuple[range, str]] = [
@@ -111,19 +111,15 @@ def extract_history(session_file: str | Path, output_file: str | Path) -> int:
 def main() -> None:
     """Entry point for `aise extract` CLI command."""
     cfg = load_config()
-    org_dir_str = cfg.get("org_dir")
-    if not org_dir_str:
-        raise RuntimeError(
-            "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
-        )
-    org_dir = Path(org_dir_str)
+    org_dir = resolve_org_dir(cfg)
     output_file = org_dir / "USER_INSTRUCTIONS_CLEAN.md"
 
     # Find session file: from config or auto-discover
     session_file = cfg.get("gemini_org_task_session", "")
     if not session_file or not Path(session_file).exists():
         # Auto-discover: find most recent session-2026-02-23 file
-        gemini_tmp = Path(cfg.get("source_dirs", {}).get("gemini_cli", str(Path.home() / ".gemini/tmp")))
+        from ai_session_tools.config import resolve_gemini_dir
+        gemini_tmp = resolve_gemini_dir(cfg)
         candidates = sorted(gemini_tmp.glob("*/chats/session-*.json"))
         if candidates:
             session_file = str(candidates[-1])

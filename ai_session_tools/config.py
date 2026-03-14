@@ -176,6 +176,77 @@ def _migrate_config(cfg: dict) -> tuple[dict, bool]:
     return result, changed
 
 
+def resolve_claude_dir(cfg: dict | None = None, override: str | None = None) -> Path:
+    """Resolve the Claude config directory.
+
+    Priority: override (--claude-dir CLI flag) > CLAUDE_CONFIG_DIR env var >
+              config.json claude_dir > ~/.claude (default).
+
+    Args:
+        cfg: Config dict. If None, loads from disk via load_config().
+        override: CLI --claude-dir value. Takes highest priority.
+
+    Returns:
+        Resolved, expanded, absolute Path.
+    """
+    if override:
+        return Path(override).expanduser()
+    env_d = os.getenv("CLAUDE_CONFIG_DIR")
+    if env_d:
+        return Path(env_d).expanduser()
+    if cfg is None:
+        cfg = load_config()
+    cfg_val = cfg.get("claude_dir", "").strip() if isinstance(cfg.get("claude_dir"), str) else ""
+    if cfg_val:
+        return Path(cfg_val).expanduser()
+    return Path.home() / ".claude"
+
+
+def resolve_gemini_dir(cfg: dict | None = None) -> Path:
+    """Resolve the Gemini CLI config directory.
+
+    Priority: config.json source_dirs.gemini_cli > ~/.gemini/tmp (default).
+
+    Args:
+        cfg: Config dict. If None, loads from disk via load_config().
+
+    Returns:
+        Resolved, expanded, absolute Path.
+    """
+    if cfg is None:
+        cfg = load_config()
+    gc = cfg.get("source_dirs", {}).get("gemini_cli", "")
+    if gc and isinstance(gc, str):
+        return Path(gc).expanduser()
+    return Path.home() / ".gemini" / "tmp"
+
+
+def resolve_org_dir(cfg: dict | None = None, override: str | None = None) -> Path:
+    """Resolve the org_dir for analysis pipeline output.
+
+    Priority: override (--org-dir CLI flag) > config org_dir > default.
+    Default: <app config dir>/organized/ (next to config.json).
+
+    Args:
+        cfg: Config dict. If None, loads from disk via load_config().
+        override: CLI --org-dir value. Takes highest priority.
+
+    Returns:
+        Resolved, expanded, absolute Path (created if missing).
+    """
+    if cfg is None:
+        cfg = load_config()
+    if override:
+        cfg["org_dir"] = override
+    org_dir_str = cfg.get("org_dir", "").strip() if isinstance(cfg.get("org_dir"), str) else ""
+    if not org_dir_str:
+        import typer
+        org_dir_str = str(Path(typer.get_app_dir("ai_session_tools")) / "organized")
+    org = Path(org_dir_str).expanduser()
+    org.mkdir(parents=True, exist_ok=True)
+    return org
+
+
 def get_config_section(key: str, default=None):
     """Return config[key] if present and non-empty, else default.
 

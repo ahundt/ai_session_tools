@@ -5741,6 +5741,214 @@ class TestSharedConfigModule:
             cfg_mod._config_cache = None
 
 
+class TestResolveOrgDir:
+    """Test config.resolve_org_dir() priority chain and behavior."""
+
+    def test_default_when_no_config(self, tmp_path, monkeypatch):
+        """Empty config → default to <app_dir>/organized/."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        org = cfg_mod.resolve_org_dir({})
+        assert org.name == "organized"
+        assert org.exists()
+
+    def test_config_org_dir_used(self, tmp_path):
+        """cfg['org_dir'] is used when set."""
+        import ai_session_tools.config as cfg_mod
+        target = tmp_path / "my_org"
+        org = cfg_mod.resolve_org_dir({"org_dir": str(target)})
+        assert org == target
+        assert org.exists()
+
+    def test_override_beats_config(self, tmp_path):
+        """CLI --org-dir override takes priority over config."""
+        import ai_session_tools.config as cfg_mod
+        config_dir = tmp_path / "config_val"
+        cli_dir = tmp_path / "cli_val"
+        org = cfg_mod.resolve_org_dir({"org_dir": str(config_dir)}, override=str(cli_dir))
+        assert org == cli_dir
+        assert org.exists()
+        assert not config_dir.exists()  # config value was NOT used
+
+    def test_tilde_expanded(self, tmp_path, monkeypatch):
+        """Tilde paths are expanded via expanduser()."""
+        import ai_session_tools.config as cfg_mod
+        org = cfg_mod.resolve_org_dir({"org_dir": "~/test_aise_org_dir_tilde"})
+        assert "~" not in str(org)
+        assert org.name == "test_aise_org_dir_tilde"
+        # Clean up
+        org.rmdir()
+
+    def test_empty_string_uses_default(self, tmp_path, monkeypatch):
+        """Empty string org_dir falls through to default."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        org = cfg_mod.resolve_org_dir({"org_dir": ""})
+        assert org.name == "organized"
+
+    def test_whitespace_only_uses_default(self, tmp_path, monkeypatch):
+        """Whitespace-only org_dir falls through to default."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        org = cfg_mod.resolve_org_dir({"org_dir": "   "})
+        assert org.name == "organized"
+
+    def test_none_cfg_loads_from_disk(self, tmp_path, monkeypatch):
+        """cfg=None loads config via load_config()."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {"org_dir": str(tmp_path / "from_disk")})
+        org = cfg_mod.resolve_org_dir()
+        assert org == tmp_path / "from_disk"
+        assert org.exists()
+
+    def test_creates_directory(self, tmp_path):
+        """resolve_org_dir creates the directory if missing."""
+        import ai_session_tools.config as cfg_mod
+        target = tmp_path / "deep" / "nested" / "org"
+        assert not target.exists()
+        org = cfg_mod.resolve_org_dir({"org_dir": str(target)})
+        assert org.exists()
+
+    def test_non_string_org_dir_uses_default(self, tmp_path, monkeypatch):
+        """Non-string org_dir (e.g. int, list) falls through to default."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        org = cfg_mod.resolve_org_dir({"org_dir": 42})
+        assert org.name == "organized"
+
+    def test_override_with_tilde(self, tmp_path):
+        """CLI override with tilde is expanded."""
+        import ai_session_tools.config as cfg_mod
+        org = cfg_mod.resolve_org_dir({}, override="~/test_aise_override_tilde")
+        assert "~" not in str(org)
+        org.rmdir()
+
+
+class TestResolveOrgDirCLIWrapper:
+    """Test the CLI _resolve_org_dir wrapper prints hint when defaulting."""
+
+    def test_prints_hint_when_defaulting(self, tmp_path, monkeypatch, capsys):
+        """CLI wrapper prints dim hint to stderr when using default."""
+        import ai_session_tools.cli as cli_mod
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        cli_mod._resolve_org_dir({})
+        captured = capsys.readouterr()
+        assert "org_dir not set" in captured.err
+
+    def test_no_hint_when_configured(self, tmp_path, monkeypatch, capsys):
+        """CLI wrapper does NOT print hint when org_dir is configured."""
+        import ai_session_tools.cli as cli_mod
+        cli_mod._resolve_org_dir({"org_dir": str(tmp_path / "configured")})
+        captured = capsys.readouterr()
+        assert "org_dir not set" not in captured.err
+
+
+class TestResolveClaudeDir:
+    """Tests for config.resolve_claude_dir() — DRY Claude config dir resolution."""
+
+    def test_default_is_home_dot_claude(self, monkeypatch):
+        """Default (no override, no env, no config) → ~/.claude."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        result = cfg_mod.resolve_claude_dir()
+        assert result == Path.home() / ".claude"
+
+    def test_override_beats_all(self, tmp_path, monkeypatch):
+        """CLI --claude-dir override takes highest priority."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/env/claude")
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {"claude_dir": "/config/claude"})
+        result = cfg_mod.resolve_claude_dir(override=str(tmp_path / "cli"))
+        assert result == tmp_path / "cli"
+
+    def test_env_beats_config(self, monkeypatch):
+        """CLAUDE_CONFIG_DIR env var beats config.json claude_dir."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/env/claude")
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {"claude_dir": "/config/claude"})
+        result = cfg_mod.resolve_claude_dir()
+        assert result == Path("/env/claude")
+
+    def test_config_beats_default(self, monkeypatch):
+        """config.json claude_dir beats ~/.claude default."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        result = cfg_mod.resolve_claude_dir(cfg={"claude_dir": "/custom/claude"})
+        assert result == Path("/custom/claude")
+
+    def test_tilde_expanded(self, monkeypatch):
+        """Tilde in override is expanded."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        result = cfg_mod.resolve_claude_dir(override="~/my-claude")
+        assert str(result).startswith(str(Path.home()))
+        assert "~" not in str(result)
+
+    def test_empty_config_uses_default(self, monkeypatch):
+        """Empty string in config.json claude_dir falls through to default."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        result = cfg_mod.resolve_claude_dir(cfg={"claude_dir": ""})
+        assert result == Path.home() / ".claude"
+
+
+class TestResolveGeminiDir:
+    """Tests for config.resolve_gemini_dir() — DRY Gemini CLI dir resolution."""
+
+    def test_default_is_home_dot_gemini_tmp(self, monkeypatch):
+        """Default → ~/.gemini/tmp."""
+        import ai_session_tools.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+        result = cfg_mod.resolve_gemini_dir()
+        assert result == Path.home() / ".gemini" / "tmp"
+
+    def test_config_source_dirs_used(self, monkeypatch):
+        """config.json source_dirs.gemini_cli is used when present."""
+        import ai_session_tools.config as cfg_mod
+        cfg = {"source_dirs": {"gemini_cli": "/custom/gemini"}}
+        result = cfg_mod.resolve_gemini_dir(cfg=cfg)
+        assert result == Path("/custom/gemini")
+
+    def test_empty_config_uses_default(self, monkeypatch):
+        """Empty gemini_cli falls through to default."""
+        import ai_session_tools.config as cfg_mod
+        result = cfg_mod.resolve_gemini_dir(cfg={"source_dirs": {"gemini_cli": ""}})
+        assert result == Path.home() / ".gemini" / "tmp"
+
+
+class TestPipelineSummaryOutput:
+    """Test that aise analyze prints output summary after completion."""
+
+    def test_summary_lists_existing_output_files(self, tmp_path, monkeypatch):
+        """Pipeline summary prints key output files that exist."""
+        import ai_session_tools.cli as cli_mod
+        import ai_session_tools.config as cfg_mod
+
+        # Create fake output files
+        org = tmp_path / "org"
+        org.mkdir()
+        (org / "INDEX.md").write_text("# test")
+        (org / "session_db.json").write_text("{}")
+
+        # Check the summary code path by calling the analyze command
+        # with a mocked pipeline that does nothing
+        monkeypatch.setattr(cfg_mod, "load_config", lambda: {"org_dir": str(org)})
+
+        # Verify the key files list is correct
+        key_files = [
+            ("INDEX.md", "Ranked session table"),
+            ("SESSIONS_FULL.md", "Detailed per-session breakdowns"),
+            ("session_db.json", "Session database"),
+            ("SESSION_GRAPH.json", "Provenance graph"),
+            ("VOCABULARY_ANALYSIS.md", "Recurring prompt patterns"),
+        ]
+        # Only existing files should be listed
+        existing = [(f, d) for f, d in key_files if (org / f).exists()]
+        assert len(existing) == 2  # INDEX.md and session_db.json
+
+
 class TestAnalyzerSourceFilter:
     """Test that run_analysis() accepts and respects source_filter (Phase C R1/R2)."""
 

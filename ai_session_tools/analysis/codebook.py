@@ -15,7 +15,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from ai_session_tools.config import get_config_section, load_config
+from ai_session_tools.config import get_config_section, load_config, resolve_org_dir
 
 # ── Built-in defaults: used when no external CODEBOOK.md / keyword JSONs exist ──
 
@@ -67,8 +67,7 @@ def load_scoring_weights(org_dir: Path | None = None) -> dict:
         return sw
 
     if org_dir is None:
-        org_dir_str = load_config().get("org_dir", "")
-        org_dir = Path(org_dir_str).expanduser() if org_dir_str else None
+        org_dir = resolve_org_dir()
     if org_dir is not None:
         path = org_dir / "scoring_weights.json"
         with contextlib.suppress(OSError, json.JSONDecodeError):
@@ -122,10 +121,7 @@ def load_keyword_maps(org_dir: Path | None = None) -> dict[str, dict[str, list[s
 
     # Fall back to separate files
     if org_dir is None:
-        org_dir_str = load_config().get("org_dir", "")
-        org_dir = Path(org_dir_str).expanduser() if org_dir_str else None
-    if org_dir is None:
-        return {}
+        org_dir = resolve_org_dir()
 
     maps: dict[str, dict[str, list[str]]] = {}
     for name in ("task_categories", "writing_methods", "project_map", "workflow_map"):
@@ -181,8 +177,7 @@ def load_stop_words(org_dir: Path | None = None) -> frozenset[str]:
 
     # Fall back to separate file
     if org_dir is None:
-        org_dir_str = load_config().get("org_dir", "")
-        org_dir = Path(org_dir_str).expanduser() if org_dir_str else None
+        org_dir = resolve_org_dir()
     if org_dir is not None:
         path = org_dir / "stop_words.json"
         with contextlib.suppress(OSError, json.JSONDecodeError):
@@ -273,8 +268,7 @@ def load_continuation_config(org_dir: Path | None = None) -> tuple[list[str], in
 
     # Fall back to separate file
     if org_dir is None:
-        org_dir_str = load_config().get("org_dir", "")
-        org_dir = Path(org_dir_str).expanduser() if org_dir_str else None
+        org_dir = resolve_org_dir()
     if org_dir is not None:
         path = org_dir / "continuation_markers.json"
         with contextlib.suppress(OSError, json.JSONDecodeError):

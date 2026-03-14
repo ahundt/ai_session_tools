@@ -3689,13 +3689,8 @@ def _build_ai_session(
     effective_source = source if source is not None else _detect_default_source(effective_cfg)
 
     if effective_source == "claude":
-        base: Path
-        if claude_dir:
-            base = Path(claude_dir).expanduser()
-        elif env_d := os.getenv("CLAUDE_CONFIG_DIR"):
-            base = Path(env_d).expanduser()
-        else:
-            base = Path.home() / ".claude"
+        from ai_session_tools.config import resolve_claude_dir
+        base: Path = resolve_claude_dir(override=claude_dir)
         projects = Path(os.getenv(
             "AI_SESSION_TOOLS_PROJECTS", str(base / "projects")
         )).expanduser()
@@ -3727,12 +3722,8 @@ def _build_ai_session(
     # added explicitly as a ClaudeSource adapter wrapping SessionRecoveryEngine.
     if effective_source == "all":
         with contextlib.suppress(Exception):
-            if claude_dir:
-                _base = Path(claude_dir).expanduser()
-            elif _env_d := os.getenv("CLAUDE_CONFIG_DIR"):
-                _base = Path(_env_d).expanduser()
-            else:
-                _base = Path.home() / ".claude"
+            from ai_session_tools.config import resolve_claude_dir
+            _base = resolve_claude_dir(override=claude_dir)
             _projects = Path(os.getenv(
                 "AI_SESSION_TOOLS_PROJECTS", str(_base / "projects")
             )).expanduser()

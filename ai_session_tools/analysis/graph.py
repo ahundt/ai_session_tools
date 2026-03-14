@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-from ai_session_tools.config import load_config
+from ai_session_tools.config import load_config, resolve_org_dir
 
 
 @dataclass
@@ -202,12 +202,7 @@ def build_graph(records: list[dict], strategies: list | None = None, config: dic
 def main() -> None:
     """Entry point for `aise graph` CLI command."""
     cfg = load_config()
-    org_dir_str = cfg.get("org_dir")
-    if not org_dir_str:
-        raise RuntimeError(
-            "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
-        )
-    org_dir = Path(org_dir_str)
+    org_dir = resolve_org_dir(cfg)
     db_file = org_dir / "session_db.json"
     out_file = org_dir / "SESSION_GRAPH.json"
 

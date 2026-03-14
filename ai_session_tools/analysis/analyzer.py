@@ -1,12 +1,14 @@
 """
 Session Content Analysis Engine - backs `aise analyze`.
 
-Single-pass streaming pipeline: qualitative coding + vocabulary mining simultaneously.
+Single-pass streaming pipeline: pattern-matching (inspired by qualitative coding) + vocabulary mining.
 Reads all sessions from all three source directories. Writes session_db.json + VOCABULARY_ANALYSIS.md.
 
-METHODOLOGICAL REFERENCES:
+METHODOLOGICAL REFERENCES (inspiration, not full implementations):
 - Hsieh & Shannon (2005): https://journals.sagepub.com/doi/10.1177/1049732305276687
+  Directed Content Analysis — we use keyword/regex pattern matching inspired by this approach.
 - Wei et al. (2022): https://arxiv.org/abs/2201.11903
+  Chain-of-Thought Prompting — we detect CoT prompting patterns; scoring is our own weighted system.
 
 Copyright (c) 2026 Andrew Hundt
 Licensed under the Apache License, Version 2.0
@@ -21,7 +23,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 from ai_session_tools.sources.aistudio import AiStudioSource
-from ai_session_tools.config import load_config
+from ai_session_tools.config import load_config, resolve_org_dir
 from ai_session_tools.analysis.codebook import (
     load_codebook, load_keyword_maps, load_scoring_weights, compile_codes, get_ngrams,
     is_meaningful, extract_prose, prose_fraction, classify_prompt_role,
@@ -164,7 +166,8 @@ def apply_codes(
 
     Complexity: O(K*T) per session (K=codes, T=marker_window chars).
     All weights from scoring_weights dict (not hardcoded).
-    Implements Directed Content Analysis (Hsieh & Shannon, 2005).
+    Pattern matching inspired by Directed Content Analysis
+    (Hsieh & Shannon, 2005 — https://journals.sagepub.com/doi/10.1177/1049732305276687).
     """
     text = rec.user_text_full[:marker_window]
     lower = text.lower()
@@ -337,12 +340,7 @@ def run_analysis(
     if isinstance(source_dirs_cfg, str):
         source_dirs_cfg = [source_dirs_cfg]
     source_dirs = [Path(p) for p in source_dirs_cfg]
-    org_dir_str = cfg.get("org_dir")
-    if not org_dir_str:
-        raise RuntimeError(
-            "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
-        )
-    org_dir = Path(org_dir_str)
+    org_dir = resolve_org_dir(cfg)
     db_file = org_dir / "session_db.json"
     vocab_output = org_dir / cfg.get("vocab_output_filename", "VOCABULARY_ANALYSIS.md")
     mw = marker_window or cfg.get("marker_window", 25_000)
@@ -474,7 +472,8 @@ def run_analysis(
         try:
             import os as _os
             from ai_session_tools.engine import SessionRecoveryEngine
-            _claude_base = Path(_os.getenv("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))).expanduser()
+            from ai_session_tools.config import resolve_claude_dir
+            _claude_base = resolve_claude_dir()
             _projects = Path(_os.getenv(
                 "AI_SESSION_TOOLS_PROJECTS", str(_claude_base / "projects")
             )).expanduser()

@@ -65,7 +65,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from ai_session_tools.config import load_config, get_config_section
+from ai_session_tools.config import load_config, get_config_section, resolve_org_dir
 from ai_session_tools.analysis.codebook import load_keyword_maps, load_scoring_weights
 
 VALID_FORMATS: frozenset[str] = frozenset({"symlinks", "json", "markdown"})
@@ -489,8 +489,10 @@ def write_index(
     source_label = ", ".join(source_names) if source_names else "AI Session"
     lines = [
         f"# {source_label} Knowledge Base: Integrated Dashboard\n\n",
-        "Ranked by utility score. Grounded in Directed Content Analysis "
-        "(Hsieh & Shannon, 2005) and Chain-of-Thought scoring (Wei et al., 2022).\n\n",
+        "Ranked by utility score. Pattern matching inspired by Directed Content Analysis "
+        "([Hsieh & Shannon, 2005](https://journals.sagepub.com/doi/10.1177/1049732305276687)); "
+        "detects [Chain-of-Thought prompting](https://arxiv.org/abs/2201.11903) patterns "
+        "(Wei et al., 2022).\n\n",
         "## Hall of Fame: Top Sessions by Utility\n\n",
         "| Rank | Utility | Session | Technique | Role | Era |\n",
         "| :--- | :--- | :--- | :--- | :--- | :--- |\n",
@@ -649,12 +651,7 @@ def run_orchestration(formats: list[str] | None = None) -> None:
     INDEX.md and SESSIONS_FULL.md are always written regardless of formats.
     """
     cfg = load_config()
-    org_dir_str = cfg.get("org_dir")
-    if not org_dir_str:
-        raise RuntimeError(
-            "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
-        )
-    org_dir = Path(org_dir_str).expanduser()
+    org_dir = resolve_org_dir(cfg)
     db_file = org_dir / "session_db.json"
 
     if not db_file.exists():

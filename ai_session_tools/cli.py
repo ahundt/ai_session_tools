@@ -240,10 +240,12 @@ def source_list(fmt: Optional[str] = typer.Option(None, "--format", "-f", help="
     sd = effective.get("source_dirs", {})
     explicit_sd = cfg.get("source_dirs", {})
 
+    from ai_session_tools.config import resolve_claude_dir
+    _claude_base = resolve_claude_dir()
     rows: list[dict] = [
         {"source": "claude", "type": "claude",
-         "path": str(Path.home() / ".claude" / "projects"),
-         "configured": "auto", "exists": (Path.home() / ".claude" / "projects").exists()}
+         "path": str(_claude_base / "projects"),
+         "configured": "auto", "exists": (_claude_base / "projects").exists()}
     ]
     for src_type in ("aistudio", "gemini_cli"):
         paths = sd.get(src_type, [])
@@ -1174,20 +1176,18 @@ def _get_engine(projects_dir: Optional[str] = None, recovery_dir: Optional[str] 
         AI_SESSION_TOOLS_PROJECTS: Path to Claude projects directory (overrides base dir)
         AI_SESSION_TOOLS_RECOVERY: Path to recovery directory (overrides base dir)
     """
-    # Priority: --claude-dir (CLI) > CLAUDE_CONFIG_DIR (env) > ~/.claude (default)
-    # _g_claude_dir is set by --claude-dir; if not set, read env var directly (for non-CLI callers)
-    claude_dir = _g_claude_dir or os.getenv("CLAUDE_CONFIG_DIR")
+    # Priority: --claude-dir (CLI) > CLAUDE_CONFIG_DIR (env) > config claude_dir > ~/.claude
+    from ai_session_tools.config import resolve_claude_dir
+    base = resolve_claude_dir(override=_g_claude_dir)
 
     if projects_dir is None:
         projects_dir = os.getenv("AI_SESSION_TOOLS_PROJECTS")
         if projects_dir is None:
-            base = Path(claude_dir).expanduser() if claude_dir else Path.home() / ".claude"
             projects_dir = str(base / "projects")
 
     if recovery_dir is None:
         recovery_dir = os.getenv("AI_SESSION_TOOLS_RECOVERY")
         if recovery_dir is None:
-            base = Path(claude_dir).expanduser() if claude_dir else Path.home() / ".claude"
             recovery_dir = str(base / "recovery")
 
     # expanduser() so that env var values like "~/.claude/projects" work correctly
@@ -3715,7 +3715,7 @@ _CONFIG_INIT_TEMPLATE = {
         "Config path: override with --config flag or AI_SESSION_TOOLS_CONFIG env var."
     ),
     # ── Required for aise analyze ──────────────────────────────────────────
-    "org_dir": "",          # Path to your organized/ directory (output destination)
+    "org_dir": "",          # Output destination. Default if empty: <app config dir>/organized/
     "source_dirs": {
         "aistudio": [],     # List of Google AI Studio export directories
         "gemini_cli": "",   # Path to Gemini CLI tmp dir (auto-detected: ~/.gemini/tmp)
@@ -3932,6 +3932,16 @@ def _pipeline_order(cfg: dict) -> list[str]:
     return base
 
 
+def _resolve_org_dir(cfg: dict, org_dir_override: Optional[str] = None) -> Path:
+    """Thin CLI wrapper around config.resolve_org_dir — adds stderr hint when defaulting."""
+    from ai_session_tools.config import resolve_org_dir
+    had_org = bool(cfg.get("org_dir", "").strip()) or bool(org_dir_override)
+    org = resolve_org_dir(cfg, override=org_dir_override)
+    if not had_org:
+        err_console.print(f"[dim]org_dir not set — using default: {org}[/dim]")
+    return org
+
+
 def _check_step_dep(step: str, cfg: dict, org_dir: Path) -> None:
     """Raise helpful error if required predecessor output is missing.
 
@@ -4030,7 +4040,7 @@ def cmd_analyze(
         ),
     ),
 ) -> None:
-    """Run the full analysis pipeline: qualitative coding -> graph -> taxonomy symlinks.
+    """Run the full analysis pipeline: pattern matching -> graph -> taxonomy symlinks.
 
     Runs the full pipeline automatically. Stages are skipped when inputs
     have not changed since the last run (idempotent).
@@ -4054,17 +4064,7 @@ def cmd_analyze(
     from ai_session_tools.analysis import pipeline_state as ps
 
     cfg = load_config()
-    if org_dir:
-        cfg["org_dir"] = org_dir
-    org_dir_str = cfg.get("org_dir", "").strip()
-    if not org_dir_str:
-        err_console.print(
-            "[red]org_dir not configured.[/red] "
-            "Run [bold]aise config init[/bold] or set org_dir in config.json"
-        )
-        raise typer.Exit(code=1)
-    org = Path(org_dir_str).expanduser()
-    org.mkdir(parents=True, exist_ok=True)
+    org = _resolve_org_dir(cfg, org_dir)
 
     # Get source filter from ctx.obj (set by app_callback composition root)
     ctx_obj = ctx.obj if ctx.obj else {}
@@ -4142,6 +4142,20 @@ def cmd_analyze(
     else:
         console.print("[bold green]Pipeline complete.[/bold green]")
 
+    # Print output summary
+    console.print(f"\n[bold]Output directory:[/bold] {org}")
+    key_files = [
+        ("INDEX.md", "Ranked session table"),
+        ("SESSIONS_FULL.md", "Detailed per-session breakdowns"),
+        ("session_db.json", "Session database"),
+        ("SESSION_GRAPH.json", "Provenance graph"),
+        ("VOCABULARY_ANALYSIS.md", "Recurring prompt patterns"),
+    ]
+    for fname, desc in key_files:
+        fpath = org / fname
+        if fpath.exists():
+            console.print(f"  [green]{fname}[/green] — {desc}")
+
 
 @app.command("graph", hidden=True, rich_help_panel="Analysis Steps (advanced — use 'aise analyze')")
 def cmd_graph() -> None:
@@ -4153,14 +4167,7 @@ def cmd_graph() -> None:
     Tip: Use 'aise analyze' to run the full pipeline automatically.
     """
     cfg = load_config()
-    org_dir_str = cfg.get("org_dir", "").strip()
-    if not org_dir_str:
-        err_console.print(
-            "[red]org_dir not configured.[/red] "
-            "Run [bold]aise config init[/bold] or set org_dir in config.json"
-        )
-        raise typer.Exit(code=1)
-    org = Path(org_dir_str).expanduser()
+    org = _resolve_org_dir(cfg)
     _check_step_dep("graph", cfg, org)
     from ai_session_tools.analysis.graph import main as graph_main
     graph_main()
@@ -4245,14 +4252,7 @@ def cmd_organize(
         return
 
     cfg = load_config()
-    org_dir_str = cfg.get("org_dir", "").strip()
-    if not org_dir_str:
-        err_console.print(
-            "[red]org_dir not configured.[/red] "
-            "Run [bold]aise config init[/bold] or set org_dir in config.json"
-        )
-        raise typer.Exit(code=1)
-    org = Path(org_dir_str).expanduser()
+    org = _resolve_org_dir(cfg)
     _check_step_dep("organize", cfg, org)
     formats = [f.strip() for f in fmt.split(",")] if fmt else None
     from ai_session_tools.analysis import orchestrator as _orch

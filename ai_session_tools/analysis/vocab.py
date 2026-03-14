@@ -15,7 +15,7 @@ import contextlib
 from collections import Counter
 from pathlib import Path
 
-from ai_session_tools.config import load_config
+from ai_session_tools.config import load_config, resolve_org_dir
 from ai_session_tools.sources.aistudio import AiStudioSource
 from ai_session_tools.analysis.codebook import (
     get_ngrams, is_meaningful, load_stop_words, load_scoring_weights, extract_prose,
@@ -63,12 +63,7 @@ def write_report(tri: Counter[str], quad: Counter[str]) -> None:
     min_ngram_freq and stop_words loaded from config.json or org_dir files.
     """
     cfg = load_config()
-    org_dir_str = cfg.get("org_dir")
-    if not org_dir_str:
-        raise RuntimeError(
-            "org_dir not configured. Run 'aise config init' or set org_dir in config.json"
-        )
-    org_dir = Path(org_dir_str)
+    org_dir = resolve_org_dir(cfg)
     output_file = org_dir / cfg.get("vocab_output_filename", "VOCABULARY_ANALYSIS.md")
 
     sw = load_scoring_weights(org_dir)

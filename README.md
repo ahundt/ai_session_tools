@@ -21,9 +21,9 @@ JSON and dig through dozens of folders.
 |-----------|---------|
 | List sessions with metadata (project, branch, date, message count) | `aise list` |
 | Filter by provider: Claude Code, AI Studio, or Gemini CLI | `aise list --provider claude` |
-| Find source files Claude wrote or edited | `aise files search --pattern "*.py"` |
-| Inspect file version history | `aise files history cli.py` |
-| Extract a file version to stdout or disk | `aise files extract cli.py` |
+| Find source files Claude wrote or edited (Write + Edit) | `aise files search "*.py"` |
+| Inspect file version history (Write + Edit timeline) | `aise files history cli.py` |
+| Extract or reconstruct a file (Write snapshots + Edit replay) | `aise files extract cli.py` |
 | Cross-reference session edits against a current file | `aise files cross-ref ./cli.py` |
 | Search conversation messages full-text | `aise messages search "auth bug"` |
 | Search tool invocations (Bash, Edit, Write, Read, …) | `aise tools search Write "login"` |
@@ -38,6 +38,10 @@ JSON and dig through dozens of folders.
 | Manage session source directories | `aise source list` / `aise source add <path>` |
 | Run full analysis pipeline | `aise analyze` |
 | View / create the config file | `aise config show` / `aise config init` |
+| Inspect a session (message counts, tool usage, files touched) | `aise messages inspect ab841016` |
+| Chronological timeline of a session | `aise messages timeline ab841016` |
+| Extract content from a session (e.g. pbcopy content) | `aise messages extract ab841016 pbcopy` |
+| Show supported date/time format reference | `aise dates` |
 | Summary statistics across all sources | `aise stats` |
 
 Works as a CLI tool (`aise`) and as an importable Python library (`from ai_session_tools import ...`).
@@ -159,6 +163,10 @@ aise source add ~/.gemini/tmp --type gemini
 
 # Remove a directory
 aise source remove ~/Documents/old_sessions
+
+# Disable/enable auto-discovery for a source type
+aise source disable gemini_cli
+aise source enable gemini_cli
 ```
 
 Source directories are saved to `config.json` and persist across runs.
@@ -258,11 +266,11 @@ Recovery Statistics
 ### Find source files (Claude Code)
 
 ```bash
-# All files (shows edits, sessions, last modified)
+# All files (shows edits, sessions, last modified — includes Edit tool calls)
 aise files search
 
-# Only Python files
-aise files search --pattern "*.py"
+# Only Python files (positional arg or --pattern flag)
+aise files search "*.py"
 
 # Files edited 5+ times
 aise files search --min-edits 5
@@ -283,7 +291,7 @@ aise files find --pattern "*.py"
 ### Inspect file version history (Claude Code)
 
 ```bash
-# Show a read-only version table (version#, lines, Δlines, timestamp, session)
+# Show a read-only version table (version#, lines, Δlines, tool, +add/-del, timestamp, session)
 aise files history cli.py
 
 # Narrow to one session
@@ -304,7 +312,7 @@ aise files history cli.py --stdout
 ### Extract file content (Claude Code)
 
 ```bash
-# Print latest version to stdout
+# Print latest version to stdout (Write snapshots or Edit reconstruction)
 aise files extract cli.py
 
 # Specific version
@@ -323,7 +331,8 @@ aise files extract cli.py --output-dir ./backup
 aise files extract cli.py --output-dir ./backup --dry-run
 ```
 
-File content goes to stdout; status messages go to stderr — keeps piping clean.
+If no Write snapshot exists, `extract` automatically reconstructs the file by replaying Edit
+tool calls from the session JSONL. File content goes to stdout; status messages go to stderr.
 
 ### Cross-reference session edits (Claude Code)
 
@@ -381,6 +390,9 @@ aise messages find "authentication"
 Find the actual tool calls Claude made — what files it wrote, what commands it ran:
 
 ```bash
+# All tool calls (no --tool required)
+aise tools search
+
 # All Write tool calls
 aise tools search Write
 
@@ -390,8 +402,9 @@ aise tools search Bash "git commit"
 # Edit calls to cli.py
 aise tools search Edit "cli.py"
 
-# JSON output
+# JSON or JSONL output
 aise tools search Write --format json
+aise tools search Write --format jsonl
 
 # 'find' is an alias for 'search'
 aise tools find Write
@@ -461,6 +474,8 @@ aise messages planning --commands "/ar:plannew,/ar:pn"
 The default **discovery mode** finds every message that starts with `/command` — `/ar:plannew`,
 `/commit`, `/help`, whatever you've used. No configuration required.
 
+`slash` is an alias for `commands` — `aise slash list` = `aise commands list`.
+
 ### Slash command invocations (Claude Code)
 
 List every individual slash command invocation with timestamp, session, and arguments:
@@ -519,11 +534,50 @@ aise export recent 14 --project myproject --output week.md
 System messages (`[Request interrupted`, `<task-notification>`, `<system-reminder>`) are filtered
 out automatically.
 
+### Session inspection and timeline (Claude Code)
+
+```bash
+# Per-session breakdown: message counts, tool usage, files touched
+aise messages inspect ab841016
+
+# Chronological timeline with type/tool filtering
+aise messages timeline ab841016
+aise messages timeline ab841016 --type user --grep "error"
+
+# Extract specific content types from a session
+aise messages extract ab841016 pbcopy
+```
+
+### Date format reference
+
+```bash
+# Show all supported date/time formats for --since, --until, --when
+aise dates
+```
+
+Accepted formats: ISO dates (`2026-01-15`), relative (`7d`, `2w`, `3m`), EDTF periods
+(`2026-01/2026-03`, `202X` for decades), and natural-language shortcuts.
+
+### Root-level aliases
+
+These are shortcuts — identical to their subcommand equivalents:
+
+```bash
+aise extract cli.py          # = aise files extract cli.py
+aise history cli.py          # = aise files history cli.py
+aise get ab841016            # = aise messages get ab841016
+aise search files ...        # = aise files search ...
+aise search messages ...     # = aise messages search ...
+```
+
 ### Search across files and messages at once
 
 ```bash
 # Find Python files AND messages mentioning "error" in one command
 aise search --pattern "*.py" --query "error"
+
+# Scope any search to one session
+aise search --session ab841016 --query "error"
 
 # Tool calls with a query (auto-routes to messages)
 aise search --tool Write --query "login"
@@ -538,14 +592,41 @@ aise find --tool Write --query "login"
 
 ## Analysis pipeline
 
-`aise analyze` runs a full qualitative coding, provenance graphing, and taxonomy organization
-pipeline over all configured AI session sources. Designed for research and knowledge-base
-building workflows.
+After weeks of AI-assisted development you have hundreds of sessions — which ones solved hard
+problems? Which techniques worked best? `aise analyze` turns that pile of raw sessions into a
+searchable, ranked knowledge base you can browse by project, technique, or role.
+
+Most `aise` commands (`list`, `search`, `stats`, `files`, etc.) work immediately with no config.
 
 ```bash
-# Run the full pipeline (idempotent — skips stages with no changes)
+# 1. Run the full pipeline — works out of the box
 aise analyze
 
+# 3. Browse results in your org_dir
+#    - INDEX.md          → ranked table of all sessions with utility scores
+#    - SESSIONS_FULL.md  → detailed per-session breakdowns
+#    - 01_by_project/    → symlink taxonomy organized by project
+#    - 02_by_technique/  → sessions grouped by technique (CoT, few-shot, etc.)
+#    - SESSION_GRAPH.json → provenance graph (which sessions branched from which)
+#    - VOCABULARY_ANALYSIS.md → recurring prompt patterns across all sessions
+
+# 4. Drill into interesting sessions using aise commands
+aise list --since 7d                          # find recent sessions
+aise messages search "authentication"         # search across all sessions
+aise get ab841016                             # read a specific session
+aise files search "*.py"                      # find files Claude wrote/edited
+aise files extract cli.py --session ab841016  # recover a file version
+aise stats --provider aistudio                # per-source summary
+```
+
+Output goes to `org_dir` — by default inside the app config directory
+(`~/Library/Application Support/ai_session_tools/organized/` on macOS,
+`~/.config/ai_session_tools/organized/` on Linux). Override with `--org-dir` or set `org_dir`
+in `config.json`. After completion, `aise analyze` prints the output directory and key files.
+
+Re-running is idempotent — stages whose inputs haven't changed are skipped.
+
+```bash
 # Show which stages are stale vs current
 aise analyze --status
 
@@ -558,12 +639,17 @@ aise analyze --provider aistudio
 # Override output directory
 aise analyze --org-dir ~/my_org_dir
 
-# Run only one pipeline stage (advanced)
-aise analyze --step analyze    # coding + scoring → session_db.json
-aise analyze --step graph      # provenance graph → SESSION_GRAPH.json
-aise analyze --step organize   # taxonomy symlinks + INDEX.md + SESSIONS_FULL.md
-aise analyze --step vocab      # standalone vocabulary analysis
+# Choose organize output format(s): symlinks (default), json, markdown
+aise analyze --format symlinks,json
+
+# Set marker-matching window (chars of user text to scan, 0 = use config default)
+aise analyze --window 5000
 ```
+
+`aise analyze` runs all stages in the correct order (`analyze` → `graph` → `organize`, plus
+`instruction-history` if configured). Each stage's output feeds the next. Individual stage
+commands exist (`--step`, `aise graph`, etc.) but stages have ordering dependencies so
+`aise analyze` is the right way to run the pipeline.
 
 ### Pipeline stages
 
@@ -574,15 +660,15 @@ aise analyze --step vocab      # standalone vocabulary analysis
 | `organize` | `session_db.json` + `SESSION_GRAPH.json` | Symlink taxonomy, `INDEX.md`, `SESSIONS_FULL.md` |
 | `instruction-history` | Gemini CLI session (if configured) | `USER_INSTRUCTIONS_CLEAN.md` |
 
-Requires `org_dir` to be set in config (see Configuration below). Run `aise config init` first
-if this is your first time.
+`org_dir` defaults to the app config directory (see above). Override with `--org-dir` or set
+`org_dir` in `config.json` (run `aise config init` to create a starter config).
 
 ### Analysis methodology
 
-- **Qualitative coding** (Hsieh & Shannon 2005 Directed Content Analysis): sessions coded against
-  `CODEBOOK.md` markers for technique, role, and task categories
-- **Empirical scoring** (Wei et al. 2022 Chain-of-Thought): utility scores based on detected
-  technique markers, expert role signals, and session complexity
+- **Content analysis** (inspired by [Directed Content Analysis, Hsieh & Shannon 2005](https://journals.sagepub.com/doi/10.1177/1049732305276687)):
+  pattern-matching sessions against `CODEBOOK.md` markers for technique, role, and task categories
+- **Scoring** (custom weighted system; detects [Chain-of-Thought prompting](https://arxiv.org/abs/2201.11903) patterns per Wei et al. 2022):
+  utility scores from technique markers, role signals, and session complexity
 - **Provenance graphing**: session lineage detection via filename patterns (`Branch of X`,
   `Copy of X`, `Name vN`) and TF-IDF similarity
 - **Vocabulary mining**: n-gram analysis of recurring prompt patterns across all user turns
@@ -673,8 +759,8 @@ strings.
 
 **`source_dirs.gemini_cli`** — path to the Gemini CLI tmp directory (usually `~/.gemini/tmp`).
 
-**`org_dir`** — output directory for the analysis pipeline. Must be set before running
-`aise analyze`.
+**`org_dir`** — output directory for the analysis pipeline. Defaults to `organized/` inside
+the app config directory if not set.
 
 **`scoring_weights`** — configurable weights for the empirical scoring stage. All keys are
 optional; missing keys fall back to the built-in defaults shown above.
@@ -883,7 +969,7 @@ print(get_config_path())  # e.g. ~/Library/Application Support/ai_session_tools/
 | `FilterSpec` | Build filters for file search: edits, date range, extensions, sessions |
 | `SessionInfo` | One session: `session_id`, `project_dir`, `git_branch`, `cwd`, `message_count` |
 | `RecoveredFile` | One source file: `name`, `edits`, `last_modified`, `sessions` |
-| `FileVersion` | One file version: `version_num`, `line_count`, `timestamp`, `session_id` |
+| `FileVersion` | One file version: `version_num`, `line_count`, `timestamp`, `session_id`, `tool`, `lines_added`, `lines_deleted` |
 | `SessionMessage` | One conversation message: `type` (user/assistant), `content`, `timestamp` |
 | `CorrectionMatch` | One correction: `category`, `matched_pattern`, `content`, `session_id` |
 | `PlanningCommandCount` | One slash command: `command`, `count`, `session_ids`, `project_dirs` |
@@ -909,7 +995,7 @@ ai_session_tools/
 │   └── gemini_cli.py    # GeminiCliSource: Gemini CLI ~/.gemini/tmp sessions
 └── analysis/
     ├── __init__.py
-    ├── analyzer.py       # Qualitative coding + empirical scoring pipeline
+    ├── analyzer.py       # Content analysis (pattern-matching inspired by qualitative coding) + scoring
     ├── codebook.py       # CODEBOOK.md loader, n-gram helpers, scoring utilities
     ├── extract.py        # Gemini CLI instruction-history extraction
     ├── graph.py          # Session provenance graph builder
