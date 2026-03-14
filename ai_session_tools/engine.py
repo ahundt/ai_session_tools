@@ -1222,6 +1222,7 @@ class SessionRecoveryEngine:
         after_index: int = 0,
         after_timestamp: Optional[str] = None,
         tool_use_only: bool = False,
+        include_tool_result: bool = False,
     ) -> List[SessionMessage]:
         """Search for messages across all sessions.
 
@@ -1239,6 +1240,10 @@ class SessionRecoveryEngine:
             after_timestamp: Skip messages before this timestamp within each session.
             tool_use_only: When True, only return messages that contain tool_use blocks.
                            Used by 'search tools' without --tool to exclude pure text messages.
+            include_tool_result: When True and tool is set, attach tool output
+                  data (stdout/stderr char/word counts) to each SessionMessage via
+                  the tool_result field. Pairs tool_use with its toolUseResult by
+                  matching sourceToolAssistantUUID to the assistant message uuid.
 
         Returns:
             List of matching SessionMessage objects. Empty list if projects_dir does not exist.
@@ -1273,9 +1278,14 @@ class SessionRecoveryEngine:
 
         messages: List[SessionMessage] = []
 
+        # When include_tool_result is True, track which JSONL files had matches
+        # and the UUIDs we need to look up results for.
+        _files_with_matches: list = []  # [(jsonl_file, start_idx_in_messages)]
+
         for _project_dir_name, jsonl_file, _ in self._iter_all_jsonl(
             session_id_prefix=session_id, since=since
         ):
+            _file_start_idx = len(messages)
             try:
                 with open(jsonl_file, encoding="utf-8", errors="replace") as f:
                     _msg_idx = 0
@@ -1340,11 +1350,14 @@ class SessionRecoveryEngine:
                                         else:
                                             matched = True  # no query = match all
                                         if matched:
+                                            # Store uuid for tool_result pairing
+                                            _msg_uuid = data.get("uuid", "") if include_tool_result else ""
                                             messages.append(SessionMessage(
                                                 type=self._parse_message_type(msg_type),
                                                 timestamp=data.get("timestamp", ""),
                                                 content=input_str,
                                                 session_id=data.get("sessionId", ""),
+                                                tool_result={"_uuid": _msg_uuid} if _msg_uuid else None,
                                             ))
                                             break  # one match per message line
                             else:
@@ -1378,8 +1391,73 @@ class SessionRecoveryEngine:
                             continue
             except OSError:
                 continue
+            # Track files that produced new matches for the result-pairing pass
+            if include_tool_result and tool is not None and len(messages) > _file_start_idx:
+                _files_with_matches.append((jsonl_file, _file_start_idx, len(messages)))
+
+        # ── Second pass: pair tool_use with toolUseResult ────────────────
+        if include_tool_result and tool is not None and _files_with_matches:
+            self._attach_tool_results(messages, _files_with_matches)
 
         return messages
+
+    @staticmethod
+    def _attach_tool_results(
+        messages: List[SessionMessage],
+        files_with_matches: list,
+    ) -> None:
+        """Pair tool_use messages with their toolUseResult output data.
+
+        For each JSONL file that produced matches, scan for toolUseResult
+        lines whose sourceToolAssistantUUID matches a matched message's uuid.
+        Attaches stdout/stderr char and word counts to SessionMessage.tool_result.
+        """
+        for jsonl_file, start_idx, end_idx in files_with_matches:
+            # Build lookup: uuid -> message index (scoped to this file's messages)
+            uuid_to_idx: dict = {}
+            for i in range(start_idx, end_idx):
+                tr = messages[i].tool_result
+                if tr and "_uuid" in tr:
+                    uuid_to_idx[tr["_uuid"]] = i
+            if not uuid_to_idx:
+                continue
+
+            try:
+                with open(jsonl_file, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        # Fast pre-filter: toolUseResult lines contain this key
+                        if '"toolUseResult"' not in line and '"sourceToolAssistantUUID"' not in line:
+                            continue
+                        try:
+                            data = _json_loads(line)
+                            src_uuid = data.get("sourceToolAssistantUUID", "")
+                            if src_uuid not in uuid_to_idx:
+                                continue
+                            tr = data.get("toolUseResult")
+                            if not isinstance(tr, dict):
+                                continue
+                            stdout = tr.get("stdout", "")
+                            stderr = tr.get("stderr", "")
+                            if not isinstance(stdout, str):
+                                stdout = ""
+                            if not isinstance(stderr, str):
+                                stderr = ""
+                            combined = stdout + stderr
+                            idx = uuid_to_idx.pop(src_uuid)
+                            messages[idx].tool_result = {
+                                "stdout_chars": len(stdout),
+                                "stderr_chars": len(stderr),
+                                "output_chars": len(combined),
+                                "output_words": len(combined.split()),
+                            }
+                        except (json.JSONDecodeError, KeyError, ValueError):
+                            continue
+            except OSError:
+                continue
+
+            # Clean up any unmatched uuid placeholders
+            for idx in uuid_to_idx.values():
+                messages[idx].tool_result = None
 
     def get_sessions(
         self,
@@ -2946,6 +3024,7 @@ class AISession:
         after_index: int = 0,
         after_timestamp: str | None = None,
         tool_use_only: bool = False,
+        include_tool_result: bool = False,
     ) -> list[SessionMessage] | list[ContextMatch]:
         """Search messages across all configured AI session sources.
 
@@ -2964,6 +3043,8 @@ class AISession:
             after_index:       Skip the first N messages in each session before searching.
             after_timestamp:   Skip messages before this timestamp within each session.
             tool_use_only:     Only return messages containing tool_use blocks (Claude-only).
+            include_tool_result: (Claude-only) Attach tool output metadata (stdout/stderr
+                               char/word counts) to each result. Off by default for performance.
 
         Returns:
             list[SessionMessage] when context=0 and no context_before/after (default).
@@ -3031,6 +3112,7 @@ class AISession:
                 after_index=after_index,
                 after_timestamp=after_timestamp,
                 tool_use_only=tool_use_only,
+                include_tool_result=include_tool_result,
             )
             # Merge non-Claude results in multi-source mode
             non_claude = _non_claude_results()

@@ -590,6 +590,85 @@ class TestSearchMessagesNoToolUnchanged:
         assert any("start the feature" in r.content for r in results)
 
 
+# ─── Part 1d-ii: search_messages with include_tool_result ─────────────────────
+
+
+def _make_projects_with_bash_tool_result(tmp_path: Path) -> Path:
+    """Create projects dir with a session containing Bash tool_use + toolUseResult pair."""
+    projects = tmp_path / "projects"
+    proj = projects / "-Users-alice-proj1"
+    proj.mkdir(parents=True)
+    s1 = "cccc0003-0000-0000-0000-000000000000"
+    assistant_uuid = "dddd0004-0000-0000-0000-000000000000"
+    lines = [
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-26T10:00:00.000Z",
+                    "uuid": "eeee0005-0000-0000-0000-000000000000",
+                    "message": {"role": "user", "content": "list files"}}),
+        json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-26T10:00:01.000Z",
+                    "uuid": assistant_uuid,
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "t_bash1", "name": "Bash",
+                         "input": {"command": "ls -la /tmp", "description": "List files"}}]}}),
+        json.dumps({"sessionId": s1, "type": "user", "timestamp": "2026-01-26T10:00:02.000Z",
+                    "uuid": "ffff0006-0000-0000-0000-000000000000",
+                    "parentUuid": assistant_uuid,
+                    "sourceToolAssistantUUID": assistant_uuid,
+                    "toolUseResult": {"stdout": "total 42\ndrwxr-xr-x  5 root  wheel  160 Jan 26 10:00 .\n",
+                                      "stderr": "", "interrupted": False, "isImage": False},
+                    "message": {"role": "user", "content": ""}}),
+    ]
+    (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+    return projects
+
+
+class TestSearchMessagesIncludeToolResult:
+    def test_include_tool_result_attaches_output_stats(self, tmp_path):
+        projects = _make_projects_with_bash_tool_result(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", tool="Bash", include_tool_result=True)
+        assert len(results) == 1
+        tr = results[0].tool_result
+        assert tr is not None
+        assert tr["stdout_chars"] == 55
+        assert tr["stderr_chars"] == 0
+        assert tr["output_chars"] == 55
+        assert tr["output_words"] > 0
+
+    def test_include_tool_result_false_by_default(self, tmp_path):
+        projects = _make_projects_with_bash_tool_result(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", tool="Bash")
+        assert len(results) == 1
+        assert results[0].tool_result is None
+
+    def test_include_tool_result_to_dict(self, tmp_path):
+        projects = _make_projects_with_bash_tool_result(tmp_path)
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", tool="Bash", include_tool_result=True)
+        d = results[0].to_dict()
+        assert "tool_result" in d
+        assert d["tool_result"]["stdout_chars"] == 55
+
+    def test_include_tool_result_no_result_yields_none(self, tmp_path):
+        """Bash tool_use without a matching toolUseResult gets tool_result=None."""
+        projects = tmp_path / "projects"
+        proj = projects / "-Users-alice-proj1"
+        proj.mkdir(parents=True)
+        s1 = "aaaa9999-0000-0000-0000-000000000000"
+        lines = [
+            json.dumps({"sessionId": s1, "type": "assistant", "timestamp": "2026-01-26T10:00:01.000Z",
+                        "uuid": "bbbb9999-0000-0000-0000-000000000000",
+                        "message": {"role": "assistant", "content": [
+                            {"type": "tool_use", "id": "t1", "name": "Bash",
+                             "input": {"command": "echo hello"}}]}}),
+        ]
+        (proj / f"{s1}.jsonl").write_text("\n".join(lines))
+        engine = _make_engine(tmp_path, projects)
+        results = engine.search_messages("", tool="Bash", include_tool_result=True)
+        assert len(results) == 1
+        assert results[0].tool_result is None
+
+
 # ─── Part 1e: cross_reference_session ────────────────────────────────────────
 
 class TestCrossRefFindsWrite:

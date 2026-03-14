@@ -175,6 +175,7 @@ class SessionMessage:
     content: str
     session_id: str
     line_count: Optional[int] = None
+    tool_result: Optional[dict] = None  # Tool output: {stdout_chars, stderr_chars, output_chars, output_words} when available
 
     def preview(self, limit: int = 100) -> str:
         """Get preview of message content.
@@ -194,12 +195,15 @@ class SessionMessage:
 
     def to_dict(self) -> dict:
         """Serialize for JSON output and _render_output row_fn access."""
-        return {
+        d = {
             "type": self.type.value if hasattr(self.type, "value") else str(self.type),
             "timestamp": self.timestamp,
             "content": self.content,
             "session_id": self.session_id,
         }
+        if self.tool_result:
+            d["tool_result"] = self.tool_result
+        return d
 
 
 @dataclass

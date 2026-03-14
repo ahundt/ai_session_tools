@@ -1656,6 +1656,7 @@ def _do_messages_search(
     after_index: int = 0,
     after_timestamp: Optional[str] = None,
     tool_use_only: bool = False,
+    include_tool_result: bool = False,
 ) -> None:
     """Search messages across all sessions. When context > 0, each result includes
     up to ``context`` surrounding messages from the same session file.
@@ -1733,6 +1734,7 @@ def _do_messages_search(
         after_index=after_index,
         after_timestamp=after_timestamp,
         tool_use_only=tool_use_only,
+        include_tool_result=include_tool_result,
     )
     results = all_results[:limit]
 
@@ -3290,6 +3292,9 @@ def _tools_search_cmd(
     when: Optional[str] = _OPT_WHEN,
     after: Optional[str] = _OPT_AFTER,
     before: Optional[str] = _OPT_BEFORE,
+    include_result: bool = typer.Option(False, "--include-result",
+        help="Include tool output metadata (stdout/stderr char and word counts) in JSON output. "
+             "Requires a second pass over session files; off by default for performance."),
 ) -> None:
     """Search or find tool invocations from Claude Code sessions.
 
@@ -3302,6 +3307,7 @@ def _tools_search_cmd(
         aise tools search Write --format json        # JSON output
         aise tools search Bash --since 7d            # recent Bash calls only
         aise tools search Bash --when 202X           # Bash calls in the 2020s decade
+        aise tools search Bash --include-result --format json  # include output metadata
     """
     since, until = _normalize_date_range(since, until, when, after, before)
     engine = _resolve_engine(ctx, provider)
@@ -3311,7 +3317,7 @@ def _tools_search_cmd(
     _do_messages_search(
         engine, query or "", message_type="assistant",
         limit=limit, max_chars=max_chars, fmt=fmt, tool=tool,
-        since=since, until=until,
+        since=since, until=until, include_tool_result=include_result,
     )
 
 
