@@ -79,6 +79,11 @@ CAST_FILE_POST_A = OUTPUT_DIR / "post-a.cast"
 GIF_FILE_POST_A  = OUTPUT_DIR / "post-a.gif"
 MP4_FILE_POST_A  = OUTPUT_DIR / "post-a.mp4"
 
+# Post B (file version history & recovery) — r/CommandLine audience.
+CAST_FILE_POST_B = OUTPUT_DIR / "post-b.cast"
+GIF_FILE_POST_B  = OUTPUT_DIR / "post-b.gif"
+MP4_FILE_POST_B  = OUTPUT_DIR / "post-b.mp4"
+
 # Set CLAUDE_CONFIG_DIR so aise uses committed fixture data, never ~/.claude.
 # Respect an existing CLAUDE_CONFIG_DIR in the environment so that record()
 # can pass a date-shifted tmp dir through to the --run-acts subprocess.
@@ -783,6 +788,74 @@ def _build_post_a_banner() -> str:
 BANNER_POST_A = _build_post_a_banner()
 
 
+def _build_post_b_banner() -> str:
+    """Build the Post B intro banner for the file recovery demo."""
+    W = 90
+    BOX  = "\033[36m"
+    CYAN = "\033[96m"
+    BOLD = "\033[1m"
+    GRAY = "\033[90m"
+    RST  = "\033[0m"
+
+    def top() -> str:
+        return f"{BOX}  ╔{'═' * W}╗{RST}"
+    def sep() -> str:
+        return f"{BOX}  ╠{'═' * W}╣{RST}"
+    def bot() -> str:
+        return f"{BOX}  ╚{'═' * W}╝{RST}"
+    def row(text: str = "", style: str = "") -> str:
+        content = (" " + text).ljust(W)
+        return f"{BOX}  ║{RST}{style}{content}{RST}{BOX}║{RST}"
+    def crow(text: str = "", style: str = "") -> str:
+        content = text.center(W)
+        return f"{BOX}  ║{RST}{style}{content}{RST}{BOX}║{RST}"
+    def cmd_row(cmd: str, desc: str, cmd_width: int = 26) -> str:
+        indent = "    "
+        arrow  = "  →  "
+        cmd_padded = cmd.ljust(cmd_width)
+        padding = " " * max(0, W - 1 - len(indent) - cmd_width - len(arrow) - len(desc))
+        return (
+            f"{BOX}  ║{RST} {indent}"
+            f"{BOLD}{CYAN}{cmd_padded}{RST}"
+            f"{GRAY}{arrow}{desc}{RST}"
+            f"{padding}{BOX}║{RST}"
+        )
+
+    lines = [
+        "",
+        top(),
+        row(),
+        crow("aise: recover file versions Claude wrote between your git commits", style=BOLD),
+        row(),
+        crow("github.com/ahundt/ai_session_tools"),
+        sep(),
+        row(),
+        row("  Commands shown in this demo:"),
+        row(),
+        cmd_row("aise files search",   "find files Claude wrote or edited"),
+        row(),
+        cmd_row("aise files history",  "see every version, with diffs"),
+        row(),
+        cmd_row("aise files extract",  "recover a specific version"),
+        row(),
+        cmd_row("aise files cross-ref", "check which edits landed on disk"),
+        row(),
+        cmd_row("aise tools search",   "find raw Edit/Write tool calls"),
+        row(),
+        sep(),
+        row(),
+        crow("Install: uv tool install git+https://github.com/ahundt/ai_session_tools"),
+        crow("Claude Code: /ar:claude-session-tools  (via autorun: github.com/ahundt/autorun)",
+             style=GRAY),
+        bot(),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+BANNER_POST_B = _build_post_b_banner()
+
+
 def _type(text: str, delay: float = 0.04) -> None:
     """Write text to stdout character by character with typing effect."""
     if _TIMED:
@@ -981,6 +1054,71 @@ def run_post_a_acts() -> None:
     # Write a final newline to anchor a PTY event just before the hold pause.
     # Without this, the last cast event is the final byte of aise output, and
     # agg/ffmpeg may drop the tail silence during GIF→MP4 conversion.
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    pause(8.0)
+
+
+def run_post_b_acts() -> None:
+    """Execute Post B acts (file version history & recovery demo). Called inside asciinema."""
+    sys.stdout.write("\033[H\033[2J")
+    sys.stdout.flush()
+    sys.stdout.write(BANNER_POST_B + "\n")
+    sys.stdout.flush()
+    pause(4.0)
+
+    PROV = "--provider claude"
+
+    # ── Act 1: files search — what files Claude touched ────────────────────
+    section("Files search — every file Claude wrote or edited")
+    pause(1.5)
+    _run(f"aise files search --pattern '*.py' {PROV}")
+    pause(5.0)
+
+    # ── Act 2: files history — version timeline of a specific file ─────────
+    section("File history — every version of transformer.py (Write + Edit)")
+    pause(1.5)
+    _run(f"aise files history transformer.py {PROV}")
+    pause(5.0)
+
+    # ── Act 3: files extract — recover a specific version ──────────────────
+    section("Extract — recover the latest version to stdout")
+    pause(1.5)
+    _run(f"aise files extract transformer.py {PROV}")
+    pause(5.0)
+
+    # ── Act 4: files extract --version 1 — recover the original ────────────
+    section("Extract v1 — the version before the Edit, for comparison")
+    pause(1.5)
+    _run(f"aise files extract transformer.py --version 1 {PROV}")
+    pause(5.0)
+
+    # ── Act 5: tools search Edit — raw Edit tool calls ─────────────────────
+    section("Tools search — find the raw Edit calls that modified the file")
+    pause(1.5)
+    _run(f'aise tools search Edit "transformer" {PROV}')
+    pause(5.0)
+
+    # ── Act 6: the recovery scenario — narrative text ──────────────────────
+    section("The scenario — git reset --hard destroyed your unstaged edits")
+    pause(1.5)
+    _type("\n\033[1;33m  Disaster:\033[0m  git reset --hard wiped unstaged changes\n", delay=0.03)
+    _type("\033[1;33m  Git says:\033[0m  clean working tree (the edits are gone)\n", delay=0.03)
+    _type("\033[1;32m  Recovery:\033[0m  aise files extract transformer.py --restore\n", delay=0.03)
+    _type("\n  aise reads the JSONL records Claude already writes.\n", delay=0.03)
+    _type("  Every Write and Edit is there. No server, no database.\n", delay=0.03)
+    pause(5.0)
+
+    # ── Done ─────────────────────────────────────────────────────────────────
+    sys.stdout.write(
+        "\n\n"
+        "\033[1;32m  Done — files found, history traced, version recovered\033[0m\n"
+        "\n"
+        "  Install:   uv tool install git+https://github.com/ahundt/ai_session_tools\n"
+        "  Autorun:   https://github.com/ahundt/autorun\n"
+        "\n"
+    )
+    sys.stdout.flush()
     sys.stdout.write("\n")
     sys.stdout.flush()
     pause(8.0)
@@ -1192,6 +1330,27 @@ _POST_A_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     ("autorun",     "Act 7: autorun plugin reference displayed"),
     # Done banner written by sys.stdout.write().
     ("Done",        "Done: success banner displayed"),
+)
+
+# Checks for the --post-b file recovery demo.
+_POST_B_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
+    ("transformer.py",  "Act 1: files search shows transformer.py"),
+    (".py",             "Act 1: files search shows Python files"),
+    # Act 2: files history shows version table with line counts
+    ("v1",              "Act 2: files history shows version 1"),
+    ("v2",              "Act 2: files history shows version 2"),
+    # Act 3: files extract shows file content
+    ("normalize_timestamps", "Act 3: extract shows transformer.py function"),
+    ("filter_valid_records", "Act 3: extract shows filter function"),
+    # Act 4: extract --version 1 shows original (before Edit)
+    ("transform",       "Act 4: extract v1 shows original transform function"),
+    # Act 5: tools search Edit finds the raw edit call
+    ("old_string",      "Act 5: tools search shows Edit tool call with old_string"),
+    # Act 6: narrative text about the recovery scenario
+    ("git reset",       "Act 6: recovery scenario mentions git reset"),
+    ("--restore",       "Act 6: recovery scenario shows --restore flag"),
+    # Done banner
+    ("Done",            "Done: success banner displayed"),
 )
 
 
@@ -1428,6 +1587,19 @@ class TestDemoFree:
             assert fragment in combined, \
                 f"MISSING: {desc} — expected {fragment!r} in output:\n{combined[-2000:]}"
 
+    def test_post_b_acts_full_pathway(self) -> None:
+        """Run all Post B demo acts (file recovery) end-to-end and verify expected output."""
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__)), "--test-post-b-acts"],
+            capture_output=True, timeout=120,
+            encoding="utf-8", errors="replace",
+        )
+        combined = (result.stdout or "") + (result.stderr or "")
+        assert result.returncode == 0, f"--test-post-b-acts failed (rc={result.returncode}):\n{combined}"
+        for fragment, desc in _POST_B_VERIFY_CHECKS:
+            assert fragment in combined, \
+                f"MISSING: {desc} — expected {fragment!r} in output:\n{combined[-2000:]}"
+
 
 # ── Main entrypoint ────────────────────────────────────────────────────────────
 
@@ -1451,10 +1623,18 @@ def main() -> None:
                         help="[internal] Run Post A acts inside asciinema subprocess")
     parser.add_argument("--verify-post-a",   action="store_true",
                         help="Verify Post A recording contains expected output")
+    parser.add_argument("--post-b",          action="store_true",
+                        help="Record Post B (file recovery) cast + GIF/MP4")
+    parser.add_argument("--run-post-b-acts", action="store_true",
+                        help="[internal] Run Post B acts inside asciinema subprocess")
+    parser.add_argument("--verify-post-b",   action="store_true",
+                        help="Verify Post B recording contains expected output")
     parser.add_argument("--test-acts",       action="store_true",
                         help="Run demo acts without timing delays (for pytest)")
     parser.add_argument("--test-post-a-acts", action="store_true",
                         help="Run Post A acts without timing delays (for pytest)")
+    parser.add_argument("--test-post-b-acts", action="store_true",
+                        help="Run Post B acts without timing delays (for pytest)")
     args = parser.parse_args()
 
     if args.run_acts:
@@ -1541,6 +1721,40 @@ def main() -> None:
             os.environ["CLAUDE_CONFIG_DIR"] = str(dated_dir)
             DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir), "NO_COLOR": "1"}
             run_post_a_acts()
+        finally:
+            shutil.rmtree(dated_dir, ignore_errors=True)
+
+    elif args.run_post_b_acts:
+        # Called by asciinema subprocess — run Post B acts with timing delays
+        _TIMED = True
+        create_synthetic_data()
+        run_post_b_acts()
+
+    elif args.post_b:
+        create_synthetic_data()
+        record(CAST_FILE_POST_B, acts_flag="--run-post-b-acts")
+        trim_cast_to_banner(CAST_FILE_POST_B)
+        convert_to_gif(CAST_FILE_POST_B, GIF_FILE_POST_B, speed=1.0)
+        convert_to_mp4(GIF_FILE_POST_B, MP4_FILE_POST_B)
+        verify_recording(CAST_FILE_POST_B, checks=_POST_B_VERIFY_CHECKS)
+        print("\nDone! Post B files:")
+        for f in [CAST_FILE_POST_B, GIF_FILE_POST_B, MP4_FILE_POST_B]:
+            if f.exists():
+                size_kb = f.stat().st_size // 1024
+                print(f"  {f}  ({size_kb} KB)")
+
+    elif args.verify_post_b:
+        ok = verify_recording(CAST_FILE_POST_B, checks=_POST_B_VERIFY_CHECKS)
+        sys.exit(0 if ok else 1)
+
+    elif args.test_post_b_acts:
+        # Run Post B acts without timing delays, with date-shifted fixtures.
+        create_synthetic_data()
+        dated_dir = create_dated_demo_dir()
+        try:
+            os.environ["CLAUDE_CONFIG_DIR"] = str(dated_dir)
+            DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir), "NO_COLOR": "1"}
+            run_post_b_acts()
         finally:
             shutil.rmtree(dated_dir, ignore_errors=True)
 
