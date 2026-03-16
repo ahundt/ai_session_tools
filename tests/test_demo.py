@@ -296,6 +296,12 @@ _DATA_SESSION_4 = [
     _msg(_S4, "assistant",
          "I'll add null handling to the transformer to handle missing category values gracefully.",
          "2026-02-25T11:00:10.000Z", _DATA_CWD),
+    # Write V2 (expanded filter_valid_records) before the Edit, so v2 gets a JSONL
+    # timestamp and sorts chronologically between v1 (S3 Write) and v3 (S4 Edit).
+    _tool_write(_S4, "2026-02-25T11:00:30.000Z",
+                f"{_DATA_CWD}/pipeline/transformer.py",
+                '"""Data transformation functions."""\nimport pandas as pd\nfrom typing import Optional\n\ndef normalize_timestamps(df: pd.DataFrame) -> pd.DataFrame:\n    df = df.copy()\n    df[\'timestamp\'] = pd.to_datetime(df[\'timestamp\'], utc=True)\n    return df\n\ndef filter_valid_records(df: pd.DataFrame, min_value: Optional[float] = None) -> pd.DataFrame:\n    mask = df[\'value\'].notna()\n    if min_value is not None:\n        mask &= df[\'value\'] >= min_value\n    else:\n        mask &= df[\'value\'] > 0\n    return df[mask]\n\ndef transform(df: pd.DataFrame) -> pd.DataFrame:\n    df = normalize_timestamps(df)\n    df = filter_valid_records(df)\n    df[\'year\'] = df[\'timestamp\'].dt.year\n    df[\'month\'] = df[\'timestamp\'].dt.month\n    return df\n',
+                _DATA_CWD),
     _tool_edit(_S4, "2026-02-25T11:01:00.000Z",
                f"{_DATA_CWD}/pipeline/transformer.py",
                "def filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:\n    return df[df['value'].notna() & (df['value'] > 0)]",
@@ -534,27 +540,42 @@ def _setup_recovery_files(demo_dir: Path) -> None:
         "    return df\n"
     )
 
-    # (session_id, {filename: content}, version_number)
-    # version_number must be unique per filename across sessions to count as separate edits
+    # (session_id, {filename: content}, version_number, iso_timestamp)
+    # version_number must be unique per filename across sessions to count as separate edits.
+    # iso_timestamp: set as file mtime so the engine sorts versions chronologically
+    # instead of using the file creation time (which is always "now").
+    # Timestamps MUST match the corresponding JSONL _tool_write timestamps so
+    # `files history` shows versions in v1 → v2 → v3 order.
+    # NOTE: get_versions() also creates a version from the _tool_edit JSONL record for
+    # transformer.py in _S4. That Edit-derived version has no file on disk, so
+    # `files extract` without --version will fail on it. Demo acts must use
+    # explicit --version N to target a Write-based version that has a file on disk.
     _sessions: list[tuple] = [
-        (_S1, {"jwt.py": JWT_V1, "routes.py": ROUTES_V1, "test_auth.py": TEST_AUTH_V1}, 1),
-        (_S3, {"transformer.py": TRANSFORMER_V1},                                        1),
-        (_S4, {"transformer.py": TRANSFORMER_V2},                                        2),
+        (_S1, {"jwt.py": JWT_V1, "routes.py": ROUTES_V1, "test_auth.py": TEST_AUTH_V1}, 1, "2026-02-10T09:01:00Z"),
+        (_S3, {"transformer.py": TRANSFORMER_V1},                                        1, "2026-02-15T10:02:00Z"),
+        (_S4, {"transformer.py": TRANSFORMER_V2},                                        2, "2026-02-25T11:00:30Z"),
     ]
 
-    for sid, files, vnum in _sessions:
+    for sid, files, vnum, ts in _sessions:
         # session_*/ dir: final-version files (iterated by search())
         final_dir = recovery / f"session_{sid}"
         final_dir.mkdir(parents=True, exist_ok=True)
         for name, content in files.items():
-            (final_dir / name).write_text(content)
+            p = final_dir / name
+            p.write_text(content)
+            # Set mtime to match the JSONL timestamp for correct chronological ordering.
+            mtime = datetime.strptime(ts.replace("Z", "+00:00"), "%Y-%m-%dT%H:%M:%S%z").timestamp()
+            os.utime(p, (mtime, mtime))
 
         # session_all_versions_*/ dir: versioned files (counted by get_versions())
         av_dir = recovery / f"session_all_versions_{sid}"
         av_dir.mkdir(parents=True, exist_ok=True)
         for name, content in files.items():
             lines = len(content.splitlines())
-            (av_dir / f"{name}_v{vnum:06d}_line_{lines}.txt").write_text(content)
+            p = av_dir / f"{name}_v{vnum:06d}_line_{lines}.txt"
+            p.write_text(content)
+            mtime = datetime.strptime(ts.replace("Z", "+00:00"), "%Y-%m-%dT%H:%M:%S%z").timestamp()
+            os.utime(p, (mtime, mtime))
 
 
 def cleanup_synthetic_data() -> None:
@@ -1124,13 +1145,16 @@ def run_post_b_acts() -> None:
     pause(7.0)
 
     # ── Act 4: the recovery scenario — narrative + actual command ──────────
+    # Use --version 2 (latest Write-based version with a file on disk).
+    # The default (no --version) picks the Edit-derived version which has no
+    # recovery file on disk, causing "Version file not found on disk" errors.
     section("The scenario — git reset --hard destroyed your unstaged edits")
     pause(2.0)
     _type("\n\033[1;33m  Disaster:\033[0m  git reset --hard wiped unstaged changes\n", delay=0.03)
     _type("\033[1;33m  Git says:\033[0m  clean working tree (the edits are gone)\n", delay=0.03)
     _type("\033[1;32m  But aise still has every version:\033[0m\n\n", delay=0.03)
     pause(2.0)
-    _run(f"aise files extract transformer.py {PROV}")
+    _run(f"aise files extract transformer.py --version 2 {PROV}")
     pause(7.0)
 
     # ── Done ─────────────────────────────────────────────────────────────────
@@ -1171,9 +1195,10 @@ def run_post_d_acts() -> None:
     pause(7.0)
 
     # ── Act 3: files extract — recover file content ───────────────────────
+    # Use --version 2 (latest Write-based version with a file on disk).
     section("Recover file content — the intermediate version git never saw")
     pause(2.0)
-    _run(f"aise files extract transformer.py {PROV}")
+    _run(f"aise files extract transformer.py --version 2 {PROV}")
     pause(7.0)
 
     # ── Act 4: messages corrections — find patterns ───────────────────────
