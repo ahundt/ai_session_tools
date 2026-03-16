@@ -976,57 +976,48 @@ def run_demo_acts() -> None:
     sys.stdout.flush()
     sys.stdout.write(BANNER + "\n")
     sys.stdout.flush()
-    pause(12.0)  # hold for viewers to read the richer banner
+    pause(10.0)  # hold for viewers to read banner
 
     # All commands use --provider claude to show only synthetic demo sessions,
     # preventing any real session data from the user's system from appearing.
     PROV = "--provider claude"
 
     # ── Act 1: aise stats ─────────────────────────────────────────────────────
-    section("Statistics — sessions, messages, and files indexed")
-    pause(1.5)
+    section("How much history you have — sessions, messages, files")
+    pause(2.0)
     _run(f"aise stats {PROV}")
-    pause(5.0)
+    pause(7.0)
 
-    # ── Act 2: recent user messages (last 3 days) ────────────────────────────
-    # Compute --since dynamically; fixtures were date-shifted by create_dated_demo_dir()
-    # so this always catches recent sessions regardless of when the demo is re-recorded.
-    since = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
-    section("Recent prompts — your messages to Claude over the last 3 days")
-    pause(1.5)
-    _run(f"aise messages search '' --type user --since {since} {PROV}")
-    pause(5.0)
-
-    # ── Act 3: aise list ──────────────────────────────────────────────────────
-    section("Session list — all sessions across every project")
-    pause(1.5)
+    # ── Act 2: aise list ──────────────────────────────────────────────────────
+    section("Every session, including compacted ones — newest first")
+    pause(2.0)
     _run(f"aise list {PROV}")
-    pause(5.0)
+    pause(7.0)
 
-    # ── Act 4: messages search --context 1 ───────────────────────────────────
-    section("Message search — find any past conversation instantly")
-    pause(1.5)
+    # ── Act 3: messages search --context 1 ───────────────────────────────────
+    section("Find any past conversation by keyword — with surrounding context")
+    pause(2.0)
     _run(f"aise messages search authentication --context 1 --limit 3 {PROV}")
-    pause(5.0)
+    pause(7.0)
 
-    # ── Act 5: files search ────────────────────────────────────────────────────
-    section("File history — which files Claude edited most")
-    pause(1.5)
+    # ── Act 4: files search ────────────────────────────────────────────────────
+    section("Which files Claude edited most — starting point for recovery")
+    pause(2.0)
     _run(f"aise files search --pattern '*.py' --min-edits 2 {PROV}")
-    pause(5.0)
+    pause(7.0)
 
-    # ── Act 6: messages corrections ───────────────────────────────────────────
-    section("AI corrections — patterns in mistakes, detected automatically")
-    pause(1.5)
+    # ── Act 5: messages corrections ───────────────────────────────────────────
+    section("Correction patterns — mistakes you kept having to fix")
+    pause(2.0)
     _run(f"aise messages corrections {PROV}")
-    pause(6.0)
+    pause(7.0)
 
-    # ── Act 7: messages get SESSION_ID --limit 10 (context rescue) ────────────
+    # ── Act 6: messages get — recover full session context ────────────────────
     session_id = get_first_session_id()
-    section("Session recovery — restore context from a previous session")
-    pause(1.5)
+    section("Recover a full session — even after compaction cleared the view")
+    pause(2.0)
     _run(f"aise messages get {session_id} --limit 10 {PROV}")
-    pause(6.0)
+    pause(7.0)
 
     sys.stdout.write(
         "\n\n"
@@ -1048,71 +1039,43 @@ def run_post_a_acts() -> None:
     sys.stdout.flush()
     sys.stdout.write(BANNER_POST_A + "\n")
     sys.stdout.flush()
-    pause(4.0)
+    pause(10.0)
 
     PROV = "--provider claude"
 
     # ── Act 1: corrections --since 30d ────────────────────────────────────────
-    section("Corrections — 30 days of patterns, auto-classified")
-    pause(1.5)
+    section("Step 1: What mistakes did I keep correcting? — 30 days of patterns")
+    pause(2.0)
     _run(f"aise messages corrections --since 30d {PROV}")
-    pause(6.0)
+    pause(7.0)
 
-    # ── Act 2: all user messages --since 30d ──────────────────────────────────
-    section("Your messages — everything you wrote across sessions this month")
-    pause(1.5)
-    _run(f"aise messages search '' --type user --since 30d {PROV}")
-    pause(5.0)
-
-    # ── Act 3: regex search with context ──────────────────────────────────────
-    section("Unclassified feedback — regex search + context-after")
-    pause(1.5)
+    # ── Act 2: regex search — find corrections the classifier missed ─────────
+    section("Step 2: Dig deeper — search your own words for correction patterns")
+    pause(2.0)
     _run(
         f'aise messages search "forgot|missed|wrong" --type user --regex'
         f' --context-after 2 {PROV}'
     )
-    pause(5.0)
+    pause(7.0)
 
-    # ── Act 4: pipeline — session IDs from corrections into targeted search ────
-    # shell=True (inside _run) makes the pipe work correctly on macOS/Linux.
-    # {{}} in the f-string produces literal {} which xargs needs for -I{} placeholder.
-    section("Pipeline — corrections IDs into targeted session search")
-    pause(1.5)
-    _run(
-        f'aise messages corrections --since 14d --ids-only {PROV}'
-        f' | xargs -I{{}} aise messages search "you forgot"'
-        f' --session {{}} --context-after 3 {PROV}',
-        shell=True,
-    )
-    pause(6.0)
+    # ── Act 3: targeted search in sessions with known corrections ─────────────
+    section("Step 3: Zoom in — search a specific session for follow-up context")
+    pause(2.0)
+    _run(f'aise messages search "you forgot" --context-after 3 {PROV}')
+    pause(7.0)
 
-    # ── Act 5: the CLAUDE.md fix — cat >> command (typed, not executed) ─────────
-    section("The fix — stop AI crashing when it fails to use uv venvs")
-    pause(1.5)
+    # ── Act 4: the CLAUDE.md fix ──────────────────────────────────────────────
+    section("Step 4: Fix it — one line in CLAUDE.md stops the pattern")
+    pause(2.0)
     _type("\n\033[1;32m$\033[0m ", delay=0)
     _type("echo 'Always use uv run python. Never run python3 or python directly.' >> CLAUDE.md\n", delay=0.045)
-    pause(3.0)
+    pause(5.0)
 
-    # ── Act 6: a week later — verify the loop closed ────────────────────────
-    section("A week later — checking if the fix worked")
-    pause(1.5)
+    # ── Act 5: a week later — verify the loop closed ────────────────────────
+    section("Step 5: Verify — did the fix actually work?")
+    pause(2.0)
     _run(f"aise messages corrections --since 7d {PROV}")
-    pause(6.0)
-
-    # ── Act 7: automate from inside Claude Code ─────────────────────────────
-    section("Automate the loop — run from inside Claude Code")
-    pause(1.5)
-    _type("\n\033[1;32m$\033[0m ", delay=0)
-    _type('/ar:ai-session-tools\n', delay=0.045)
-    pause(0.5)
-    _type('"analyze my correction patterns from the last month and suggest CLAUDE.md rules"\n', delay=0.035)
-    pause(1.0)
-    sys.stdout.write(
-        "\n"
-        "  autorun plugin: https://github.com/ahundt/autorun\n"
-    )
-    sys.stdout.flush()
-    pause(3.0)
+    pause(7.0)
 
     # ── Done ─────────────────────────────────────────────────────────────────
     sys.stdout.write(
@@ -1138,49 +1101,37 @@ def run_post_b_acts() -> None:
     sys.stdout.flush()
     sys.stdout.write(BANNER_POST_B + "\n")
     sys.stdout.flush()
-    pause(4.0)
+    pause(10.0)
 
     PROV = "--provider claude"
 
     # ── Act 1: files search — what files Claude touched ────────────────────
-    section("Files search — every file Claude wrote or edited")
-    pause(1.5)
+    section("What did Claude touch? — every file written or edited, across sessions")
+    pause(2.0)
     _run(f"aise files search --pattern '*.py' {PROV}")
-    pause(5.0)
+    pause(7.0)
 
     # ── Act 2: files history — version timeline of a specific file ─────────
-    section("File history — every version of transformer.py (Write + Edit)")
-    pause(1.5)
+    section("Version timeline — Claude rewrote this file, git saw one commit")
+    pause(2.0)
     _run(f"aise files history transformer.py {PROV}")
-    pause(5.0)
+    pause(7.0)
 
-    # ── Act 3: files extract — recover a specific version ──────────────────
-    section("Extract — recover the latest version to stdout")
-    pause(1.5)
-    _run(f"aise files extract transformer.py {PROV}")
-    pause(5.0)
-
-    # ── Act 4: files extract --version 1 — recover the original ────────────
-    section("Extract v1 — the version before the Edit, for comparison")
-    pause(1.5)
+    # ── Act 3: files extract — recover the original version ────────────────
+    section("Recover a version — the original before Claude's Edit changed it")
+    pause(2.0)
     _run(f"aise files extract transformer.py --version 1 {PROV}")
-    pause(5.0)
+    pause(7.0)
 
-    # ── Act 5: tools search Edit — raw Edit tool calls ─────────────────────
-    section("Tools search — find the raw Edit calls that modified the file")
-    pause(1.5)
-    _run(f'aise tools search Edit "transformer" {PROV}')
-    pause(5.0)
-
-    # ── Act 6: the recovery scenario — narrative text ──────────────────────
+    # ── Act 4: the recovery scenario — narrative + actual command ──────────
     section("The scenario — git reset --hard destroyed your unstaged edits")
-    pause(1.5)
+    pause(2.0)
     _type("\n\033[1;33m  Disaster:\033[0m  git reset --hard wiped unstaged changes\n", delay=0.03)
     _type("\033[1;33m  Git says:\033[0m  clean working tree (the edits are gone)\n", delay=0.03)
-    _type("\033[1;32m  Recovery:\033[0m  aise files extract transformer.py --restore\n", delay=0.03)
-    _type("\n  aise reads the JSONL records Claude already writes.\n", delay=0.03)
-    _type("  Every Write and Edit is there. No server, no database.\n", delay=0.03)
-    pause(5.0)
+    _type("\033[1;32m  But aise still has every version:\033[0m\n\n", delay=0.03)
+    pause(2.0)
+    _run(f"aise files extract transformer.py {PROV}")
+    pause(7.0)
 
     # ── Done ─────────────────────────────────────────────────────────────────
     sys.stdout.write(
@@ -1203,40 +1154,40 @@ def run_post_d_acts() -> None:
     sys.stdout.flush()
     sys.stdout.write(BANNER_POST_D + "\n")
     sys.stdout.flush()
-    pause(4.0)
+    pause(10.0)
 
     PROV = "--provider claude"
 
     # ── Act 1: messages search — find any past conversation ───────────────
-    section("Search — find any past conversation by keyword")
-    pause(1.5)
+    section("Find any past conversation — even from compacted sessions")
+    pause(2.0)
     _run(f"aise messages search authentication --context 1 --limit 3 {PROV}")
-    pause(5.0)
+    pause(7.0)
 
     # ── Act 2: files history — version timeline ───────────────────────────
-    section("File history — every version Claude wrote, with timestamps")
-    pause(1.5)
+    section("Every version Claude wrote — git only saw the final commit")
+    pause(2.0)
     _run(f"aise files history transformer.py {PROV}")
-    pause(5.0)
+    pause(7.0)
 
-    # ── Act 3: files extract --restore — recovery after git reset ─────────
-    section("Recovery — get back files after git reset --hard")
-    pause(1.5)
+    # ── Act 3: files extract — recover file content ───────────────────────
+    section("Recover file content — the intermediate version git never saw")
+    pause(2.0)
     _run(f"aise files extract transformer.py {PROV}")
-    pause(5.0)
+    pause(7.0)
 
     # ── Act 4: messages corrections — find patterns ───────────────────────
-    section("Corrections — patterns in mistakes across all sessions")
-    pause(1.5)
+    section("Correction patterns — mistakes you kept having to fix")
+    pause(2.0)
     _run(f"aise messages corrections --since 30d {PROV}")
-    pause(5.0)
+    pause(7.0)
 
     # ── Act 5: messages get — recover full session context ────────────────
     session_id = get_first_session_id()
-    section("Session recovery — restore context from a compacted session")
-    pause(1.5)
+    section("Full session recovery — get back context after compaction")
+    pause(2.0)
     _run(f"aise messages get {session_id} --limit 5 {PROV}")
-    pause(5.0)
+    pause(7.0)
 
     # ── Done ─────────────────────────────────────────────────────────────────
     sys.stdout.write(
@@ -1435,49 +1386,41 @@ def convert_to_mp4(gif_file: Path = GIF_FILE, mp4_file: Path = MP4_FILE) -> None
 # Fragment must appear in command OUTPUT (not in typed keystroke stream).
 _VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     ("Sessions:",        "Act 1: stats shows Sessions: label (table format)"),
-    ("accuracy",         "Act 2: recent user messages shows S6 content"),
-    ("cafe0001",         "Act 3: list shows synthetic session UUIDs"),
-    ("authentication",   "Act 4: message search finds authentication"),
-    (".py",              "Act 5: files search shows Python files"),
-    ("corrections",      "Act 6: corrections command shows AI correction history"),
-    ("cross-validation", "Act 7: session get shows ML session content"),
+    ("cafe0001",         "Act 2: list shows synthetic session UUIDs"),
+    ("authentication",   "Act 3: message search finds authentication"),
+    (".py",              "Act 4: files search shows Python files"),
+    ("corrections",      "Act 5: corrections command shows AI correction history"),
+    ("cross-validation", "Act 6: session get shows ML session content"),
 )
 
 # Checks for the --post-a self-improvement loop demo.
 _POST_A_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
-    ("regression",  "Act 1: regression category present in corrections output"),
-    ("skip_step",   "Act 1: skip_step category present in corrections output"),
-    ("accuracy",    "Act 2: user message stream shows fixture message text"),
-    ("missed",      "Act 3: regex search finds missed/forgot correction patterns across sessions"),
-    # Act 4: pipeline search output — fixture message starts with capital 'You forgot'.
-    # The typed command is char-by-char (never contiguous in cast); check output instead.
-    ("You forgot",  "Act 4: pipeline search output shows uv run python correction"),
-    # Act 5: section header written by section() via sys.stdout.write().
-    ("uv venvs",    "Act 5: fix section header mentions uv venvs"),
-    ("corrections", "Act 6: verification corrections command produced output"),
-    # Act 7: autorun section header written by section() via sys.stdout.write().
-    ("autorun",     "Act 7: autorun plugin reference displayed"),
-    # Done banner written by sys.stdout.write().
-    ("Done",        "Done: success banner displayed"),
+    # Act 1: corrections --since 30d
+    ("corrections",  "Act 1: corrections command produced output"),
+    # Act 2: regex search forgot|missed|wrong
+    ("missed",       "Act 2: regex search finds correction patterns across sessions"),
+    # Act 3: targeted search "you forgot"
+    ("You forgot",   "Act 3: targeted search finds 'you forgot' in sessions"),
+    # Act 4: CLAUDE.md fix — section header written by section()
+    ("Fix it",       "Act 4: fix section header displayed"),
+    # Act 5: verify corrections --since 7d
+    ("Verify",       "Act 5: verify section header displayed"),
+    # Done banner
+    ("Done",         "Done: success banner displayed"),
 )
 
 # Checks for the --post-b file recovery demo.
 _POST_B_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
+    # Act 1: files search
     ("transformer.py",  "Act 1: files search shows transformer.py"),
     (".py",             "Act 1: files search shows Python files"),
-    # Act 2: files history shows version table with line counts
+    # Act 2: files history
     ("v1",              "Act 2: files history shows version 1"),
     ("v2",              "Act 2: files history shows version 2"),
-    # Act 3: files extract shows file content
-    ("normalize_timestamps", "Act 3: extract shows transformer.py function"),
-    ("filter_valid_records", "Act 3: extract shows filter function"),
-    # Act 4: extract --version 1 shows original (before Edit)
-    ("transform",       "Act 4: extract v1 shows original transform function"),
-    # Act 5: tools search Edit finds the raw edit call
-    ("old_string",      "Act 5: tools search shows Edit tool call with old_string"),
-    # Act 6: narrative text about the recovery scenario
-    ("git reset",       "Act 6: recovery scenario mentions git reset"),
-    ("destroyed your unstaged edits", "Act 6: recovery scenario shows recovery section"),
+    # Act 3: files extract --version 1
+    ("transform",       "Act 3: extract v1 shows original transform function"),
+    # Act 4: recovery scenario narrative + files extract
+    ("destroyed your unstaged edits", "Act 4: recovery scenario narrative displayed"),
     # Done banner
     ("Done",            "Done: success banner displayed"),
 )
