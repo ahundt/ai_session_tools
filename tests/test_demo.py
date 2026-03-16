@@ -1348,7 +1348,7 @@ _POST_B_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     ("old_string",      "Act 5: tools search shows Edit tool call with old_string"),
     # Act 6: narrative text about the recovery scenario
     ("git reset",       "Act 6: recovery scenario mentions git reset"),
-    ("--restore",       "Act 6: recovery scenario shows --restore flag"),
+    ("destroyed your unstaged edits", "Act 6: recovery scenario shows recovery section"),
     # Done banner
     ("Done",            "Done: success banner displayed"),
 )
@@ -1733,7 +1733,7 @@ def main() -> None:
     elif args.post_b:
         create_synthetic_data()
         record(CAST_FILE_POST_B, acts_flag="--run-post-b-acts")
-        trim_cast_to_banner(CAST_FILE_POST_B)
+        trim_cast_to_banner(CAST_FILE_POST_B, banner_marker="recover file versions")
         convert_to_gif(CAST_FILE_POST_B, GIF_FILE_POST_B, speed=1.0)
         convert_to_mp4(GIF_FILE_POST_B, MP4_FILE_POST_B)
         verify_recording(CAST_FILE_POST_B, checks=_POST_B_VERIFY_CHECKS)
