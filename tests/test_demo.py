@@ -79,10 +79,15 @@ CAST_FILE_POST_A = OUTPUT_DIR / "post-a.cast"
 GIF_FILE_POST_A  = OUTPUT_DIR / "post-a.gif"
 MP4_FILE_POST_A  = OUTPUT_DIR / "post-a.mp4"
 
-# Post B (file version history & recovery) — r/CommandLine audience.
+# Post B (file version history & recovery) — r/ClaudeCode audience.
 CAST_FILE_POST_B = OUTPUT_DIR / "post-b.cast"
 GIF_FILE_POST_B  = OUTPUT_DIR / "post-b.gif"
 MP4_FILE_POST_B  = OUTPUT_DIR / "post-b.mp4"
+
+# Post D (broader audience, compaction angle) — r/ClaudeCode audience.
+CAST_FILE_POST_D = OUTPUT_DIR / "post-d.cast"
+GIF_FILE_POST_D  = OUTPUT_DIR / "post-d.gif"
+MP4_FILE_POST_D  = OUTPUT_DIR / "post-d.mp4"
 
 # Set CLAUDE_CONFIG_DIR so aise uses committed fixture data, never ~/.claude.
 # Respect an existing CLAUDE_CONFIG_DIR in the environment so that record()
@@ -856,6 +861,74 @@ def _build_post_b_banner() -> str:
 BANNER_POST_B = _build_post_b_banner()
 
 
+def _build_post_d_banner() -> str:
+    """Build the Post D intro banner for the broader audience demo."""
+    W = 90
+    BOX  = "\033[36m"
+    CYAN = "\033[96m"
+    BOLD = "\033[1m"
+    GRAY = "\033[90m"
+    RST  = "\033[0m"
+
+    def top() -> str:
+        return f"{BOX}  ╔{'═' * W}╗{RST}"
+    def sep() -> str:
+        return f"{BOX}  ╠{'═' * W}╣{RST}"
+    def bot() -> str:
+        return f"{BOX}  ╚{'═' * W}╝{RST}"
+    def row(text: str = "", style: str = "") -> str:
+        content = (" " + text).ljust(W)
+        return f"{BOX}  ║{RST}{style}{content}{RST}{BOX}║{RST}"
+    def crow(text: str = "", style: str = "") -> str:
+        content = text.center(W)
+        return f"{BOX}  ║{RST}{style}{content}{RST}{BOX}║{RST}"
+    def cmd_row(cmd: str, desc: str, cmd_width: int = 26) -> str:
+        indent = "    "
+        arrow  = "  →  "
+        cmd_padded = cmd.ljust(cmd_width)
+        padding = " " * max(0, W - 1 - len(indent) - cmd_width - len(arrow) - len(desc))
+        return (
+            f"{BOX}  ║{RST} {indent}"
+            f"{BOLD}{CYAN}{cmd_padded}{RST}"
+            f"{GRAY}{arrow}{desc}{RST}"
+            f"{padding}{BOX}║{RST}"
+        )
+
+    lines = [
+        "",
+        top(),
+        row(),
+        crow("Your compacted Claude sessions aren't gone. aise reads them.", style=BOLD),
+        row(),
+        crow("github.com/ahundt/ai_session_tools"),
+        sep(),
+        row(),
+        row("  Commands shown in this demo:"),
+        row(),
+        cmd_row("aise messages search",    "search across all sessions"),
+        row(),
+        cmd_row("aise files history",      "every version Claude wrote"),
+        row(),
+        cmd_row("aise files extract",      "recover after git reset --hard"),
+        row(),
+        cmd_row("aise messages corrections", "find correction patterns"),
+        row(),
+        cmd_row("aise messages get",       "recover full session context"),
+        row(),
+        sep(),
+        row(),
+        crow("Install: uv tool install git+https://github.com/ahundt/ai_session_tools"),
+        crow("Claude Code: /ar:claude-session-tools  (via autorun: github.com/ahundt/autorun)",
+             style=GRAY),
+        bot(),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+BANNER_POST_D = _build_post_d_banner()
+
+
 def _type(text: str, delay: float = 0.04) -> None:
     """Write text to stdout character by character with typing effect."""
     if _TIMED:
@@ -1124,6 +1197,62 @@ def run_post_b_acts() -> None:
     pause(8.0)
 
 
+def run_post_d_acts() -> None:
+    """Execute Post D acts (broader audience, compaction angle). Called inside asciinema."""
+    sys.stdout.write("\033[H\033[2J")
+    sys.stdout.flush()
+    sys.stdout.write(BANNER_POST_D + "\n")
+    sys.stdout.flush()
+    pause(4.0)
+
+    PROV = "--provider claude"
+
+    # ── Act 1: messages search — find any past conversation ───────────────
+    section("Search — find any past conversation by keyword")
+    pause(1.5)
+    _run(f"aise messages search authentication --context 1 --limit 3 {PROV}")
+    pause(5.0)
+
+    # ── Act 2: files history — version timeline ───────────────────────────
+    section("File history — every version Claude wrote, with timestamps")
+    pause(1.5)
+    _run(f"aise files history transformer.py {PROV}")
+    pause(5.0)
+
+    # ── Act 3: files extract --restore — recovery after git reset ─────────
+    section("Recovery — get back files after git reset --hard")
+    pause(1.5)
+    _run(f"aise files extract transformer.py {PROV}")
+    pause(5.0)
+
+    # ── Act 4: messages corrections — find patterns ───────────────────────
+    section("Corrections — patterns in mistakes across all sessions")
+    pause(1.5)
+    _run(f"aise messages corrections --since 30d {PROV}")
+    pause(5.0)
+
+    # ── Act 5: messages get — recover full session context ────────────────
+    session_id = get_first_session_id()
+    section("Session recovery — restore context from a compacted session")
+    pause(1.5)
+    _run(f"aise messages get {session_id} --limit 5 {PROV}")
+    pause(5.0)
+
+    # ── Done ─────────────────────────────────────────────────────────────────
+    sys.stdout.write(
+        "\n\n"
+        "\033[1;32m  Done — your compacted sessions are still there\033[0m\n"
+        "\n"
+        "  Install:   uv tool install git+https://github.com/ahundt/ai_session_tools\n"
+        "  Autorun:   https://github.com/ahundt/autorun\n"
+        "\n"
+    )
+    sys.stdout.flush()
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    pause(8.0)
+
+
 # ── Recording pipeline ─────────────────────────────────────────────────────────
 
 def record(cast_file: Path = CAST_FILE, *, acts_flag: str = "--run-acts") -> None:
@@ -1349,6 +1478,22 @@ _POST_B_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     # Act 6: narrative text about the recovery scenario
     ("git reset",       "Act 6: recovery scenario mentions git reset"),
     ("destroyed your unstaged edits", "Act 6: recovery scenario shows recovery section"),
+    # Done banner
+    ("Done",            "Done: success banner displayed"),
+)
+
+# Checks for the --post-d broader audience demo.
+_POST_D_VERIFY_CHECKS: Final[tuple[tuple[str, str], ...]] = (
+    # Act 1: messages search shows authentication result
+    ("authentication",  "Act 1: messages search finds authentication topic"),
+    # Act 2: files history shows version timeline
+    ("v1",              "Act 2: files history shows version 1"),
+    # Act 3: files extract shows file content
+    ("transform",       "Act 3: extract shows transformer.py content"),
+    # Act 4: corrections output
+    ("corrections",     "Act 4: corrections command produced output"),
+    # Act 5: messages get shows session content
+    ("cross-validation", "Act 5: messages get shows session content"),
     # Done banner
     ("Done",            "Done: success banner displayed"),
 )
@@ -1600,6 +1745,19 @@ class TestDemoFree:
             assert fragment in combined, \
                 f"MISSING: {desc} — expected {fragment!r} in output:\n{combined[-2000:]}"
 
+    def test_post_d_acts_full_pathway(self) -> None:
+        """Run all Post D demo acts (broader audience) end-to-end and verify expected output."""
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__)), "--test-post-d-acts"],
+            capture_output=True, timeout=120,
+            encoding="utf-8", errors="replace",
+        )
+        combined = (result.stdout or "") + (result.stderr or "")
+        assert result.returncode == 0, f"--test-post-d-acts failed (rc={result.returncode}):\n{combined}"
+        for fragment, desc in _POST_D_VERIFY_CHECKS:
+            assert fragment in combined, \
+                f"MISSING: {desc} — expected {fragment!r} in output:\n{combined[-2000:]}"
+
 
 # ── Main entrypoint ────────────────────────────────────────────────────────────
 
@@ -1635,6 +1793,14 @@ def main() -> None:
                         help="Run Post A acts without timing delays (for pytest)")
     parser.add_argument("--test-post-b-acts", action="store_true",
                         help="Run Post B acts without timing delays (for pytest)")
+    parser.add_argument("--post-d",          action="store_true",
+                        help="Record Post D (broader audience) cast + GIF/MP4")
+    parser.add_argument("--run-post-d-acts", action="store_true",
+                        help="[internal] Run Post D acts inside asciinema subprocess")
+    parser.add_argument("--verify-post-d",   action="store_true",
+                        help="Verify Post D recording contains expected output")
+    parser.add_argument("--test-post-d-acts", action="store_true",
+                        help="Run Post D acts without timing delays (for pytest)")
     args = parser.parse_args()
 
     if args.run_acts:
@@ -1755,6 +1921,40 @@ def main() -> None:
             os.environ["CLAUDE_CONFIG_DIR"] = str(dated_dir)
             DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir), "NO_COLOR": "1"}
             run_post_b_acts()
+        finally:
+            shutil.rmtree(dated_dir, ignore_errors=True)
+
+    elif args.run_post_d_acts:
+        # Called by asciinema subprocess — run Post D acts with timing delays
+        _TIMED = True
+        create_synthetic_data()
+        run_post_d_acts()
+
+    elif args.post_d:
+        create_synthetic_data()
+        record(CAST_FILE_POST_D, acts_flag="--run-post-d-acts")
+        trim_cast_to_banner(CAST_FILE_POST_D, banner_marker="compacted Claude sessions")
+        convert_to_gif(CAST_FILE_POST_D, GIF_FILE_POST_D, speed=1.0)
+        convert_to_mp4(GIF_FILE_POST_D, MP4_FILE_POST_D)
+        verify_recording(CAST_FILE_POST_D, checks=_POST_D_VERIFY_CHECKS)
+        print("\nDone! Post D files:")
+        for f in [CAST_FILE_POST_D, GIF_FILE_POST_D, MP4_FILE_POST_D]:
+            if f.exists():
+                size_kb = f.stat().st_size // 1024
+                print(f"  {f}  ({size_kb} KB)")
+
+    elif args.verify_post_d:
+        ok = verify_recording(CAST_FILE_POST_D, checks=_POST_D_VERIFY_CHECKS)
+        sys.exit(0 if ok else 1)
+
+    elif args.test_post_d_acts:
+        # Run Post D acts without timing delays, with date-shifted fixtures.
+        create_synthetic_data()
+        dated_dir = create_dated_demo_dir()
+        try:
+            os.environ["CLAUDE_CONFIG_DIR"] = str(dated_dir)
+            DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir), "NO_COLOR": "1"}
+            run_post_d_acts()
         finally:
             shutil.rmtree(dated_dir, ignore_errors=True)
 
