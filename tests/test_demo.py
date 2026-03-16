@@ -1722,12 +1722,12 @@ class TestDemoFree:
     def test_post_a_acts_full_pathway(self) -> None:
         """Run all Post A demo acts end-to-end and verify expected output."""
         result = subprocess.run(
-            [sys.executable, str(Path(__file__)), "--test-post-a-acts"],
+            [sys.executable, str(Path(__file__)), "--post", "a", "--test-acts"],
             capture_output=True, timeout=120,
             encoding="utf-8", errors="replace",
         )
         combined = (result.stdout or "") + (result.stderr or "")
-        assert result.returncode == 0, f"--test-post-a-acts failed (rc={result.returncode}):\n{combined}"
+        assert result.returncode == 0, f"--post a --test-acts failed (rc={result.returncode}):\n{combined}"
         for fragment, desc in _POST_A_VERIFY_CHECKS:
             assert fragment in combined, \
                 f"MISSING: {desc} — expected {fragment!r} in output:\n{combined[-2000:]}"
@@ -1735,12 +1735,12 @@ class TestDemoFree:
     def test_post_b_acts_full_pathway(self) -> None:
         """Run all Post B demo acts (file recovery) end-to-end and verify expected output."""
         result = subprocess.run(
-            [sys.executable, str(Path(__file__)), "--test-post-b-acts"],
+            [sys.executable, str(Path(__file__)), "--post", "b", "--test-acts"],
             capture_output=True, timeout=120,
             encoding="utf-8", errors="replace",
         )
         combined = (result.stdout or "") + (result.stderr or "")
-        assert result.returncode == 0, f"--test-post-b-acts failed (rc={result.returncode}):\n{combined}"
+        assert result.returncode == 0, f"--post b --test-acts failed (rc={result.returncode}):\n{combined}"
         for fragment, desc in _POST_B_VERIFY_CHECKS:
             assert fragment in combined, \
                 f"MISSING: {desc} — expected {fragment!r} in output:\n{combined[-2000:]}"
@@ -1748,12 +1748,12 @@ class TestDemoFree:
     def test_post_d_acts_full_pathway(self) -> None:
         """Run all Post D demo acts (broader audience) end-to-end and verify expected output."""
         result = subprocess.run(
-            [sys.executable, str(Path(__file__)), "--test-post-d-acts"],
+            [sys.executable, str(Path(__file__)), "--post", "d", "--test-acts"],
             capture_output=True, timeout=120,
             encoding="utf-8", errors="replace",
         )
         combined = (result.stdout or "") + (result.stderr or "")
-        assert result.returncode == 0, f"--test-post-d-acts failed (rc={result.returncode}):\n{combined}"
+        assert result.returncode == 0, f"--post d --test-acts failed (rc={result.returncode}):\n{combined}"
         for fragment, desc in _POST_D_VERIFY_CHECKS:
             assert fragment in combined, \
                 f"MISSING: {desc} — expected {fragment!r} in output:\n{combined[-2000:]}"
@@ -1769,65 +1769,87 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    parser.add_argument("--post",      type=str, default=None, metavar="ID",
+                        help="Post ID (a, b, d). Combines with --record/--verify/--run-acts/--test-acts")
     parser.add_argument("--record",    action="store_true", help="Record cast + convert to GIF/MP4")
     parser.add_argument("--gif-only",  action="store_true", help="Convert existing cast to GIF/MP4 only")
     parser.add_argument("--verify",    action="store_true", help="Verify recording contains expected commands")
     parser.add_argument("--run-acts",  action="store_true", help="[internal] Run demo acts inside asciinema")
+    parser.add_argument("--test-acts", action="store_true", help="Run demo acts without timing delays (for pytest)")
     parser.add_argument("--setup",     action="store_true", help="Create synthetic data only")
     parser.add_argument("--cleanup",   action="store_true", help="Remove synthetic data")
-    parser.add_argument("--post-a",          action="store_true",
-                        help="Record Post A (self-improvement loop) cast + GIF/MP4")
-    parser.add_argument("--run-post-a-acts", action="store_true",
-                        help="[internal] Run Post A acts inside asciinema subprocess")
-    parser.add_argument("--verify-post-a",   action="store_true",
-                        help="Verify Post A recording contains expected output")
-    parser.add_argument("--post-b",          action="store_true",
-                        help="Record Post B (file recovery) cast + GIF/MP4")
-    parser.add_argument("--run-post-b-acts", action="store_true",
-                        help="[internal] Run Post B acts inside asciinema subprocess")
-    parser.add_argument("--verify-post-b",   action="store_true",
-                        help="Verify Post B recording contains expected output")
-    parser.add_argument("--test-acts",       action="store_true",
-                        help="Run demo acts without timing delays (for pytest)")
-    parser.add_argument("--test-post-a-acts", action="store_true",
-                        help="Run Post A acts without timing delays (for pytest)")
-    parser.add_argument("--test-post-b-acts", action="store_true",
-                        help="Run Post B acts without timing delays (for pytest)")
-    parser.add_argument("--post-d",          action="store_true",
-                        help="Record Post D (broader audience) cast + GIF/MP4")
-    parser.add_argument("--run-post-d-acts", action="store_true",
-                        help="[internal] Run Post D acts inside asciinema subprocess")
-    parser.add_argument("--verify-post-d",   action="store_true",
-                        help="Verify Post D recording contains expected output")
-    parser.add_argument("--test-post-d-acts", action="store_true",
-                        help="Run Post D acts without timing delays (for pytest)")
     args = parser.parse_args()
+
+    # ── Post registry: maps post ID → config ─────────────────────────────────
+    # Each post has: acts function, output files, verify checks, banner marker,
+    # gif speed. The default demo (no --post) uses None as key.
+    _POST_CONFIGS: dict[str | None, dict] = {
+        None: {
+            "acts_fn": run_demo_acts,
+            "cast": CAST_FILE, "gif": GIF_FILE, "mp4": MP4_FILE,
+            "checks": _VERIFY_CHECKS,
+            "banner_marker": "ai_session_tools",
+            "speed": 0.75,
+            "label": "default",
+        },
+        "a": {
+            "acts_fn": run_post_a_acts,
+            "cast": CAST_FILE_POST_A, "gif": GIF_FILE_POST_A, "mp4": MP4_FILE_POST_A,
+            "checks": _POST_A_VERIFY_CHECKS,
+            "banner_marker": "self-improvement",
+            "speed": 1.0,
+            "label": "Post A",
+        },
+        "b": {
+            "acts_fn": run_post_b_acts,
+            "cast": CAST_FILE_POST_B, "gif": GIF_FILE_POST_B, "mp4": MP4_FILE_POST_B,
+            "checks": _POST_B_VERIFY_CHECKS,
+            "banner_marker": "recover file versions",
+            "speed": 1.0,
+            "label": "Post B",
+        },
+        "d": {
+            "acts_fn": run_post_d_acts,
+            "cast": CAST_FILE_POST_D, "gif": GIF_FILE_POST_D, "mp4": MP4_FILE_POST_D,
+            "checks": _POST_D_VERIFY_CHECKS,
+            "banner_marker": "compacted Claude sessions",
+            "speed": 1.0,
+            "label": "Post D",
+        },
+    }
+
+    post_id = args.post.lower() if args.post else None
+    if args.post and post_id not in _POST_CONFIGS:
+        sys.exit(f"Unknown post ID: {args.post!r}. Valid: {', '.join(k for k in _POST_CONFIGS if k)}")
+
+    cfg = _POST_CONFIGS[post_id]
 
     if args.run_acts:
         # Called by asciinema — run acts with timing delays
         _TIMED = True
-        create_synthetic_data()  # regenerate fixtures if missing (idempotent)
-        run_demo_acts()
+        create_synthetic_data()
+        cfg["acts_fn"]()
 
     elif args.record:
         create_synthetic_data()
-        record()
-        trim_cast_to_banner(CAST_FILE, banner_marker="ai_session_tools")
-        convert_to_gif()
-        convert_to_mp4()
-        verify_recording()
-        print("\nDone! Files:")
-        for f in [CAST_FILE, GIF_FILE, MP4_FILE]:
+        acts_flag = f"--post {post_id} --run-acts" if post_id else "--run-acts"
+        record(cfg["cast"], acts_flag=acts_flag)
+        trim_cast_to_banner(cfg["cast"], banner_marker=cfg["banner_marker"])
+        convert_to_gif(cfg["cast"], cfg["gif"], speed=cfg["speed"])
+        convert_to_mp4(cfg["gif"], cfg["mp4"])
+        verify_recording(cfg["cast"], checks=cfg["checks"])
+        print(f"\nDone! {cfg['label']} files:")
+        for f in [cfg["cast"], cfg["gif"], cfg["mp4"]]:
             if f.exists():
                 size_kb = f.stat().st_size // 1024
                 print(f"  {f}  ({size_kb} KB)")
 
     elif args.gif_only:
-        convert_to_gif()
-        convert_to_mp4()
+        convert_to_gif(cfg["cast"], cfg["gif"], speed=cfg["speed"])
+        convert_to_mp4(cfg["gif"], cfg["mp4"])
 
     elif args.verify:
-        ok = verify_recording()
+        ok = verify_recording(cfg["cast"], checks=cfg["checks"])
         sys.exit(0 if ok else 1)
 
     elif args.setup:
@@ -1842,119 +1864,15 @@ def main() -> None:
         print(f"Removed {DEMO_DIR}")
         print("Note: re-commit tests/aise-demo/ if you removed the fixture directory.")
 
-    elif args.run_post_a_acts:
-        # Called by asciinema subprocess — run Post A acts with timing delays
-        _TIMED = True
-        create_synthetic_data()
-        run_post_a_acts()
-
-    elif args.post_a:
-        create_synthetic_data()
-        record(CAST_FILE_POST_A, acts_flag="--run-post-a-acts")
-        trim_cast_to_banner(CAST_FILE_POST_A)
-        convert_to_gif(CAST_FILE_POST_A, GIF_FILE_POST_A, speed=1.0)
-        convert_to_mp4(GIF_FILE_POST_A, MP4_FILE_POST_A)
-        verify_recording(CAST_FILE_POST_A, checks=_POST_A_VERIFY_CHECKS)
-        print("\nDone! Post A files:")
-        for f in [CAST_FILE_POST_A, GIF_FILE_POST_A, MP4_FILE_POST_A]:
-            if f.exists():
-                size_kb = f.stat().st_size // 1024
-                print(f"  {f}  ({size_kb} KB)")
-
-    elif args.verify_post_a:
-        ok = verify_recording(CAST_FILE_POST_A, checks=_POST_A_VERIFY_CHECKS)
-        sys.exit(0 if ok else 1)
-
     elif args.test_acts:
-        # Run demo acts without timing delays, with date-shifted fixtures.
-        # Used by pytest to verify the full demo pathway produces expected output.
+        # Run acts without timing delays, with date-shifted fixtures (for pytest).
         create_synthetic_data()
         dated_dir = create_dated_demo_dir()
         try:
             os.environ["CLAUDE_CONFIG_DIR"] = str(dated_dir)
-            # Reload DEMO_ENV so _run() uses the dated dir
             global DEMO_ENV
             DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir), "NO_COLOR": "1"}
-            run_demo_acts()
-        finally:
-            shutil.rmtree(dated_dir, ignore_errors=True)
-
-    elif args.test_post_a_acts:
-        # Run Post A acts without timing delays, with date-shifted fixtures.
-        create_synthetic_data()
-        dated_dir = create_dated_demo_dir()
-        try:
-            os.environ["CLAUDE_CONFIG_DIR"] = str(dated_dir)
-            DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir), "NO_COLOR": "1"}
-            run_post_a_acts()
-        finally:
-            shutil.rmtree(dated_dir, ignore_errors=True)
-
-    elif args.run_post_b_acts:
-        # Called by asciinema subprocess — run Post B acts with timing delays
-        _TIMED = True
-        create_synthetic_data()
-        run_post_b_acts()
-
-    elif args.post_b:
-        create_synthetic_data()
-        record(CAST_FILE_POST_B, acts_flag="--run-post-b-acts")
-        trim_cast_to_banner(CAST_FILE_POST_B, banner_marker="recover file versions")
-        convert_to_gif(CAST_FILE_POST_B, GIF_FILE_POST_B, speed=1.0)
-        convert_to_mp4(GIF_FILE_POST_B, MP4_FILE_POST_B)
-        verify_recording(CAST_FILE_POST_B, checks=_POST_B_VERIFY_CHECKS)
-        print("\nDone! Post B files:")
-        for f in [CAST_FILE_POST_B, GIF_FILE_POST_B, MP4_FILE_POST_B]:
-            if f.exists():
-                size_kb = f.stat().st_size // 1024
-                print(f"  {f}  ({size_kb} KB)")
-
-    elif args.verify_post_b:
-        ok = verify_recording(CAST_FILE_POST_B, checks=_POST_B_VERIFY_CHECKS)
-        sys.exit(0 if ok else 1)
-
-    elif args.test_post_b_acts:
-        # Run Post B acts without timing delays, with date-shifted fixtures.
-        create_synthetic_data()
-        dated_dir = create_dated_demo_dir()
-        try:
-            os.environ["CLAUDE_CONFIG_DIR"] = str(dated_dir)
-            DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir), "NO_COLOR": "1"}
-            run_post_b_acts()
-        finally:
-            shutil.rmtree(dated_dir, ignore_errors=True)
-
-    elif args.run_post_d_acts:
-        # Called by asciinema subprocess — run Post D acts with timing delays
-        _TIMED = True
-        create_synthetic_data()
-        run_post_d_acts()
-
-    elif args.post_d:
-        create_synthetic_data()
-        record(CAST_FILE_POST_D, acts_flag="--run-post-d-acts")
-        trim_cast_to_banner(CAST_FILE_POST_D, banner_marker="compacted Claude sessions")
-        convert_to_gif(CAST_FILE_POST_D, GIF_FILE_POST_D, speed=1.0)
-        convert_to_mp4(GIF_FILE_POST_D, MP4_FILE_POST_D)
-        verify_recording(CAST_FILE_POST_D, checks=_POST_D_VERIFY_CHECKS)
-        print("\nDone! Post D files:")
-        for f in [CAST_FILE_POST_D, GIF_FILE_POST_D, MP4_FILE_POST_D]:
-            if f.exists():
-                size_kb = f.stat().st_size // 1024
-                print(f"  {f}  ({size_kb} KB)")
-
-    elif args.verify_post_d:
-        ok = verify_recording(CAST_FILE_POST_D, checks=_POST_D_VERIFY_CHECKS)
-        sys.exit(0 if ok else 1)
-
-    elif args.test_post_d_acts:
-        # Run Post D acts without timing delays, with date-shifted fixtures.
-        create_synthetic_data()
-        dated_dir = create_dated_demo_dir()
-        try:
-            os.environ["CLAUDE_CONFIG_DIR"] = str(dated_dir)
-            DEMO_ENV = {**os.environ, "CLAUDE_CONFIG_DIR": str(dated_dir), "NO_COLOR": "1"}
-            run_post_d_acts()
+            cfg["acts_fn"]()
         finally:
             shutil.rmtree(dated_dir, ignore_errors=True)
 
