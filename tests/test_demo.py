@@ -997,7 +997,7 @@ def run_demo_acts() -> None:
     sys.stdout.flush()
     sys.stdout.write(BANNER + "\n")
     sys.stdout.flush()
-    pause(10.0)  # hold for viewers to read banner
+    pause(3.0)  # hold for viewers to read banner
 
     # All commands use --provider claude to show only synthetic demo sessions,
     # preventing any real session data from the user's system from appearing.
@@ -1060,7 +1060,7 @@ def run_post_a_acts() -> None:
     sys.stdout.flush()
     sys.stdout.write(BANNER_POST_A + "\n")
     sys.stdout.flush()
-    pause(10.0)
+    pause(3.0)
 
     PROV = "--provider claude"
 
@@ -1122,7 +1122,7 @@ def run_post_b_acts() -> None:
     sys.stdout.flush()
     sys.stdout.write(BANNER_POST_B + "\n")
     sys.stdout.flush()
-    pause(10.0)
+    pause(3.0)
 
     PROV = "--provider claude"
 
@@ -1178,7 +1178,7 @@ def run_post_d_acts() -> None:
     sys.stdout.flush()
     sys.stdout.write(BANNER_POST_D + "\n")
     sys.stdout.flush()
-    pause(10.0)
+    pause(3.0)
 
     PROV = "--provider claude"
 
