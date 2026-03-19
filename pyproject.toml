@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai_session_tools"
-version = "0.3.0"
+version = "0.3.1"
 description = "Analyze and organize AI sessions from Claude Code, AI Studio, and Gemini CLI"
 readme = "README.md"
 requires-python = ">=3.12"
