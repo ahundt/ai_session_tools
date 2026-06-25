@@ -1874,7 +1874,7 @@ def _do_messages_corrections(
     project: Optional[str] = None,
     since: Optional[str] = None,   # canonical; after= is a hidden alias
     until: Optional[str] = None,   # canonical; before= is a hidden alias
-    limit: int = 20,
+    limit: Optional[int] = None,   # None -> engine default (config 'defaults.limit', else 0 = all); 0 -> all
     fmt: str = "table",
     pattern_overrides: Optional[List[str]] = None,
     full_uuid: bool = False,
@@ -2840,6 +2840,10 @@ def messages_corrections(
     Each --pattern value is 'CATEGORY:REGEX' where REGEX is a Python regex.
     Multiple --pattern values with the same category are combined (OR logic).
     When any --pattern is given, built-in patterns are NOT used.
+
+    Returns ALL matches by default. On large session corpora this can be
+    thousands of rows (and may overwhelm an LLM consuming the output); pass
+    --limit N, or set config 'defaults.limit', to cap it.
 
     Examples:
         aise messages corrections

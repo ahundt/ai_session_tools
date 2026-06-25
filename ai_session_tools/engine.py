@@ -1591,7 +1591,7 @@ class SessionRecoveryEngine:
         since: Optional[str] = None,   # canonical; --after is a hidden alias
         until: Optional[str] = None,   # canonical; --before is a hidden alias
         patterns: Optional[List[tuple]] = None,
-        limit: int = 50,
+        limit: int = 0,
         session_id_prefix: Optional[str] = None,
     ) -> List[CorrectionMatch]:
         """Find user messages where corrections were given to Claude.
@@ -1602,7 +1602,11 @@ class SessionRecoveryEngine:
             until:    Only messages <= this timestamp (ISO prefix).
             patterns: Override DEFAULT_CORRECTION_PATTERNS. Each tuple is
                       (category, [regex_keyword_strings]).
-            limit:    Max results. Default: 50.
+            limit:    Max results. Default: 0 (all results); pass a positive N to
+                      cap. Matches the '0 = all' convention used across the engine.
+                      The user-facing default is owned by AISession.find_corrections
+                      (config 'defaults.limit', else all), which always passes an
+                      explicit limit here.
 
         Returns:
             List of CorrectionMatch, sorted by timestamp descending.
@@ -3361,14 +3365,15 @@ class AISession:
             project_filter: Filter to sessions in projects matching this substring.
             patterns:       Custom correction pattern list. None = use defaults + any
                             config ``correction_patterns`` additions.
-            limit:          Max results to return. Default: config.defaults.limit or 50.
-                            0 = all results.
+            limit:          Max results to return. Default: config.defaults.limit
+                            or 0 (all results). Pass a positive N to cap.
 
         Returns:
             list[CorrectionMatch] sorted by timestamp descending.
         """
         if limit is None:
-            limit = _engine_cfg_default("limit", 50)
+            # Default to all matches; config 'defaults.limit' may override to cap.
+            limit = _engine_cfg_default("limit", 0)
         # Merge user-supplied patterns from config with defaults (T58)
         _patterns = patterns or _get_correction_patterns()
         # Fast Claude path: direct JSONL scan with mtime pre-filter.
